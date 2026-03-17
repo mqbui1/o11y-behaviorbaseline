@@ -2,41 +2,51 @@
 """
 Tier 2 Behavioral Baseline — Trace Path Drift Detector
 =======================================================
-Detects when execution paths (trace fingerprints) change structurally:
-  - New span sequence never seen before
-  - New service appearing in a trace
-  - Span count deviation beyond threshold
-  - Missing expected span in a known trace type
+Detects structural changes in how services communicate:
+  - New execution paths never seen before
+  - New services appearing in traces
+  - Span count spikes (extra hops)
+  - Expected services going missing
+
+GENERIC — works with any application onboarded to Splunk Observability.
+No hardcoded service names. Services and topology are auto-discovered
+from the live APM service map on every run.
 
 How it works:
-  1. LEARN mode  — sample recent traces, build a baseline fingerprint DB,
-                   save to baseline.json. Run once to establish the baseline.
-  2. WATCH mode  — sample recent traces, compare to baseline, emit a Splunk
-                   custom event for every unknown fingerprint found.
-                   Run on a cron schedule (e.g. every 5 minutes).
+  1. DISCOVER mode — query the live APM topology, print discovered services
+                     and inferred noise patterns. Useful before first learn.
 
-A "fingerprint" is a stable, order-preserving description of a trace's
-execution path built from the parent→child span edges, not raw span IDs.
-It captures structure (which services call which, and what operations) while
-being immune to normal variation in timing and IDs.
+  2. LEARN mode    — sample recent traces across ALL discovered services,
+                     build a baseline fingerprint DB, save to baseline.json.
+                     Run once (or re-run periodically to re-baseline).
+
+  3. WATCH mode    — sample recent traces, compare to baseline, emit a
+                     Splunk custom event for every unknown fingerprint found.
+                     Run on a cron schedule (e.g. every 5 minutes).
+
+  4. SHOW mode     — print current baseline without making API calls.
+
+A "fingerprint" is the ordered parent->child service:operation edge list
+of a trace, hashed to a stable 16-char ID. Immune to timing variation.
+
+Noise filtering:
+  The script auto-detects two categories of noisy self-originated traces
+  and excludes them from both baselining and watch:
+    - Service-registry heartbeats (Eureka /apps/*, Consul /v1/health/*, etc.)
+    - Health-check polls (actuator/health, /health, /ping, /ready, /live)
+  These patterns are universal — no application-specific configuration needed.
 
 Usage:
-  # Build baseline from last 2 hours of traces
-  python trace_fingerprint.py learn
-
-  # Watch mode — compare last 10 minutes to baseline, alert on drift
-  python trace_fingerprint.py watch
-
-  # Watch with custom look-back window
-  python trace_fingerprint.py watch --window-minutes 5
-
-  # Print current baseline (no API calls)
+  python trace_fingerprint.py discover
+  python trace_fingerprint.py learn [--window-minutes 120]
+  python trace_fingerprint.py watch [--window-minutes 10]
   python trace_fingerprint.py show
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
-  SPLUNK_REALM            (default: us0)
-  BASELINE_PATH           (default: ./baseline.json)
+  SPLUNK_REALM              (default: us0)
+  BASELINE_PATH             (default: ./baseline.json)
+  TOPOLOGY_LOOKBACK_HOURS   (default: 48)
 """
 
 import argparse
@@ -55,9 +65,10 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN")
-REALM        = os.environ.get("SPLUNK_REALM", "us0")
-BASELINE_PATH = Path(os.environ.get("BASELINE_PATH", "./baseline.json"))
+ACCESS_TOKEN            = os.environ.get("SPLUNK_ACCESS_TOKEN")
+REALM                   = os.environ.get("SPLUNK_REALM", "us0")
+BASELINE_PATH           = Path(os.environ.get("BASELINE_PATH", "./baseline.json"))
+TOPOLOGY_LOOKBACK_HOURS = int(os.environ.get("TOPOLOGY_LOOKBACK_HOURS", "48"))
 
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN environment variable is required.", file=sys.stderr)
@@ -67,25 +78,51 @@ BASE_URL   = f"https://api.{REALM}.signalfx.com"
 APP_URL    = f"https://app.{REALM}.signalfx.com"
 INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 
-# Services to monitor — matches our known topology
-MONITORED_SERVICES = [
-    "api-gateway",
-    "customers-service",
-    "vets-service",
-    "visits-service",
-]
-
-# Minimum span count for a trace to be worth fingerprinting.
-# 1-span traces (single health checks with no children) are ignored —
-# they carry no structural information.
+# Minimum span count for a trace to be fingerprint-worthy.
 MIN_SPANS = 2
 
-# How many traces to sample per service per run
-TRACES_PER_SERVICE = 50
+# Traces to sample per run (across all discovered services)
+TRACES_SAMPLE_LIMIT = 200
 
-# A fingerprint seen fewer than this many times in the baseline is treated
-# as "rare" and won't suppress alerts if it reappears later.
+# Fingerprints seen fewer times than this in baseline are treated as "rare"
 MIN_BASELINE_OCCURRENCES = 2
+
+# Span count must exceed this multiple of baseline max to fire SPAN_COUNT_SPIKE
+SPAN_COUNT_SPIKE_MULTIPLIER = 2
+
+# ── Noise patterns ─────────────────────────────────────────────────────────────
+# Matched case-insensitively as substrings of a trace's root operation name.
+# Traces matching any of these are excluded from baselining and anomaly detection.
+# These are universal across frameworks — no application-specific config needed.
+
+REGISTRY_PATTERNS: list[str] = [
+    "/eureka/",          # Netflix Eureka
+    "/apps/delta",       # Eureka delta fetch
+    "/apps/",            # Eureka app registration
+    "/register",         # Generic registration
+    "/v1/agent/",        # Consul agent
+    "/v1/health/",       # Consul health
+    "/v1/catalog/",      # Consul catalog
+    "/v1/kv/",           # Consul KV
+    "/registry/",        # Generic registry
+    "service_discovery",
+]
+
+HEALTHCHECK_PATTERNS: list[str] = [
+    "/actuator/health",  # Spring Boot
+    "/health",
+    "/healthz",
+    "/readyz",
+    "/livez",
+    "/ready",
+    "/live",
+    "/ping",
+    "/status",
+    "/_health",
+    "/api/health",
+]
+
+NOISE_PATTERNS: list[str] = REGISTRY_PATTERNS + HEALTHCHECK_PATTERNS
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
@@ -113,16 +150,74 @@ def _qs(params: dict) -> str:
     return ("?" + urllib.parse.urlencode(filtered)) if filtered else ""
 
 
+# ── Topology discovery ─────────────────────────────────────────────────────────
+
+def discover_topology(lookback_hours: int = TOPOLOGY_LOOKBACK_HOURS,
+                      environment: str | None = None) -> dict:
+    """
+    Query the live APM service map. If environment is given, scopes the
+    topology query to that sf_environment value. No service names hardcoded.
+    """
+    now  = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    then = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                         time.gmtime(time.time() - lookback_hours * 3600))
+    body: dict = {"timeRange": f"{then}/{now}"}
+    if environment:
+        body["tagFilters"] = [
+            {"name": "sf_environment", "operator": "equals",
+             "value": environment, "scope": "global"}
+        ]
+    result = _request("POST", "/v2/apm/topology", body)
+    nodes     = (result.get("data") or {}).get("nodes", [])
+    edges_raw = (result.get("data") or {}).get("edges", [])
+
+    services = [n["serviceName"] for n in nodes if not n.get("inferred")]
+    inferred = [n["serviceName"] for n in nodes if n.get("inferred")]
+    edges    = [(e["fromNode"], e["toNode"]) for e in edges_raw
+                if e["fromNode"] != e["toNode"]]
+
+    db_keywords = {
+        "mysql", "postgres", "postgresql", "mongodb", "redis",
+        "cassandra", "elasticsearch", "dynamo", "sqlite", "oracle",
+        "sqlserver", "mssql", "mariadb", "cockroach",
+    }
+    db_nodes = [
+        n for n in inferred
+        if ":" in n or any(k in n.lower() for k in db_keywords)
+    ]
+
+    has_inbound   = {to for (_, to) in edges if to in services}
+    ingress_nodes = [s for s in services if s not in has_inbound]
+
+    return {
+        "services":      services,
+        "inferred":      inferred,
+        "db_nodes":      db_nodes,
+        "edges":         edges,
+        "ingress_nodes": ingress_nodes,
+        "discovered_at": datetime.now(timezone.utc).isoformat(),
+        "environment":   environment,
+    }
+
+
 # ── Splunk APM helpers ─────────────────────────────────────────────────────────
 
 def search_traces(services: list[str], start_ms: int, end_ms: int,
-                  limit: int = TRACES_PER_SERVICE) -> list[dict]:
-    """Search for traces involving any of the given services."""
+                  limit: int = TRACES_SAMPLE_LIMIT,
+                  environment: str | None = None) -> list[dict]:
+    """Search for traces involving any of the given services, optionally scoped
+    to a specific deployment.environment value."""
+    if not services:
+        return []
     tag_filters = [{"tag": "sf_service", "operation": "IN", "values": services}]
+    if environment:
+        tag_filters.append({"tag": "sf_environment", "operation": "IN",
+                             "values": [environment]})
     parameters = {
         "sharedParameters": {
             "timeRangeMillis": {"gte": start_ms, "lte": end_ms},
-            "filters": [{"traceFilter": {"tags": tag_filters}, "filterType": "traceFilter"}],
+            "filters": [{"traceFilter": {"tags": tag_filters},
+                         "filterType": "traceFilter"}],
             "samplingFactor": 100,
         },
         "sectionsParameters": [{"sectionType": "traceExamples", "limit": limit}],
@@ -130,24 +225,31 @@ def search_traces(services: list[str], start_ms: int, end_ms: int,
     start_body = {
         "operationName": "StartAnalyticsSearch",
         "variables": {"parameters": parameters},
-        "query": "query StartAnalyticsSearch($parameters: JSON!) { startAnalyticsSearch(parameters: $parameters) }",
+        "query": ("query StartAnalyticsSearch($parameters: JSON!) "
+                  "{ startAnalyticsSearch(parameters: $parameters) }"),
     }
     start_result = _request("POST", "/v2/apm/graphql?op=StartAnalyticsSearch",
                              start_body, base_url=APP_URL)
-    job_id = ((start_result.get("data") or {}).get("startAnalyticsSearch") or {}).get("jobId")
+    job_id = (
+        ((start_result.get("data") or {}).get("startAnalyticsSearch") or {})
+        .get("jobId")
+    )
     if not job_id:
-        print(f"  [warn] search_traces: no jobId returned", file=sys.stderr)
+        print("  [warn] search_traces: no jobId returned", file=sys.stderr)
         return []
-
     get_body = {
         "operationName": "GetAnalyticsSearch",
         "variables": {"jobId": job_id},
-        "query": "query GetAnalyticsSearch($jobId: ID!) { getAnalyticsSearch(jobId: $jobId) }",
+        "query": ("query GetAnalyticsSearch($jobId: ID!) "
+                  "{ getAnalyticsSearch(jobId: $jobId) }"),
     }
     for _ in range(15):
         result = _request("POST", "/v2/apm/graphql?op=GetAnalyticsSearch",
                           get_body, base_url=APP_URL)
-        sections = ((result.get("data") or {}).get("getAnalyticsSearch") or {}).get("sections", [])
+        sections = (
+            ((result.get("data") or {}).get("getAnalyticsSearch") or {})
+            .get("sections", [])
+        )
         for section in sections:
             if section.get("sectionType") == "traceExamples":
                 examples = section.get("legacyTraceExamples") or []
@@ -164,7 +266,7 @@ def get_trace_full(trace_id: str) -> dict | None:
         " trace(id: $id) {"
         " traceID startTime duration"
         " spans { spanID operationName serviceName parentSpanID"
-        " startTime duration tags { key value } } } }"
+        "         startTime duration tags { key value } } } }"
     )
     gql_body = {
         "operationName": "TraceFullDetailsLessValidation",
@@ -178,14 +280,24 @@ def get_trace_full(trace_id: str) -> dict | None:
 
 def send_custom_event(event_type: str, dimensions: dict, properties: dict) -> None:
     """Emit a custom event to Splunk Observability Cloud."""
-    event = {
+    _request("POST", "/v2/event", {
         "eventType": event_type,
-        "category": "USER_DEFINED",
+        "category":  "USER_DEFINED",
         "dimensions": dimensions,
         "properties": properties,
-        "timestamp": int(time.time() * 1000),
-    }
-    _request("POST", "/v2/event", event)
+        "timestamp":  int(time.time() * 1000),
+    })
+
+
+# ── Noise filtering ────────────────────────────────────────────────────────────
+
+def _is_noise_trace(root_operation: str) -> bool:
+    """
+    Return True if the root operation matches a known noise pattern.
+    Covers service-registry heartbeats and health-check probes universally.
+    """
+    op = root_operation.lower()
+    return any(p in op for p in NOISE_PATTERNS)
 
 
 # ── Fingerprinting ─────────────────────────────────────────────────────────────
@@ -194,56 +306,42 @@ def build_fingerprint(trace: dict) -> dict | None:
     """
     Build a stable structural fingerprint from a trace's span tree.
 
-    The fingerprint captures:
-      - The ordered list of (parent_service:parent_op → child_service:child_op) edges
-        sorted by start time so the sequence is deterministic
-      - The set of unique services involved
-      - The total span count
-      - The root operation (entry point)
-
-    It intentionally ignores:
-      - Span IDs (change every request)
-      - Timestamps and durations (vary normally)
-      - Tag values like HTTP status codes (vary normally)
-
-    Returns None if the trace has fewer than MIN_SPANS spans.
+    Returns None if the trace has fewer than MIN_SPANS spans or is noise.
+    The fingerprint is the ordered parent->child edge sequence hashed to
+    a stable 16-char ID, immune to timing and span ID variation.
     """
     spans = trace.get("spans", [])
     if len(spans) < MIN_SPANS:
         return None
 
-    # Index spans by ID for parent lookup
-    by_id = {s["spanID"]: s for s in spans}
-
-    # Sort spans by start time to get a deterministic traversal order
+    by_id       = {s["spanID"]: s for s in spans}
     sorted_spans = sorted(spans, key=lambda s: s.get("startTime", 0))
 
-    # Build edge list: (parent_service:parent_op → child_service:child_op)
+    root_span = next(
+        (s for s in sorted_spans
+         if not s.get("parentSpanID") or s["parentSpanID"] not in by_id),
+        sorted_spans[0] if sorted_spans else None,
+    )
+    if not root_span:
+        return None
+    if _is_noise_trace(root_span["operationName"]):
+        return None
+
+    root_op = f"{root_span['serviceName']}:{root_span['operationName']}"
+
     edges = []
     for span in sorted_spans:
         parent_id = span.get("parentSpanID")
         if parent_id and parent_id in by_id:
             parent = by_id[parent_id]
-            edge = (
+            edges.append((
                 f"{parent['serviceName']}:{parent['operationName']}",
                 f"{span['serviceName']}:{span['operationName']}",
-            )
-            edges.append(edge)
-
-    # Find root span (no parent in this trace)
-    root_span = next(
-        (s for s in sorted_spans if not s.get("parentSpanID") or s["parentSpanID"] not in by_id),
-        sorted_spans[0] if sorted_spans else None,
-    )
-    root_op = f"{root_span['serviceName']}:{root_span['operationName']}" if root_span else "unknown"
+            ))
 
     services = sorted({s["serviceName"] for s in spans})
-
-    # The canonical path is the edge list in traversal order
-    path = " → ".join(f"{e[0]} → {e[1]}" for e in edges) if edges else root_op
-
-    # Stable hash of the structural path (not including timing)
-    fp_hash = hashlib.sha256(path.encode()).hexdigest()[:16]
+    path     = " -> ".join(f"{a} -> {b}" for a, b in edges) if edges else root_op
+    fp_hash  = hashlib.sha256(path.encode()).hexdigest()[:16]
 
     return {
         "hash":       fp_hash,
@@ -255,28 +353,23 @@ def build_fingerprint(trace: dict) -> dict | None:
     }
 
 
+# ── Anomaly classification ─────────────────────────────────────────────────────
+
 def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
     """
     Compare a fingerprint against the baseline.
-    Returns an anomaly description dict, or None if the trace is normal.
-
-    Anomaly types:
-      NEW_FINGERPRINT     — execution path never seen before
-      NEW_SERVICE         — a service not in any baseline trace for this root op
-      SPAN_COUNT_SPIKE    — span count > 2× the baseline max for this root op
-      MISSING_SERVICE     — a service always present is now absent
+    Returns an anomaly dict or None if the trace matches a known pattern.
     """
     root_op = fp["root_op"]
     fp_hash = fp["hash"]
 
-    # Gather baseline entries for the same entry point
     baseline_for_root = {
         h: info for h, info in baseline.get("fingerprints", {}).items()
         if info.get("root_op") == root_op
-           and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES
+        and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES
     }
 
-    # ── NEW_FINGERPRINT ───────────────────────────────────────────────────────
+    # NEW_FINGERPRINT
     if fp_hash not in baseline.get("fingerprints", {}):
         return {
             "type":    "NEW_FINGERPRINT",
@@ -285,11 +378,10 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
             "fp":      fp,
         }
 
-    # ── NEW_SERVICE ───────────────────────────────────────────────────────────
+    # NEW_SERVICE
     all_baseline_services: set[str] = set()
     for info in baseline_for_root.values():
         all_baseline_services.update(info.get("services", []))
-
     new_services = set(fp["services"]) - all_baseline_services
     if new_services:
         return {
@@ -299,21 +391,21 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
             "fp":      fp,
         }
 
-    # ── SPAN_COUNT_SPIKE ──────────────────────────────────────────────────────
-    baseline_max_spans = max(
+    # SPAN_COUNT_SPIKE
+    baseline_max = max(
         (info.get("span_count", 0) for info in baseline_for_root.values()),
         default=0,
     )
-    if baseline_max_spans > 0 and fp["span_count"] > baseline_max_spans * 2:
+    if baseline_max > 0 and fp["span_count"] > baseline_max * SPAN_COUNT_SPIKE_MULTIPLIER:
         return {
             "type":    "SPAN_COUNT_SPIKE",
-            "message": f"Span count spike for '{root_op}': {fp['span_count']} vs baseline max {baseline_max_spans}",
+            "message": (f"Span count spike for '{root_op}': "
+                        f"{fp['span_count']} vs baseline max {baseline_max}"),
             "detail":  f"Path: {fp['path']}",
             "fp":      fp,
         }
 
-    # ── MISSING_SERVICE ───────────────────────────────────────────────────────
-    # Services that appear in ALL baseline traces for this root op (always-present set)
+    # MISSING_SERVICE
     if baseline_for_root:
         always_present = set.intersection(
             *[set(info.get("services", [])) for info in baseline_for_root.values()]
@@ -322,72 +414,121 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         if missing:
             return {
                 "type":    "MISSING_SERVICE",
-                "message": f"Expected service(s) absent from '{root_op}': {sorted(missing)}",
+                "message": (f"Expected service(s) absent from '{root_op}': "
+                            f"{sorted(missing)}"),
                 "detail":  f"Path: {fp['path']}",
                 "fp":      fp,
             }
 
-    return None  # known-good
+    return None
 
 
 # ── Baseline I/O ───────────────────────────────────────────────────────────────
 
-def load_baseline() -> dict:
-    if BASELINE_PATH.exists():
-        with open(BASELINE_PATH) as f:
+def _baseline_path(environment: str | None) -> Path:
+    """
+    Return the baseline file path, scoped per environment.
+    Examples:
+      environment=None        -> ./baseline.json
+      environment=production  -> ./baseline.production.json
+      environment=staging     -> ./baseline.staging.json
+    This keeps each environment's fingerprint DB isolated so that legitimate
+    topology differences between envs don't suppress each other's alerts.
+    """
+    if environment:
+        return BASELINE_PATH.with_suffix(f".{environment}.json")
+    return BASELINE_PATH
+
+
+def load_baseline(environment: str | None = None) -> dict:
+    path = _baseline_path(environment)
+    if path.exists():
+        with open(path) as f:
             return json.load(f)
-    return {"fingerprints": {}, "created_at": None, "updated_at": None}
+    return {"fingerprints": {}, "topology": None,
+            "created_at": None, "updated_at": None,
+            "environment": environment}
 
 
-def save_baseline(baseline: dict) -> None:
+def save_baseline(baseline: dict, environment: str | None = None) -> None:
+    path = _baseline_path(environment)
     baseline["updated_at"] = datetime.now(timezone.utc).isoformat()
-    with open(BASELINE_PATH, "w") as f:
+    baseline["environment"] = environment
+    with open(path, "w") as f:
         json.dump(baseline, f, indent=2)
-    print(f"  Baseline saved → {BASELINE_PATH}  "
+    print(f"  Baseline saved -> {path}  "
           f"({len(baseline['fingerprints'])} fingerprints)")
 
 
 # ── Commands ───────────────────────────────────────────────────────────────────
 
-def cmd_learn(window_minutes: int = 120) -> None:
-    """
-    Sample traces from the last `window_minutes` minutes and build the
-    baseline fingerprint database.  Merges into any existing baseline.
-    """
-    print(f"[learn] Sampling last {window_minutes}m of traces for services: "
-          f"{MONITORED_SERVICES}")
+def cmd_discover(environment: str | None = None) -> None:
+    """Print auto-discovered services and topology. No files written."""
+    env_desc = f"environment '{environment}'" if environment else "all environments"
+    print(f"[discover] Querying APM topology for {env_desc} "
+          f"(last {TOPOLOGY_LOOKBACK_HOURS}h)...")
+    topo = discover_topology(environment=environment)
 
-    now_ms  = int(time.time() * 1000)
+    print(f"\n  Services ({len(topo['services'])}):")
+    for s in sorted(topo["services"]):
+        role = " [ingress]" if s in topo["ingress_nodes"] else ""
+        print(f"    {s}{role}")
+
+    if topo["inferred"]:
+        print(f"\n  Inferred nodes ({len(topo['inferred'])}):")
+        for n in sorted(topo["inferred"]):
+            tag = " [database]" if n in topo["db_nodes"] else ""
+            print(f"    {n}{tag}")
+
+    print(f"\n  Edges ({len(topo['edges'])}):")
+    for src, dst in sorted(topo["edges"]):
+        print(f"    {src} -> {dst}")
+
+    print(f"\n  Noise patterns applied automatically:")
+    print(f"    Registry:  {REGISTRY_PATTERNS[:4]} ...")
+    print(f"    Health:    {HEALTHCHECK_PATTERNS[:4]} ...")
+
+    env_flag = f" --environment {environment}" if environment else ""
+    print(f"\n  Run 'learn{env_flag}' to build a baseline from these services.")
+
+
+def cmd_learn(window_minutes: int = 120,
+              environment: str | None = None) -> None:
+    """Sample recent traces and build the baseline fingerprint DB."""
+    env_desc = f"environment '{environment}'" if environment else "all environments"
+    print(f"[learn] Discovering services for {env_desc}...")
+    topo = discover_topology(environment=environment)
+    print(f"  Found {len(topo['services'])} services + "
+          f"{len(topo['inferred'])} inferred nodes")
+    print(f"  Sampling last {window_minutes}m of traces...")
+
+    now_ms   = int(time.time() * 1000)
     start_ms = now_ms - window_minutes * 60 * 1000
 
-    traces = search_traces(MONITORED_SERVICES, start_ms, now_ms,
-                           limit=TRACES_PER_SERVICE * len(MONITORED_SERVICES))
+    traces = search_traces(topo["services"], start_ms, now_ms,
+                           environment=environment)
     print(f"  Found {len(traces)} candidate traces")
 
-    baseline = load_baseline()
+    baseline = load_baseline(environment)
     if not baseline["created_at"]:
         baseline["created_at"] = datetime.now(timezone.utc).isoformat()
+    baseline["topology"] = topo
 
     fingerprints = baseline.setdefault("fingerprints", {})
-    new_count = 0
-    updated_count = 0
-    skipped = 0
+    new_count = updated_count = skipped = 0
 
     for meta in traces:
         trace_id = meta.get("traceId")
         if not trace_id:
             continue
-
         trace = get_trace_full(trace_id)
         if not trace:
             skipped += 1
             continue
-
         fp = build_fingerprint(trace)
         if fp is None:
             skipped += 1
             continue
-
         h = fp["hash"]
         if h in fingerprints:
             fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
@@ -404,57 +545,80 @@ def cmd_learn(window_minutes: int = 120) -> None:
                 "first_seen":  datetime.now(timezone.utc).isoformat(),
             }
             new_count += 1
-            print(f"  [new] {fp['root_op']}  →  {fp['path'][:80]}...")
+            print(f"  [new] {fp['root_op']}  ->  "
+                  f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
 
-    print(f"  Summary: {new_count} new fingerprints, "
-          f"{updated_count} updated, {skipped} skipped (too shallow)")
-    save_baseline(baseline)
+    print(f"  Summary: {new_count} new, {updated_count} updated, "
+          f"{skipped} skipped (noise/shallow)")
+    save_baseline(baseline, environment)
 
 
-def cmd_watch(window_minutes: int = 10) -> None:
+def cmd_watch(window_minutes: int = 10,
+              environment: str | None = None) -> None:
     """
-    Sample recent traces and compare to baseline.
-    Emits a Splunk custom event for every unknown fingerprint found.
+    Compare recent traces to baseline. Emits Splunk custom events on drift.
+    Also detects entirely new services that have appeared since baseline was built.
     """
-    print(f"[watch] Checking last {window_minutes}m of traces...")
+    env_desc = f"environment '{environment}'" if environment else "all environments"
+    print(f"[watch] Discovering current topology for {env_desc}...")
+    topo = discover_topology(environment=environment)
 
-    baseline = load_baseline()
+    baseline = load_baseline(environment)
     if not baseline["fingerprints"]:
-        print("  [warn] Baseline is empty — run 'learn' first.", file=sys.stderr)
+        print(f"  [warn] Baseline for {env_desc} is empty — run 'learn' first.",
+              file=sys.stderr)
         sys.exit(1)
+
+    # Alert on new services not present at baseline time
+    baseline_services = set((baseline.get("topology") or {}).get("services", []))
+    current_services  = set(topo["services"]) | set(topo["inferred"])
+    new_topo_services = current_services - baseline_services
+    if new_topo_services:
+        print(f"\n  WARNING: New service(s) in topology since baseline: "
+              f"{sorted(new_topo_services)}")
+        for svc in new_topo_services:
+            try:
+                send_custom_event(
+                    event_type="topology.new_service",
+                    dimensions={"new_service": svc,
+                                "environment": environment or "all"},
+                    properties={
+                        "message":       f"New service '{svc}' appeared in APM topology",
+                        "environment":   environment or "all",
+                        "detector_tier": "tier1",
+                        "detector_name": "topology-new-service",
+                    },
+                )
+                print(f"    Event sent for {svc}")
+            except Exception as e:
+                print(f"    Failed to send event: {e}", file=sys.stderr)
 
     now_ms   = int(time.time() * 1000)
     start_ms = now_ms - window_minutes * 60 * 1000
 
-    traces = search_traces(MONITORED_SERVICES, start_ms, now_ms,
-                           limit=TRACES_PER_SERVICE * len(MONITORED_SERVICES))
+    print(f"\n[watch] Checking last {window_minutes}m across "
+          f"{len(topo['services'])} services ({env_desc})...")
+    traces = search_traces(topo["services"], start_ms, now_ms,
+                           environment=environment)
     print(f"  Found {len(traces)} candidate traces")
 
-    anomalies_found = 0
-    checked = 0
-    skipped = 0
-
-    # Deduplicate — only alert once per unique fingerprint per run
+    anomalies_found = checked = skipped = 0
     alerted_hashes: set[str] = set()
 
     for meta in traces:
         trace_id = meta.get("traceId")
         if not trace_id:
             continue
-
         trace = get_trace_full(trace_id)
         if not trace:
             skipped += 1
             continue
-
         fp = build_fingerprint(trace)
         if fp is None:
             skipped += 1
             continue
 
         checked += 1
-
-        # Skip if we already alerted for this exact fingerprint this run
         if fp["hash"] in alerted_hashes:
             continue
 
@@ -462,14 +626,11 @@ def cmd_watch(window_minutes: int = 10) -> None:
         if anomaly:
             alerted_hashes.add(fp["hash"])
             anomalies_found += 1
-
-            print(f"\n  ⚠  ANOMALY DETECTED")
-            print(f"     Type:    {anomaly['type']}")
-            print(f"     Message: {anomaly['message']}")
-            print(f"     Detail:  {anomaly['detail']}")
-            print(f"     TraceID: {trace_id}")
-
-            # Fire custom event to Splunk
+            print(f"\n  ANOMALY DETECTED")
+            print(f"    Type:    {anomaly['type']}")
+            print(f"    Message: {anomaly['message']}")
+            print(f"    Detail:  {anomaly['detail']}")
+            print(f"    TraceID: {trace_id}")
             try:
                 send_custom_event(
                     event_type="trace.path.drift",
@@ -477,55 +638,59 @@ def cmd_watch(window_minutes: int = 10) -> None:
                         "anomaly_type":   anomaly["type"],
                         "root_operation": fp["root_op"],
                         "fp_hash":        fp["hash"],
+                        "environment":    environment or "all",
                     },
                     properties={
-                        "message":        anomaly["message"],
-                        "detail":         anomaly["detail"],
-                        "trace_id":       trace_id,
-                        "path":           fp["path"],
-                        "services":       ",".join(fp["services"]),
-                        "span_count":     fp["span_count"],
-                        "detector_tier":  "tier2",
-                        "detector_name":  "trace-path-drift",
+                        "message":       anomaly["message"],
+                        "detail":        anomaly["detail"],
+                        "trace_id":      trace_id,
+                        "path":          fp["path"],
+                        "services":      ",".join(fp["services"]),
+                        "span_count":    fp["span_count"],
+                        "environment":   environment or "all",
+                        "detector_tier": "tier2",
+                        "detector_name": "trace-path-drift",
                     },
                 )
-                print(f"     ✓ Custom event sent to Splunk (eventType: trace.path.drift)")
+                print(f"    Event sent (trace.path.drift)")
             except Exception as e:
-                print(f"     ✗ Failed to send event: {e}", file=sys.stderr)
+                print(f"    Failed to send event: {e}", file=sys.stderr)
 
     print(f"\n  Checked {checked} traces, {skipped} skipped, "
           f"{anomalies_found} anomalies detected")
-
     if anomalies_found == 0:
-        print("  ✓ All trace paths match baseline")
+        print("  All trace paths match baseline")
 
 
-def cmd_show() -> None:
-    """Print the current baseline fingerprints to stdout."""
-    baseline = load_baseline()
+def cmd_show(environment: str | None = None) -> None:
+    """Print current baseline fingerprints."""
+    env_desc = f"environment '{environment}'" if environment else "all environments"
+    baseline = load_baseline(environment)
     fps = baseline.get("fingerprints", {})
     if not fps:
-        print("Baseline is empty — run 'learn' first.")
+        print(f"Baseline for {env_desc} is empty — run 'learn' first.")
         return
 
-    print(f"Baseline fingerprints ({len(fps)} total)")
+    print(f"Baseline ({env_desc}): {len(fps)} fingerprints")
     print(f"  Created:  {baseline.get('created_at', 'unknown')}")
     print(f"  Updated:  {baseline.get('updated_at', 'unknown')}")
+    topo = baseline.get("topology")
+    if topo:
+        print(f"  Services: {sorted(topo.get('services', []))}")
     print()
 
-    # Group by root operation for readable output
     by_root: dict[str, list] = defaultdict(list)
     for info in fps.values():
         by_root[info["root_op"]].append(info)
 
     for root_op, entries in sorted(by_root.items()):
-        print(f"  {root_op}  ({len(entries)} pattern{'s' if len(entries) != 1 else ''})")
+        print(f"  {root_op}  ({len(entries)} pattern{'s' if len(entries)!=1 else ''})")
         for e in sorted(entries, key=lambda x: -x.get("occurrences", 0)):
-            services = ", ".join(e.get("services", []))
-            print(f"    [{e['hash']}]  seen={e.get('occurrences', '?')}  "
-                  f"spans={e.get('span_count', '?')}  services=[{services}]")
-            path_short = e.get("path", "")[:100]
-            print(f"      {path_short}{'...' if len(e.get('path','')) > 100 else ''}")
+            svcs = ", ".join(e.get("services", []))
+            print(f"    [{e['hash']}]  seen={e.get('occurrences','?')}  "
+                  f"spans={e.get('span_count','?')}  services=[{svcs}]")
+            path = e.get("path", "")
+            print(f"      {path[:100]}{'...' if len(path) > 100 else ''}")
         print()
 
 
@@ -533,28 +698,35 @@ def cmd_show() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tier 2 trace path drift detector for Splunk Observability Cloud"
+        description="Generic trace path drift detector for Splunk Observability Cloud"
+    )
+    parser.add_argument(
+        "--environment", type=str, default=None,
+        help=(
+            "APM environment to scope to (deployment.environment / sf_environment). "
+            "Determines both the topology query scope and which baseline file is used "
+            "(baseline.<environment>.json). Omit to cover all environments."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
-
+    sub.add_parser("discover", help="Auto-discover services from live topology")
     p_learn = sub.add_parser("learn", help="Build baseline from recent traces")
-    p_learn.add_argument("--window-minutes", type=int, default=120,
-                         help="How far back to sample traces (default: 120)")
-
+    p_learn.add_argument("--window-minutes", type=int, default=120)
     p_watch = sub.add_parser("watch", help="Compare recent traces to baseline")
-    p_watch.add_argument("--window-minutes", type=int, default=10,
-                         help="Look-back window in minutes (default: 10)")
-
+    p_watch.add_argument("--window-minutes", type=int, default=10)
     sub.add_parser("show", help="Print current baseline")
 
     args = parser.parse_args()
+    env = args.environment
 
-    if args.command == "learn":
-        cmd_learn(args.window_minutes)
+    if args.command == "discover":
+        cmd_discover(environment=env)
+    elif args.command == "learn":
+        cmd_learn(args.window_minutes, environment=env)
     elif args.command == "watch":
-        cmd_watch(args.window_minutes)
+        cmd_watch(args.window_minutes, environment=env)
     elif args.command == "show":
-        cmd_show()
+        cmd_show(environment=env)
 
 
 if __name__ == "__main__":
