@@ -1,5 +1,8 @@
-# Once: build baseline from last 2 hours of traces
-python trace_fingerprint.py learn --window-minutes 120
+# Daily cron — fully automatic
+0 6 * * * cd /opt/behavioral-baseline && python onboard.py --auto >> onboard.log 2>&1
 
-# Every 5 minutes via cron: check for drift
-*/5 * * * * python trace_fingerprint.py watch --window-minutes 5
+# After a deployment in CI/CD
+python onboard.py --environment $DEPLOY_ENV
+
+# Preview without changes
+python onboard.py --auto --dry-run
