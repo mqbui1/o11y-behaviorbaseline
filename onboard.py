@@ -46,6 +46,7 @@ Required env vars:
 Required files in same directory:
   provision_detectors.py
   trace_fingerprint.py
+  error_fingerprint.py
 """
 
 import argparse
@@ -272,6 +273,15 @@ def build_baseline(env: str | None, window_minutes: int = 120,
     return _run("trace_fingerprint.py", args, dry_run=dry_run)
 
 
+def build_error_baseline(env: str | None, window_minutes: int = 120,
+                          dry_run: bool = False) -> bool:
+    """Run error_fingerprint.py learn for a specific environment."""
+    args = ["learn", f"--window-minutes={window_minutes}"]
+    if env:
+        args = ["--environment", env] + args
+    return _run("error_fingerprint.py", args, dry_run=dry_run)
+
+
 def teardown_environment(env: str | None, dry_run: bool = False) -> bool:
     """Run provision_detectors.py --teardown for a specific environment."""
     args = ["--teardown"]
@@ -360,25 +370,30 @@ def run(
         action = "new" if env in new_envs else "updated"
         print(f"\n  [{action}] {label}")
 
-        ok_provision = provision_environment(env, dry_run=dry_run)
-        ok_baseline  = build_baseline(env, window_minutes=learn_window,
-                                      dry_run=dry_run)
+        ok_provision      = provision_environment(env, dry_run=dry_run)
+        ok_baseline       = build_baseline(env, window_minutes=learn_window,
+                                           dry_run=dry_run)
+        ok_error_baseline = build_error_baseline(env, window_minutes=learn_window,
+                                                  dry_run=dry_run)
 
         if not dry_run:
             env_key = env or "__none__"
             state.setdefault("environments", {})[env_key] = {
-                "services":          sorted(current_envs.get(env, [])),
-                "provisioned_at":    ts,
-                "baseline_built_at": ts if ok_baseline else None,
-                "last_action":       action,
-                "provision_ok":      ok_provision,
-                "baseline_ok":       ok_baseline,
+                "services":                sorted(current_envs.get(env, [])),
+                "provisioned_at":          ts,
+                "baseline_built_at":       ts if ok_baseline else None,
+                "error_baseline_built_at": ts if ok_error_baseline else None,
+                "last_action":             action,
+                "provision_ok":            ok_provision,
+                "baseline_ok":             ok_baseline,
+                "error_baseline_ok":       ok_error_baseline,
             }
             send_audit_event("behavioral_baseline.onboarded", {
-                "environment":   label,
-                "action":        action,
-                "provision_ok":  str(ok_provision),
-                "baseline_ok":   str(ok_baseline),
+                "environment":        label,
+                "action":             action,
+                "provision_ok":       str(ok_provision),
+                "baseline_ok":        str(ok_baseline),
+                "error_baseline_ok":  str(ok_error_baseline),
             })
 
     if teardown_removed:
