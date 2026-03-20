@@ -10,6 +10,7 @@ No hardcoded service names. Everything is derived from the live service map.
 What gets created:
   Tier 1a — New caller of any inferred database node          [Critical]
   Tier 1b — Call volume spike on any ingress service          [Major]
+  Tier 1c — Missing edge (known DB caller goes silent)        [Major]
   Tier 3  — Error rate spike on any DB-calling service        [Major]
   Tier 4  — p99 latency drift on any DB-calling service       [Warning]
 
@@ -225,6 +226,30 @@ def program_error_rate_spike(db_callers: list[str],
     )
 
 
+def program_missing_db_caller(db_node: str, caller: str,
+                               environment: str | None = None) -> str:
+    """
+    Tier 1c: Fire when a known DB caller goes silent — i.e. its span count
+    drops to zero for a sustained window. This catches:
+      - circuit breakers opening
+      - service being removed or renamed
+      - DB connection pool exhaustion causing fallback paths
+    Fires when a 30-minute mean drops to 0 after a non-zero 6-hour mean.
+    """
+    env_f    = _env_filter_expr(environment)
+    svc_f    = f"filter('sf_service', '{db_node}')"
+    init_f   = f"filter('sf_initiating_service', '{caller}')"
+    combined = " and ".join(f for f in [env_f, svc_f, init_f] if f)
+    return (
+        f"A = data('spans.count', filter={combined})"
+        f".sum(by=['sf_environment', 'sf_initiating_service']).mean(over='30m')\n"
+        f"B = data('spans.count', filter={combined})"
+        f".sum(by=['sf_environment', 'sf_initiating_service']).mean(over='6h')\n"
+        f"detect(when(A == 0 and B > 0), lasting='30m')"
+        f".publish('{caller} stopped calling {db_node}')"
+    )
+
+
 def program_p99_latency_drift(db_callers: list[str],
                                environment: str | None = None) -> str:
     """
@@ -311,6 +336,35 @@ def build_detector_plan(topo: dict) -> list[dict]:
             "tags": [MANAGED_TAG, "topology-anomaly", "tier1", env_tag,
                      f"svc-{svc}", f"provisioned-{ts}"],
         })
+
+    # ── Tier 1c: one detector per (db_caller, db_node) pair ──────────────────
+    for db_node in topo["db_nodes"]:
+        for caller in topo["db_callers"]:
+            detectors.append({
+                "name": f"[Behavioral Baseline]{env_label} {caller} stopped calling {db_node}",
+                "description": (
+                    f"Tier 1 topology anomaly{env_label}. Fires when {caller} "
+                    f"goes silent — its span count to {db_node} drops to zero "
+                    f"over a 30-minute window after being non-zero in the prior "
+                    f"6 hours. May indicate a circuit breaker opening, service "
+                    f"removal, or DB connection failure."
+                ),
+                "programText": program_missing_db_caller(db_node, caller, env),
+                "rules": [{
+                    "severity":    "Major",
+                    "detectLabel": f"{caller} stopped calling {db_node}",
+                    "name":        f"{caller} missing edge to {db_node}",
+                    "description": (
+                        f"{caller} has stopped sending spans to {db_node}. "
+                        f"Verify the service is healthy and its DB connection "
+                        f"is intact. This may indicate a silent failure."
+                    ),
+                }],
+                "tags": [MANAGED_TAG, "topology-anomaly", "tier1", "missing-edge",
+                         env_tag,
+                         f"db-{db_node.replace(':', '-').replace(' ', '-')}",
+                         f"svc-{caller}", f"provisioned-{ts}"],
+            })
 
     # ── Tier 3: one detector across all DB-calling services ───────────────────
     if topo["db_callers"]:
@@ -447,6 +501,8 @@ def main() -> None:
     print(f"  DB nodes:      {sorted(topo['db_nodes'])}")
     print(f"  Ingress nodes: {sorted(topo['ingress_nodes'])}")
     print(f"  DB callers:    {sorted(topo['db_callers'])}")
+    print(f"  Missing-edge pairs: "
+          f"{[(c, d) for d in topo['db_nodes'] for c in topo['db_callers']]}")
 
     if not topo["services"]:
         print(f"\n  No services found for {env_desc}. "
