@@ -16,11 +16,11 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 | Tier | Script | What it detects | How |
 |------|--------|----------------|-----|
 | 1a | `provision_detectors.py` | New caller of a database node | SignalFlow detector on `spans.count` grouped by `sf_initiating_service` |
-| 1b | `provision_detectors.py` | Call volume spike on ingress services | SignalFlow: 5m mean > 10× 1h mean |
+| 1b | `provision_detectors.py` | Call volume spike on ingress services | SignalFlow: 5m window > 10× same 5m window 1 week ago (`timeshift('1w')`) |
 | 1c | `provision_detectors.py` | Known DB caller goes silent | SignalFlow: 30m mean == 0 after non-zero 6h mean |
 | 2  | `trace_fingerprint.py`  | New or changed execution paths | SHA-256 of ordered parent→child span edge sequence |
 | 3  | `error_fingerprint.py`  | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
-| 4  | `provision_detectors.py` | p99 latency drift | SignalFlow: 15m mean > 2× 1h mean |
+| 4  | `provision_detectors.py` | p99 latency drift | SignalFlow: 15m window > 2× same 15m window 1 week ago (`timeshift('1w')`) |
 | C  | `correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 1/2/3 custom events by service within a time window |
 
 **Tiers 1, 4** run as persistent Splunk detectors (always-on SignalFlow).
@@ -119,6 +119,36 @@ python provision_detectors.py --environment petclinicmbtest --teardown
 
 ---
 
+## Deployment-aware correlation
+
+When anomalies fire shortly after a deployment, they are likely caused by the intentional change rather than an incident. `correlate.py` detects this automatically when you instrument your CI/CD pipeline with `notify_deployment.py`.
+
+**Emit a deployment event from CI/CD:**
+
+```bash
+# Minimal
+python notify_deployment.py --service api-gateway --environment production
+
+# Full context (recommended)
+python notify_deployment.py \
+    --service api-gateway customers-service \
+    --environment production \
+    --version v2.4.1 \
+    --deployer github-actions \
+    --commit $GIT_SHA \
+    --description "Add new payment service integration"
+```
+
+**What happens when correlate.py runs:**
+1. Fetches `deployment.started` events from the last `DEPLOYMENT_CORRELATION_WINDOW_MINUTES` (default: 60)
+2. If a correlated anomaly's service matches a recent deployment, the severity is **downgraded by one level** (Critical→Major, Major→Minor)
+3. The correlated event is annotated with `deployment_version`, `deployment_commit`, `deployment_deployer`, and `deployment_correlated=true`
+4. The console output shows `[deployment-correlated]` next to the service name
+
+This preserves full observability of what changed while preventing high-severity pages for expected behavior.
+
+---
+
 ## Baseline auto-promotion
 
 After an intentional change (new deployment, feature rollout, service rename), Tiers 2 and 3 will alert on the new patterns until the baseline is updated. Auto-promotion handles this without manual intervention.
@@ -184,6 +214,7 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 | `topology.new_service` | 1 | `new_service`, `environment` |
 | `error.signature.drift` | 3 | `anomaly_type`, `service`, `error_type`, `sig_hash`, `environment` |
 | `behavioral_baseline.correlated_anomaly` | C | `service`, `corr_type`, `severity`, `tiers`, `environment` |
+| `deployment.started` | input | `service`, `environment` — emitted by `notify_deployment.py` |
 | `behavioral_baseline.onboarded` | audit | `environment`, `action`, `provision_ok`, `baseline_ok` |
 
 ---
@@ -199,6 +230,7 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 | `ONBOARDING_STATE_PATH` | `./onboarding_state.json` | Onboarding state file location |
 | `TOPOLOGY_LOOKBACK_HOURS` | `48` | How far back topology queries look |
 | `AUTO_PROMOTE_THRESHOLD` | `5` | Watch runs before a new pattern is auto-promoted (0 = disabled) |
+| `DEPLOYMENT_CORRELATION_WINDOW_MINUTES` | `60` | How far back to look for deployment events when annotating correlated anomalies |
 
 ---
 
@@ -206,16 +238,17 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 
 ```
 onboard.py                     ← orchestration controller
-├── provision_detectors.py     ← Tiers 1a, 1b, 1c, 4 (SignalFlow)
+├── provision_detectors.py     ← Tiers 1a, 1b, 1c, 4 (SignalFlow, seasonality-aware)
 ├── trace_fingerprint.py       ← Tier 2 (trace path drift, cron script)
 ├── error_fingerprint.py       ← Tier 3 (error signatures + spikes, cron script)
-└── correlate.py               ← Tier C (cross-tier correlation, cron script)
+├── correlate.py               ← Tier C (cross-tier correlation + deployment context)
+└── notify_deployment.py       ← CI/CD hook (emits deployment.started events)
 
 Splunk Observability
 ├── APM topology API           ← service discovery (all scripts)
 ├── APM trace search API       ← trace sampling (fingerprint scripts)
 ├── SignalFlow detector API    ← detector CRUD (provision_detectors.py)
-└── Custom events API          ← anomaly alerting (fingerprint scripts)
+└── Custom events API          ← anomaly alerting + deployment events
 ```
 
 ---
@@ -224,4 +257,4 @@ Splunk Observability
 
 - **MetricSets required for Tiers 1/4**: SignalFlow detectors read `spans.count` and `service.request.duration.ns.p99` which are derived metrics. Enable APM MetricSets in Splunk Observability settings for your services.
 - **Auto-promotion lag**: New patterns after a deployment will alert for up to `AUTO_PROMOTE_THRESHOLD × cron_interval` minutes before being silenced. Use `promote` immediately after a known deployment to skip the wait, or run `learn` for large-scale topology changes.
-- **No seasonality awareness**: The SignalFlow detectors compare rolling windows (5m vs 1h) which does not account for traffic patterns that legitimately vary by time of day or day of week.
+- **Seasonality requires 1 week of history**: Tiers 1b and 4 use `timeshift('1w')` for seasonality-aware comparison. The first week after provisioning will fall back to a flat baseline (no prior week data exists yet). This is expected behavior.
