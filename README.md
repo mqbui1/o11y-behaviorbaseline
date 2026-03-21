@@ -107,11 +107,47 @@ python error_fingerprint.py --environment petclinicmbtest learn --window-minutes
 python trace_fingerprint.py --environment petclinicmbtest show
 python error_fingerprint.py --environment petclinicmbtest show
 
+# Promote fingerprints/signatures after intentional changes (see below)
+python trace_fingerprint.py --environment petclinicmbtest promote
+python error_fingerprint.py --environment petclinicmbtest promote
+
 # Provision / teardown SignalFlow detectors
 python provision_detectors.py --environment petclinicmbtest --dry-run
 python provision_detectors.py --environment petclinicmbtest
 python provision_detectors.py --environment petclinicmbtest --teardown
 ```
+
+---
+
+## Baseline auto-promotion
+
+After an intentional change (new deployment, feature rollout, service rename), Tiers 2 and 3 will alert on the new patterns until the baseline is updated. Auto-promotion handles this without manual intervention.
+
+**How it works:**
+
+When `watch` detects a new trace path or error signature, it records the pattern as *pending* in the baseline with a `watch_hits` counter. Each subsequent watch run that sees the same pattern increments the counter. Once the counter reaches `AUTO_PROMOTE_THRESHOLD` (default: 5), the pattern is automatically promoted — it becomes part of the baseline and stops generating alerts.
+
+At the default 5-minute cron interval, a new pattern is silenced after ~25 minutes of consistent observation.
+
+**Manual promotion** — use this immediately after a known deployment to skip the waiting period:
+
+```bash
+# Promote all pending patterns (seen at least once but not yet auto-promoted)
+python trace_fingerprint.py --environment petclinicmbtest promote
+python error_fingerprint.py --environment petclinicmbtest promote
+
+# Promote specific hashes (copy from watch output or show)
+python trace_fingerprint.py --environment petclinicmbtest promote abc123def456...
+python error_fingerprint.py --environment petclinicmbtest promote abc123def456... 789xyz...
+```
+
+**Configuration:**
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `AUTO_PROMOTE_THRESHOLD` | `5` | Watch runs before a new pattern is auto-promoted. Set to `0` to disable. |
+
+**When to re-run `learn` instead:** If you make a large structural change (many services added/removed, major refactor), a full `learn` rebuild is faster than waiting for auto-promotion to accumulate on dozens of new patterns.
 
 ---
 
@@ -162,6 +198,7 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 | `ERROR_BASELINE_PATH` | `./error_baseline.json` | Error signature baseline location |
 | `ONBOARDING_STATE_PATH` | `./onboarding_state.json` | Onboarding state file location |
 | `TOPOLOGY_LOOKBACK_HOURS` | `48` | How far back topology queries look |
+| `AUTO_PROMOTE_THRESHOLD` | `5` | Watch runs before a new pattern is auto-promoted (0 = disabled) |
 
 ---
 
@@ -186,5 +223,5 @@ Splunk Observability
 ## Limitations
 
 - **MetricSets required for Tiers 1/4**: SignalFlow detectors read `spans.count` and `service.request.duration.ns.p99` which are derived metrics. Enable APM MetricSets in Splunk Observability settings for your services.
-- **Static baselines**: `trace_fingerprint.py` and `error_fingerprint.py` baselines are point-in-time snapshots. Re-run `learn` after intentional topology changes (new feature deployments, service renames) to prevent false positives.
+- **Auto-promotion lag**: New patterns after a deployment will alert for up to `AUTO_PROMOTE_THRESHOLD × cron_interval` minutes before being silenced. Use `promote` immediately after a known deployment to skip the wait, or run `learn` for large-scale topology changes.
 - **No seasonality awareness**: The SignalFlow detectors compare rolling windows (5m vs 1h) which does not account for traffic patterns that legitimately vary by time of day or day of week.
