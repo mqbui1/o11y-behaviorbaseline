@@ -1,0 +1,450 @@
+{
+  "fingerprints": {
+    "68664c9584c9030c": {
+      "hash": "68664c9584c9030c",
+      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> customers-service:GET /owners/{ownerId} -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> visits-service:GET /pets/visits -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
+      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
+      "services": [
+        "api-gateway",
+        "customers-service",
+        "visits-service"
+      ],
+      "span_count": 12,
+      "edge_count": 11,
+      "occurrences": 7,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:21:18.621037+00:00"
+    },
+    "c2f029952cdb14ba": {
+      "hash": "c2f029952cdb14ba",
+      "path": "admin-server:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:21:26.990262+00:00"
+    },
+    "b9afb45b1b438c28": {
+      "hash": "b9afb45b1b438c28",
+      "path": "visits-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "visits-service:PUT",
+      "services": [
+        "discovery-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:21:36.090051+00:00"
+    },
+    "274259c13efab1d4": {
+      "hash": "274259c13efab1d4",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /petTypes -> customers-service:GET /petTypes -> customers-service:PetRepository.findPetTypes -> customers-service:PetRepository.findPetTypes -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 6,
+      "edge_count": 5,
+      "occurrences": 7,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:21:39.067628+00:00"
+    },
+    "d9a41484866d1587": {
+      "hash": "d9a41484866d1587",
+      "path": "admin-server:GET -> vets-service:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:21:48.490994+00:00"
+    },
+    "53479a40e442b4d2": {
+      "hash": "53479a40e442b4d2",
+      "path": "vets-service:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "vets-service:GET",
+      "services": [
+        "discovery-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:22:06.320502+00:00"
+    },
+    "31ddc9717bc4e16a": {
+      "hash": "31ddc9717bc4e16a",
+      "path": "api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /vets -> vets-service:GET /vets -> vets-service:VetRepository.findAll -> vets-service:VetRepository.findAll -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT petclinic.vets -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT petclinic -> vets-service:VetRepository.findAll -> vets-service:Transaction.commit",
+      "root_op": "api-gateway:GET vets-service",
+      "services": [
+        "api-gateway",
+        "vets-service"
+      ],
+      "span_count": 8,
+      "edge_count": 7,
+      "occurrences": 2,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:22:09.725908+00:00"
+    },
+    "3ebf4d14913b6aa5": {
+      "hash": "3ebf4d14913b6aa5",
+      "path": "api-gateway:PUT customers-service -> api-gateway:PUT -> api-gateway:PUT -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.findById -> customers-service:PetRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.findById -> customers-service:Transaction.commit -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.findPetTypeById -> customers-service:PetRepository.findPetTypeById -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.save -> customers-service:PetRepository.save -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.save -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:PUT customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 16,
+      "edge_count": 15,
+      "occurrences": 4,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:22:11.498662+00:00"
+    },
+    "81dc7e816594ec49": {
+      "hash": "81dc7e816594ec49",
+      "path": "admin-server:GET -> api-gateway:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "api-gateway"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:22:13.319018+00:00"
+    },
+    "2b56da2c75201db7": {
+      "hash": "2b56da2c75201db7",
+      "path": "admin-server:GET -> visits-service:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:22:28.914641+00:00"
+    },
+    "fec58438476b84c3": {
+      "hash": "fec58438476b84c3",
+      "path": "discovery-server:POST -> discovery-server:POST /{version}/peerreplication/batch",
+      "root_op": "discovery-server:POST",
+      "services": [
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:22:57.600986+00:00"
+    },
+    "6a1bfdfd56412abe": {
+      "hash": "6a1bfdfd56412abe",
+      "path": "api-gateway:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "api-gateway:PUT",
+      "services": [
+        "api-gateway",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:23:14.154256+00:00"
+    },
+    "f3b9960369c3735a": {
+      "hash": "f3b9960369c3735a",
+      "path": "vets-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "vets-service:PUT",
+      "services": [
+        "discovery-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:25:08.595071+00:00"
+    },
+    "5c9790ab7205061f": {
+      "hash": "5c9790ab7205061f",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners -> customers-service:GET /owners -> customers-service:OwnerRepository.findAll -> customers-service:OwnerRepository.findAll -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic.owners -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findAll -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 8,
+      "edge_count": 7,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:25:23.295804+00:00"
+    },
+    "b304cb2af8556d5b": {
+      "hash": "b304cb2af8556d5b",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/*/pets/{petId} -> customers-service:GET /owners/*/pets/{petId} -> customers-service:PetRepository.findById -> customers-service:PetRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.findById -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 8,
+      "edge_count": 7,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:28:08.122535+00:00"
+    },
+    "73fdbe1ea5853313": {
+      "hash": "73fdbe1ea5853313",
+      "path": "customers-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "customers-service:PUT",
+      "services": [
+        "customers-service",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:28:40.207505+00:00"
+    },
+    "ca038370769c1351": {
+      "hash": "ca038370769c1351",
+      "path": "admin-server:GET -> customers-service:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "customers-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:29:26.341379+00:00"
+    },
+    "0801202ac1bb60e3": {
+      "hash": "0801202ac1bb60e3",
+      "path": "visits-service:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "visits-service:GET",
+      "services": [
+        "discovery-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:30:51.638008+00:00"
+    },
+    "da41c8d4dbea5aef": {
+      "hash": "da41c8d4dbea5aef",
+      "path": "api-gateway:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "api-gateway:GET",
+      "services": [
+        "api-gateway",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:41:49.451014+00:00"
+    },
+    "40845ddcd911de64": {
+      "hash": "40845ddcd911de64",
+      "path": "customers-service:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "customers-service:GET",
+      "services": [
+        "customers-service",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:42:57.403326+00:00"
+    }
+  },
+  "topology": {
+    "services": [
+      "api-gateway",
+      "customers-service",
+      "discovery-server",
+      "visits-service",
+      "vets-service",
+      "config-server"
+    ],
+    "inferred": [
+      "mysql:petclinic",
+      "localhost:8888",
+      "config-server:8888"
+    ],
+    "db_nodes": [
+      "mysql:petclinic",
+      "localhost:8888",
+      "config-server:8888"
+    ],
+    "edges": [
+      [
+        "api-gateway",
+        "config-server"
+      ],
+      [
+        "api-gateway",
+        "config-server:8888"
+      ],
+      [
+        "api-gateway",
+        "customers-service"
+      ],
+      [
+        "api-gateway",
+        "discovery-server"
+      ],
+      [
+        "api-gateway",
+        "localhost:8888"
+      ],
+      [
+        "api-gateway",
+        "vets-service"
+      ],
+      [
+        "api-gateway",
+        "visits-service"
+      ],
+      [
+        "customers-service",
+        "config-server"
+      ],
+      [
+        "customers-service",
+        "config-server:8888"
+      ],
+      [
+        "customers-service",
+        "discovery-server"
+      ],
+      [
+        "customers-service",
+        "localhost:8888"
+      ],
+      [
+        "customers-service",
+        "mysql:petclinic"
+      ],
+      [
+        "discovery-server",
+        "config-server"
+      ],
+      [
+        "discovery-server",
+        "config-server:8888"
+      ],
+      [
+        "discovery-server",
+        "localhost:8888"
+      ],
+      [
+        "vets-service",
+        "config-server"
+      ],
+      [
+        "vets-service",
+        "config-server:8888"
+      ],
+      [
+        "vets-service",
+        "discovery-server"
+      ],
+      [
+        "vets-service",
+        "localhost:8888"
+      ],
+      [
+        "vets-service",
+        "mysql:petclinic"
+      ],
+      [
+        "visits-service",
+        "config-server"
+      ],
+      [
+        "visits-service",
+        "discovery-server"
+      ],
+      [
+        "visits-service",
+        "localhost:8888"
+      ],
+      [
+        "visits-service",
+        "mysql:petclinic"
+      ]
+    ],
+    "ingress_nodes": [
+      "api-gateway"
+    ],
+    "discovered_at": "2026-03-21T05:21:15.628924+00:00",
+    "environment": "petclinicmbtest"
+  },
+  "created_at": "2026-03-21T05:21:16.869881+00:00",
+  "updated_at": "2026-03-21T05:43:31.947764+00:00",
+  "environment": "petclinicmbtest"
+}

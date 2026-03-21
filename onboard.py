@@ -83,8 +83,9 @@ if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN environment variable is required.", file=sys.stderr)
     sys.exit(1)
 
-BASE_URL = f"https://api.{REALM}.signalfx.com"
-APP_URL  = f"https://app.{REALM}.signalfx.com"
+BASE_URL   = f"https://api.{REALM}.signalfx.com"
+APP_URL    = f"https://app.{REALM}.signalfx.com"
+INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 
 SCRIPT_DIR = Path(__file__).parent
 
@@ -300,7 +301,7 @@ def send_audit_event(event_type: str, properties: dict) -> None:
             "dimensions": {"realm": REALM},
             "properties": properties,
             "timestamp":  int(time.time() * 1000),
-        })
+        }, base_url=INGEST_URL)
     except Exception as e:
         print(f"    [warn] Could not send audit event: {e}", file=sys.stderr)
 

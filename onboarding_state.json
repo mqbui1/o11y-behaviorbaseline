@@ -1,0 +1,15 @@
+{
+  "environments": {
+    "petclinicmbtest": {
+      "services": [],
+      "provisioned_at": "2026-03-21T05:21:02.283386+00:00",
+      "baseline_built_at": "2026-03-21T05:21:02.283386+00:00",
+      "error_baseline_built_at": "2026-03-21T05:21:02.283386+00:00",
+      "last_action": "new",
+      "provision_ok": true,
+      "baseline_ok": true,
+      "error_baseline_ok": true
+    }
+  },
+  "last_run": "2026-03-21T05:25:51.307885+00:00"
+}
