@@ -73,12 +73,17 @@ TRACES_SAMPLE_LIMIT = 200
 # Signatures seen fewer times than this in baseline are "rare" (lower confidence)
 MIN_BASELINE_OCCURRENCES = 2
 
-# A signature's rate must exceed this multiple of its baseline rate to fire SPIKE
+# A signature's watch-window count must exceed this multiple of its per-window
+# baseline rate to fire SIGNATURE_SPIKE
 SPIKE_MULTIPLIER = 3
 
-# A signature must have appeared in at least this fraction of baseline windows
-# to be considered "dominant" (used for VANISHED detection)
-DOMINANCE_THRESHOLD = 0.1  # 10% of traces in its service
+# A signature must have been seen at least this many times in baseline to be
+# considered "established" (guards against spiking on rare baseline signatures)
+SPIKE_MIN_BASELINE_OCCURRENCES = 5
+
+# A signature is "dominant" if it accounts for >= this fraction of all errors
+# for its service in the baseline. Used for SIGNATURE_VANISHED detection.
+DOMINANCE_THRESHOLD = 0.2  # 20% of errors in its service
 
 # Top N span operation names to include in the signature path
 SIGNATURE_TOP_FRAMES = 5
@@ -315,8 +320,8 @@ def load_baseline(environment: str | None = None) -> dict:
     if path.exists():
         with open(path) as f:
             return json.load(f)
-    return {"signatures": {}, "created_at": None, "updated_at": None,
-            "environment": environment}
+    return {"signatures": {}, "learn_runs": 0, "created_at": None,
+            "updated_at": None, "environment": environment}
 
 
 def save_baseline(baseline: dict, environment: str | None = None) -> None:
@@ -331,13 +336,17 @@ def save_baseline(baseline: dict, environment: str | None = None) -> None:
 
 # ── Anomaly classification ─────────────────────────────────────────────────────
 
-def classify_signature(sig: dict, baseline: dict) -> dict | None:
+def classify_signature(sig: dict, baseline: dict,
+                        watch_counts: dict[str, int]) -> dict | None:
     """
     Compare an error signature against the baseline.
+
+    watch_counts: {sig_hash: count_in_this_watch_window} — used for spike detection.
     Returns an anomaly dict or None if signature is known and within bounds.
     """
-    sigs     = baseline.get("signatures", {})
-    sig_hash = sig["hash"]
+    sigs        = baseline.get("signatures", {})
+    learn_runs  = max(baseline.get("learn_runs", 1), 1)
+    sig_hash    = sig["hash"]
 
     # NEW_ERROR_SIGNATURE — never seen before
     if sig_hash not in sigs:
@@ -351,7 +360,74 @@ def classify_signature(sig: dict, baseline: dict) -> dict | None:
             "sig":     sig,
         }
 
+    stored = sigs[sig_hash]
+
+    # SIGNATURE_SPIKE — known signature appearing far more than its baseline rate
+    # baseline_rate = average occurrences per learn run
+    # watch_rate    = occurrences in this watch window
+    baseline_occurrences = stored.get("occurrences", 1)
+    if baseline_occurrences >= SPIKE_MIN_BASELINE_OCCURRENCES:
+        baseline_rate = baseline_occurrences / learn_runs
+        watch_rate    = watch_counts.get(sig_hash, 0)
+        if watch_rate > baseline_rate * SPIKE_MULTIPLIER:
+            return {
+                "type":    "SIGNATURE_SPIKE",
+                "message": (f"Error spike in {sig['service']}: "
+                            f"{sig['error_type']} on {sig['operation']} "
+                            f"({watch_rate}× in window vs baseline rate "
+                            f"{baseline_rate:.1f}/run)"),
+                "detail":  (f"watch_count={watch_rate}  "
+                            f"baseline_rate={baseline_rate:.2f}/run  "
+                            f"multiplier={watch_rate/baseline_rate:.1f}×"),
+                "sig":     sig,
+            }
+
     return None
+
+
+def check_vanished_signatures(baseline: dict, watch_counts: dict[str, int],
+                               service_filter: list[str] | None = None
+                               ) -> list[dict]:
+    """
+    Detect dominant error signatures that have completely disappeared in this
+    watch window. A signature is dominant if it accounts for >= DOMINANCE_THRESHOLD
+    of all errors for its service in the baseline.
+
+    Returns a list of anomaly dicts (one per vanished signature).
+    Called once per watch run after all traces are processed.
+    """
+    sigs       = baseline.get("signatures", {})
+    learn_runs = max(baseline.get("learn_runs", 1), 1)
+    anomalies  = []
+
+    # Compute total occurrences per service in baseline
+    service_totals: dict[str, int] = defaultdict(int)
+    for info in sigs.values():
+        service_totals[info["service"]] += info.get("occurrences", 1)
+
+    for sig_hash, info in sigs.items():
+        service = info["service"]
+        if service_filter and service not in service_filter:
+            continue
+
+        total = service_totals.get(service, 1)
+        fraction = info.get("occurrences", 1) / total
+
+        # Only flag dominant signatures that are now absent from the watch window
+        if fraction >= DOMINANCE_THRESHOLD and sig_hash not in watch_counts:
+            baseline_rate = info.get("occurrences", 1) / learn_runs
+            anomalies.append({
+                "type":    "SIGNATURE_VANISHED",
+                "message": (f"Dominant error signature disappeared in {service}: "
+                            f"{info['error_type']} on {info['operation']} "
+                            f"(was {fraction*100:.0f}% of service errors)"),
+                "detail":  (f"baseline_rate={baseline_rate:.2f}/run  "
+                            f"service_share={fraction*100:.0f}%  "
+                            f"call_path={info.get('call_path') or 'root'}"),
+                "sig":     info,
+            })
+
+    return anomalies
 
 
 # ── Commands ───────────────────────────────────────────────────────────────────
@@ -425,6 +501,9 @@ def cmd_learn(window_minutes: int = 120,
                 print(f"  [new] {sig['service']}  "
                       f"{sig['error_type']} on {sig['operation']}")
 
+    # Track number of learn runs — used to compute per-run baseline rate
+    baseline["learn_runs"] = baseline.get("learn_runs", 0) + 1
+
     print(f"  Summary: {new_count} new signatures, {updated_count} updated, "
           f"{skipped} traces skipped (no error spans)")
     save_baseline(baseline, environment)
@@ -453,7 +532,13 @@ def cmd_watch(window_minutes: int = 10,
 
     anomalies_found = checked = skipped = 0
     alerted_hashes: set[str] = set()
+    # Count how many times each signature hash appears in this watch window
+    watch_counts: dict[str, int] = defaultdict(int)
+    # Track which services appeared in this window (for vanished check)
+    seen_services: set[str] = set()
 
+    # First pass: collect all signatures and counts
+    all_trace_sigs: list[tuple[str, list[dict]]] = []
     for meta in traces:
         trace_id = meta.get("traceId")
         if not trace_id:
@@ -462,17 +547,22 @@ def cmd_watch(window_minutes: int = 10,
         if not trace:
             skipped += 1
             continue
-
         sigs = build_error_signatures(trace)
         if not sigs:
             skipped += 1
             continue
-
         checked += 1
+        for sig in sigs:
+            watch_counts[sig["hash"]] += 1
+            seen_services.add(sig["service"])
+        all_trace_sigs.append((trace_id, sigs))
+
+    # Second pass: classify anomalies now that watch_counts is fully populated
+    for trace_id, sigs in all_trace_sigs:
         for sig in sigs:
             if sig["hash"] in alerted_hashes:
                 continue
-            anomaly = classify_signature(sig, baseline)
+            anomaly = classify_signature(sig, baseline, watch_counts)
             if anomaly:
                 alerted_hashes.add(sig["hash"])
                 anomalies_found += 1
@@ -508,8 +598,44 @@ def cmd_watch(window_minutes: int = 10,
                 except Exception as e:
                     print(f"    Failed to send event: {e}", file=sys.stderr)
 
+    # Third pass: check for vanished dominant signatures
+    vanished = check_vanished_signatures(
+        baseline, watch_counts,
+        service_filter=list(seen_services) if seen_services else None,
+    )
+    for anomaly in vanished:
+        sig = anomaly["sig"]
+        anomalies_found += 1
+        print(f"\n  ANOMALY DETECTED")
+        print(f"    Type:    {anomaly['type']}")
+        print(f"    Message: {anomaly['message']}")
+        print(f"    Detail:  {anomaly['detail']}")
+        try:
+            send_custom_event(
+                event_type="error.signature.drift",
+                dimensions={
+                    "anomaly_type": anomaly["type"],
+                    "service":      sig["service"],
+                    "error_type":   sig["error_type"],
+                    "sig_hash":     sig["hash"],
+                    "environment":  environment or "all",
+                },
+                properties={
+                    "message":       anomaly["message"],
+                    "detail":        anomaly["detail"],
+                    "operation":     sig["operation"],
+                    "call_path":     sig.get("call_path", ""),
+                    "environment":   environment or "all",
+                    "detector_tier": "tier3",
+                    "detector_name": "error-signature-fingerprint",
+                },
+            )
+            print(f"    Event sent (error.signature.drift)")
+        except Exception as e:
+            print(f"    Failed to send event: {e}", file=sys.stderr)
+
     print(f"\n  Checked {checked} traces, {skipped} skipped, "
-          f"{anomalies_found} new signatures detected")
+          f"{anomalies_found} anomalies detected")
     if anomalies_found == 0:
         print("  All error signatures match baseline")
 

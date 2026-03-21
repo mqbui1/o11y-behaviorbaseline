@@ -19,11 +19,12 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 | 1b | `provision_detectors.py` | Call volume spike on ingress services | SignalFlow: 5m mean > 10× 1h mean |
 | 1c | `provision_detectors.py` | Known DB caller goes silent | SignalFlow: 30m mean == 0 after non-zero 6h mean |
 | 2  | `trace_fingerprint.py`  | New or changed execution paths | SHA-256 of ordered parent→child span edge sequence |
-| 3  | `error_fingerprint.py`  | New error signatures (not just rate) | SHA-256 of service + error_type + operation + call_path |
+| 3  | `error_fingerprint.py`  | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
 | 4  | `provision_detectors.py` | p99 latency drift | SignalFlow: 15m mean > 2× 1h mean |
+| C  | `correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 1/2/3 custom events by service within a time window |
 
-**Tiers 1, 3, 4** run as persistent Splunk detectors (always-on SignalFlow).
-**Tiers 2 and 3 (error fingerprint)** run as scheduled scripts on cron.
+**Tiers 1, 4** run as persistent Splunk detectors (always-on SignalFlow).
+**Tiers 2, 3, and C** run as scheduled scripts on cron.
 
 ---
 
@@ -84,8 +85,11 @@ python onboard.py --auto
 # Tier 2 — trace path drift
 */5 * * * * python trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
 
-# Tier 3 — new error signatures
+# Tier 3 — new error signatures, rate spikes, vanished signatures
 */5 * * * * python error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+
+# Correlation — joins Tier 1/2/3 events, fires combined alert when 2+ tiers hit same service
+*/5 * * * * python correlate.py --environment petclinicmbtest --window-minutes 15
 ```
 
 ### Individual scripts
@@ -143,6 +147,7 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 | `trace.path.drift` | 2 | `anomaly_type`, `root_operation`, `fp_hash`, `environment` |
 | `topology.new_service` | 1 | `new_service`, `environment` |
 | `error.signature.drift` | 3 | `anomaly_type`, `service`, `error_type`, `sig_hash`, `environment` |
+| `behavioral_baseline.correlated_anomaly` | C | `service`, `corr_type`, `severity`, `tiers`, `environment` |
 | `behavioral_baseline.onboarded` | audit | `environment`, `action`, `provision_ok`, `baseline_ok` |
 
 ---
@@ -164,9 +169,10 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 
 ```
 onboard.py                     ← orchestration controller
-├── provision_detectors.py     ← Tiers 1a, 1b, 1c, 3, 4 (SignalFlow)
+├── provision_detectors.py     ← Tiers 1a, 1b, 1c, 4 (SignalFlow)
 ├── trace_fingerprint.py       ← Tier 2 (trace path drift, cron script)
-└── error_fingerprint.py       ← Tier 3 (error signatures, cron script)
+├── error_fingerprint.py       ← Tier 3 (error signatures + spikes, cron script)
+└── correlate.py               ← Tier C (cross-tier correlation, cron script)
 
 Splunk Observability
 ├── APM topology API           ← service discovery (all scripts)
