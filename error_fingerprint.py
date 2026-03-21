@@ -28,6 +28,7 @@ Usage:
   python error_fingerprint.py learn [--window-minutes 120]
   python error_fingerprint.py watch [--window-minutes 10]
   python error_fingerprint.py show
+  python error_fingerprint.py promote [hash ...]
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
@@ -87,6 +88,10 @@ DOMINANCE_THRESHOLD = 0.2  # 20% of errors in its service
 
 # Top N span operation names to include in the signature path
 SIGNATURE_TOP_FRAMES = 5
+
+# New signatures consistently seen across N watch runs are auto-promoted
+# to the baseline (stops alerting on them). Set to 0 to disable.
+AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
 
 # Tags examined when building error signatures
 ERROR_TAG_KEYS = [
@@ -348,7 +353,7 @@ def classify_signature(sig: dict, baseline: dict,
     learn_runs  = max(baseline.get("learn_runs", 1), 1)
     sig_hash    = sig["hash"]
 
-    # NEW_ERROR_SIGNATURE — never seen before
+    # NEW_ERROR_SIGNATURE — never seen before (or pending-promotion but not yet promoted)
     if sig_hash not in sigs:
         return {
             "type":    "NEW_ERROR_SIGNATURE",
@@ -361,6 +366,10 @@ def classify_signature(sig: dict, baseline: dict,
         }
 
     stored = sigs[sig_hash]
+
+    # Skip auto-promoted signatures (intentional, silenced)
+    if stored.get("auto_promoted"):
+        return None
 
     # SIGNATURE_SPIKE — known signature appearing far more than its baseline rate
     # baseline_rate = average occurrences per learn run
@@ -487,15 +496,18 @@ def cmd_learn(window_minutes: int = 120,
                 updated_count += 1
             else:
                 signatures[h] = {
-                    "hash":        h,
-                    "service":     sig["service"],
-                    "error_type":  sig["error_type"],
-                    "http_status": sig["http_status"],
-                    "db_system":   sig["db_system"],
-                    "operation":   sig["operation"],
-                    "call_path":   sig["call_path"],
-                    "occurrences": 1,
-                    "first_seen":  datetime.now(timezone.utc).isoformat(),
+                    "hash":          h,
+                    "service":       sig["service"],
+                    "error_type":    sig["error_type"],
+                    "http_status":   sig["http_status"],
+                    "db_system":     sig["db_system"],
+                    "operation":     sig["operation"],
+                    "call_path":     sig["call_path"],
+                    "occurrences":   1,
+                    "watch_hits":    0,
+                    "auto_promoted": False,
+                    "promoted_at":   None,
+                    "first_seen":    datetime.now(timezone.utc).isoformat(),
                 }
                 new_count += 1
                 print(f"  [new] {sig['service']}  "
@@ -558,6 +570,7 @@ def cmd_watch(window_minutes: int = 10,
         all_trace_sigs.append((trace_id, sigs))
 
     # Second pass: classify anomalies now that watch_counts is fully populated
+    new_sigs_seen: set[str] = set()
     for trace_id, sigs in all_trace_sigs:
         for sig in sigs:
             if sig["hash"] in alerted_hashes:
@@ -565,6 +578,25 @@ def cmd_watch(window_minutes: int = 10,
             anomaly = classify_signature(sig, baseline, watch_counts)
             if anomaly:
                 alerted_hashes.add(sig["hash"])
+                if anomaly["type"] == "NEW_ERROR_SIGNATURE":
+                    new_sigs_seen.add(sig["hash"])
+                    # Upsert a pending-promotion record
+                    stored_sigs = baseline.setdefault("signatures", {})
+                    if sig["hash"] not in stored_sigs:
+                        stored_sigs[sig["hash"]] = {
+                            "hash":          sig["hash"],
+                            "service":       sig["service"],
+                            "error_type":    sig["error_type"],
+                            "http_status":   sig["http_status"],
+                            "db_system":     sig["db_system"],
+                            "operation":     sig["operation"],
+                            "call_path":     sig["call_path"],
+                            "occurrences":   1,
+                            "watch_hits":    0,
+                            "auto_promoted": False,
+                            "promoted_at":   None,
+                            "first_seen":    datetime.now(timezone.utc).isoformat(),
+                        }
                 anomalies_found += 1
                 print(f"\n  ANOMALY DETECTED")
                 print(f"    Type:    {anomaly['type']}")
@@ -634,10 +666,70 @@ def cmd_watch(window_minutes: int = 10,
         except Exception as e:
             print(f"    Failed to send event: {e}", file=sys.stderr)
 
+    # ── Auto-promotion ─────────────────────────────────────────────────────────
+    promoted_count = 0
+    if AUTO_PROMOTE_THRESHOLD > 0:
+        stored_sigs = baseline.get("signatures", {})
+        baseline_dirty = False
+        for h in new_sigs_seen:
+            rec = stored_sigs.get(h)
+            if rec and not rec.get("auto_promoted"):
+                rec["watch_hits"] = rec.get("watch_hits", 0) + 1
+                if rec["watch_hits"] >= AUTO_PROMOTE_THRESHOLD:
+                    rec["auto_promoted"] = True
+                    rec["promoted_at"]   = datetime.now(timezone.utc).isoformat()
+                    promoted_count += 1
+                    print(f"\n  AUTO-PROMOTED: {h[:16]}... "
+                          f"(seen {rec['watch_hits']} watch runs) "
+                          f"service={rec['service']}  "
+                          f"error_type={rec['error_type']}")
+                baseline_dirty = True
+        if baseline_dirty:
+            save_baseline(baseline, environment)
+
     print(f"\n  Checked {checked} traces, {skipped} skipped, "
-          f"{anomalies_found} anomalies detected")
+          f"{anomalies_found} anomalies detected"
+          + (f", {promoted_count} auto-promoted" if promoted_count else ""))
     if anomalies_found == 0:
         print("  All error signatures match baseline")
+
+
+def cmd_promote(hashes: list[str] | None, environment: str | None = None) -> None:
+    """
+    Manually promote error signature(s) to the baseline (stops alerting on them).
+    If no hashes given, promotes all pending signatures (watch_hits > 0).
+    """
+    env_desc = f"environment '{environment}'" if environment else "all environments"
+    baseline = load_baseline(environment)
+    sigs = baseline.get("signatures", {})
+    if not sigs:
+        print(f"Error baseline for {env_desc} is empty — run 'learn' first.")
+        return
+
+    targets = (
+        [sigs[h] for h in hashes if h in sigs]
+        if hashes
+        else [r for r in sigs.values() if not r.get("auto_promoted")]
+    )
+    if not targets:
+        print("No signatures to promote.")
+        return
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    promoted = 0
+    for rec in targets:
+        if not rec.get("auto_promoted"):
+            rec["auto_promoted"] = True
+            rec["promoted_at"]   = now_iso
+            promoted += 1
+            print(f"  Promoted: {rec['hash'][:16]}...  "
+                  f"service={rec['service']}  error_type={rec['error_type']}")
+
+    if promoted:
+        save_baseline(baseline, environment)
+        print(f"\n  {promoted} signature(s) promoted for {env_desc}.")
+    else:
+        print("All specified signatures were already promoted.")
 
 
 def cmd_show(environment: str | None = None) -> None:
@@ -685,6 +777,14 @@ def main() -> None:
     p_watch = sub.add_parser("watch", help="Watch for new error signatures")
     p_watch.add_argument("--window-minutes", type=int, default=10)
     sub.add_parser("show", help="Print current error baseline")
+    p_promote = sub.add_parser(
+        "promote",
+        help="Manually promote signature(s) to baseline (stops alerting on them)",
+    )
+    p_promote.add_argument(
+        "hashes", nargs="*",
+        help="Signature hash(es) to promote. Omit to promote all pending.",
+    )
 
     args = parser.parse_args()
     env  = args.environment
@@ -697,6 +797,8 @@ def main() -> None:
         cmd_watch(args.window_minutes, environment=env)
     elif args.command == "show":
         cmd_show(environment=env)
+    elif args.command == "promote":
+        cmd_promote(args.hashes or None, environment=env)
 
 
 if __name__ == "__main__":

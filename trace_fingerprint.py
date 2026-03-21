@@ -90,6 +90,11 @@ MIN_BASELINE_OCCURRENCES = 2
 # Span count must exceed this multiple of baseline max to fire SPAN_COUNT_SPIKE
 SPAN_COUNT_SPIKE_MULTIPLIER = 2
 
+# Auto-promotion: a NEW_FINGERPRINT seen in this many consecutive watch runs
+# without manual intervention is auto-promoted to the baseline (stops alerting).
+# Set to 0 to disable auto-promotion.
+AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
+
 # ── Noise patterns ─────────────────────────────────────────────────────────────
 # Matched case-insensitively as substrings of a trace's root operation name.
 # Traces matching any of these are excluded from baselining and anomaly detection.
@@ -359,6 +364,7 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
     """
     Compare a fingerprint against the baseline.
     Returns an anomaly dict or None if the trace matches a known pattern.
+    Auto-promoted fingerprints are treated as known — no alert fired.
     """
     root_op = fp["root_op"]
     fp_hash = fp["hash"]
@@ -369,7 +375,11 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES
     }
 
-    # NEW_FINGERPRINT
+    # NEW_FINGERPRINT — but skip if already auto-promoted
+    stored = baseline.get("fingerprints", {}).get(fp_hash)
+    if stored and stored.get("auto_promoted"):
+        return None
+
     if fp_hash not in baseline.get("fingerprints", {}):
         return {
             "type":    "NEW_FINGERPRINT",
@@ -535,14 +545,17 @@ def cmd_learn(window_minutes: int = 120,
             updated_count += 1
         else:
             fingerprints[h] = {
-                "hash":        h,
-                "path":        fp["path"],
-                "root_op":     fp["root_op"],
-                "services":    fp["services"],
-                "span_count":  fp["span_count"],
-                "edge_count":  fp["edge_count"],
-                "occurrences": 1,
-                "first_seen":  datetime.now(timezone.utc).isoformat(),
+                "hash":           h,
+                "path":           fp["path"],
+                "root_op":        fp["root_op"],
+                "services":       fp["services"],
+                "span_count":     fp["span_count"],
+                "edge_count":     fp["edge_count"],
+                "occurrences":    1,
+                "watch_hits":     0,
+                "auto_promoted":  False,
+                "promoted_at":    None,
+                "first_seen":     datetime.now(timezone.utc).isoformat(),
             }
             new_count += 1
             print(f"  [new] {fp['root_op']}  ->  "
@@ -604,6 +617,8 @@ def cmd_watch(window_minutes: int = 10,
 
     anomalies_found = checked = skipped = 0
     alerted_hashes: set[str] = set()
+    # Track which new hashes were seen this run (for auto-promotion)
+    new_hashes_seen: set[str] = set()
 
     for meta in traces:
         trace_id = meta.get("traceId")
@@ -625,6 +640,24 @@ def cmd_watch(window_minutes: int = 10,
         anomaly = classify_anomaly(fp, baseline)
         if anomaly:
             alerted_hashes.add(fp["hash"])
+            if anomaly["type"] == "NEW_FINGERPRINT":
+                new_hashes_seen.add(fp["hash"])
+                # Upsert a pending-promotion record so watch_hits persists
+                fps = baseline.setdefault("fingerprints", {})
+                if fp["hash"] not in fps:
+                    fps[fp["hash"]] = {
+                        "hash":          fp["hash"],
+                        "path":          fp["path"],
+                        "root_op":       fp["root_op"],
+                        "services":      fp["services"],
+                        "span_count":    fp["span_count"],
+                        "edge_count":    fp["edge_count"],
+                        "occurrences":   1,
+                        "watch_hits":    0,
+                        "auto_promoted": False,
+                        "promoted_at":   None,
+                        "first_seen":    datetime.now(timezone.utc).isoformat(),
+                    }
             anomalies_found += 1
             print(f"\n  ANOMALY DETECTED")
             print(f"    Type:    {anomaly['type']}")
@@ -656,10 +689,70 @@ def cmd_watch(window_minutes: int = 10,
             except Exception as e:
                 print(f"    Failed to send event: {e}", file=sys.stderr)
 
+    # ── Auto-promotion ─────────────────────────────────────────────────────────
+    promoted_count = 0
+    if AUTO_PROMOTE_THRESHOLD > 0:
+        fps = baseline.get("fingerprints", {})
+        baseline_dirty = False
+        for h in new_hashes_seen:
+            rec = fps.get(h)
+            if rec and not rec.get("auto_promoted"):
+                rec["watch_hits"] = rec.get("watch_hits", 0) + 1
+                if rec["watch_hits"] >= AUTO_PROMOTE_THRESHOLD:
+                    rec["auto_promoted"] = True
+                    rec["promoted_at"]   = datetime.now(timezone.utc).isoformat()
+                    promoted_count += 1
+                    print(f"\n  AUTO-PROMOTED: {h[:16]}... "
+                          f"(seen {rec['watch_hits']} watch runs) "
+                          f"root_op={rec['root_op']}")
+                baseline_dirty = True
+        if baseline_dirty:
+            baseline["updated_at"] = datetime.now(timezone.utc).isoformat()
+            save_baseline(baseline, environment)
+
     print(f"\n  Checked {checked} traces, {skipped} skipped, "
-          f"{anomalies_found} anomalies detected")
+          f"{anomalies_found} anomalies detected"
+          + (f", {promoted_count} auto-promoted" if promoted_count else ""))
     if anomalies_found == 0:
         print("  All trace paths match baseline")
+
+
+def cmd_promote(hashes: list[str] | None, environment: str | None = None) -> None:
+    """
+    Manually promote fingerprints to the baseline (stops alerting on them).
+    If no hashes given, promotes all pending fingerprints (watch_hits > 0).
+    """
+    env_desc = f"environment '{environment}'" if environment else "all environments"
+    baseline = load_baseline(environment)
+    fps = baseline.get("fingerprints", {})
+    if not fps:
+        print(f"Baseline for {env_desc} is empty — run 'learn' first.")
+        return
+
+    targets = (
+        [fps[h] for h in hashes if h in fps]
+        if hashes
+        else [r for r in fps.values() if not r.get("auto_promoted")]
+    )
+    if not targets:
+        print("No fingerprints to promote.")
+        return
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    promoted = 0
+    for rec in targets:
+        if not rec.get("auto_promoted"):
+            rec["auto_promoted"] = True
+            rec["promoted_at"]   = now_iso
+            promoted += 1
+            print(f"  Promoted: {rec['hash'][:16]}...  root_op={rec['root_op']}")
+
+    if promoted:
+        baseline["updated_at"] = now_iso
+        save_baseline(baseline, environment)
+        print(f"\n  {promoted} fingerprint(s) promoted for {env_desc}.")
+    else:
+        print("All specified fingerprints were already promoted.")
 
 
 def cmd_show(environment: str | None = None) -> None:
@@ -715,6 +808,14 @@ def main() -> None:
     p_watch = sub.add_parser("watch", help="Compare recent traces to baseline")
     p_watch.add_argument("--window-minutes", type=int, default=10)
     sub.add_parser("show", help="Print current baseline")
+    p_promote = sub.add_parser(
+        "promote",
+        help="Manually promote fingerprint(s) to baseline (stops alerting on them)",
+    )
+    p_promote.add_argument(
+        "hashes", nargs="*",
+        help="Fingerprint hash(es) to promote. Omit to promote all pending.",
+    )
 
     args = parser.parse_args()
     env = args.environment
@@ -727,6 +828,8 @@ def main() -> None:
         cmd_watch(args.window_minutes, environment=env)
     elif args.command == "show":
         cmd_show(environment=env)
+    elif args.command == "promote":
+        cmd_promote(args.hashes or None, environment=env)
 
 
 if __name__ == "__main__":
