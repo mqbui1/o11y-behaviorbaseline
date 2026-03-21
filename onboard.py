@@ -47,6 +47,7 @@ Required files in same directory:
   provision_detectors.py
   trace_fingerprint.py
   error_fingerprint.py
+  correlate.py
 """
 
 import argparse
