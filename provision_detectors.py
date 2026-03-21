@@ -182,7 +182,9 @@ def program_ingress_volume_spike(ingress_service: str,
                                   environment: str | None = None) -> str:
     """
     Tier 1b: Fire when an ingress service's call volume spikes to >10x
-    its 1-hour rolling mean on any operation.
+    the same 5-minute window from exactly 1 week ago (seasonality-aware).
+    Using timeshift('1w') instead of a rolling hourly mean avoids false
+    positives from legitimate time-of-day or day-of-week traffic patterns.
     Scoped to environment when provided.
     """
     env_f = _env_filter_expr(environment)
@@ -192,9 +194,10 @@ def program_ingress_volume_spike(ingress_service: str,
         f"A = data('spans.count', filter={combined})"
         f".sum(by=['sf_environment', 'sf_operation']).mean(over='5m')\n"
         f"B = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_operation']).mean(over='1h')\n"
+        f".sum(by=['sf_environment', 'sf_operation']).mean(over='5m')"
+        f".timeshift('1w')\n"
         f"detect(when(A > B * 10))"
-        f".publish('{ingress_service} edge volume spike (>10x hourly mean)')"
+        f".publish('{ingress_service} edge volume spike (>10x same window last week)')"
     )
 
 
@@ -254,7 +257,10 @@ def program_p99_latency_drift(db_callers: list[str],
                                environment: str | None = None) -> str:
     """
     Tier 4: Fire when p99 latency for any DB-calling service exceeds 2x
-    its 1-hour rolling mean, sustained for 15 minutes.
+    the same 15-minute window from exactly 1 week ago (seasonality-aware),
+    sustained for 15 minutes. Using timeshift('1w') accounts for legitimate
+    latency variation by time-of-day and day-of-week (e.g. batch jobs, peak
+    hours) that would produce false positives with a simple rolling mean.
     Scoped to environment when provided.
     """
     svc_list = ", ".join(f"'{s}'" for s in db_callers)
@@ -266,9 +272,10 @@ def program_p99_latency_drift(db_callers: list[str],
         + f"A = data('service.request.duration.ns.p99', filter={data_filter})"
         f".mean(by=['sf_service', 'sf_environment']).mean(over='15m')\n"
         f"B = data('service.request.duration.ns.p99', filter={data_filter})"
-        f".mean(by=['sf_service', 'sf_environment']).mean(over='1h')\n"
+        f".mean(by=['sf_service', 'sf_environment']).mean(over='15m')"
+        f".timeshift('1w')\n"
         f"detect(when(A > B * 2, lasting='15m'))"
-        f".publish('DB service p99 latency drift (>2x rolling mean)')"
+        f".publish('DB service p99 latency drift (>2x same window last week)')"
     )
 
 
@@ -318,19 +325,19 @@ def build_detector_plan(topo: dict) -> list[dict]:
             "name": f"[Behavioral Baseline]{env_label} {svc} edge call volume spike",
             "description": (
                 f"Tier 1 topology anomaly{env_label}. Fires when {svc}'s "
-                f"5-minute call volume on any operation exceeds 10x its "
-                f"1-hour rolling mean. Indicative of routing loops, retry "
-                f"storms, or unexpected fan-out."
+                f"5-minute call volume on any operation exceeds 10x the same "
+                f"5-minute window from 1 week ago. Seasonality-aware: accounts "
+                f"for time-of-day and day-of-week traffic patterns."
             ),
             "programText": program_ingress_volume_spike(svc, env),
             "rules": [{
                 "severity":    "Major",
-                "detectLabel": f"{svc} edge volume spike (>10x hourly mean)",
+                "detectLabel": f"{svc} edge volume spike (>10x same window last week)",
                 "name":        f"{svc} volume spike",
                 "description": (
-                    f"Outbound call volume from {svc} has exceeded 10x its "
-                    f"1-hour rolling mean. Investigate for routing loops or "
-                    f"unexpected fan-out."
+                    f"Outbound call volume from {svc} has exceeded 10x the "
+                    f"same window from last week. Investigate for routing "
+                    f"loops, retry storms, or unexpected fan-out."
                 ),
             }],
             "tags": [MANAGED_TAG, "topology-anomaly", "tier1", env_tag,
@@ -398,18 +405,20 @@ def build_detector_plan(topo: dict) -> list[dict]:
             "description": (
                 f"Tier 4 latency drift anomaly{env_label}. Fires when p99 "
                 f"latency for any DB-calling service "
-                f"({', '.join(topo['db_callers'])}) exceeds 2x its 1-hour "
-                f"rolling mean, sustained for 15 minutes."
+                f"({', '.join(topo['db_callers'])}) exceeds 2x the same "
+                f"15-minute window from 1 week ago, sustained for 15 minutes. "
+                f"Seasonality-aware: accounts for legitimate latency variation "
+                f"by time-of-day and day-of-week."
             ),
             "programText": program_p99_latency_drift(topo["db_callers"], env),
             "rules": [{
                 "severity":    "Warning",
-                "detectLabel": "DB service p99 latency drift (>2x rolling mean)",
+                "detectLabel": "DB service p99 latency drift (>2x same window last week)",
                 "name":        "DB service p99 latency drift",
                 "description": (
-                    "p99 latency has sustained >2x the 1-hour rolling mean. "
-                    "Investigate for slow new dependencies, added execution "
-                    "path hops, or query regressions."
+                    "p99 latency has sustained >2x the same window from last "
+                    "week. Investigate for slow new dependencies, added "
+                    "execution path hops, or query regressions."
                 ),
             }],
             "tags": [MANAGED_TAG, "latency-drift", "tier4", env_tag,
