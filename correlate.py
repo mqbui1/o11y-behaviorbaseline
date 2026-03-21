@@ -71,7 +71,8 @@ if not ACCESS_TOKEN:
           file=sys.stderr)
     sys.exit(1)
 
-BASE_URL = f"https://api.{REALM}.signalfx.com"
+BASE_URL   = f"https://api.{REALM}.signalfx.com"
+INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 
 # Minimum number of distinct tiers that must fire on the same service
 # within the correlation window to emit a correlated alert.
@@ -96,8 +97,9 @@ _SEVERITY_DOWNGRADE = {"Critical": "Major", "Major": "Minor", "Minor": "Info"}
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
-def _request(method: str, path: str, body: dict | None = None) -> Any:
-    url     = f"{BASE_URL}{path}"
+def _request(method: str, path: str, body: dict | None = None,
+             base_url: str = BASE_URL) -> Any:
+    url     = f"{base_url}{path}"
     headers = {"X-SF-Token": ACCESS_TOKEN, "Content-Type": "application/json"}
     data    = json.dumps(body).encode() if body is not None else None
     req     = urllib.request.Request(url, data=data, headers=headers,
@@ -359,7 +361,7 @@ def send_correlated_event(corr: dict) -> None:
         },
         "properties": props,
         "timestamp":  int(time.time() * 1000),
-    })
+    }, base_url=INGEST_URL)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

@@ -227,7 +227,7 @@ def send_custom_event(event_type: str, dimensions: dict,
         "dimensions": dimensions,
         "properties": properties,
         "timestamp":  int(time.time() * 1000),
-    })
+    }, base_url=INGEST_URL)
 
 
 # ── Signature extraction ───────────────────────────────────────────────────────

@@ -265,12 +265,16 @@ def search_traces(services: list[str], start_ms: int, end_ms: int,
 
 
 def get_trace_full(trace_id: str) -> dict | None:
-    """Fetch full span details for a single trace via GraphQL."""
+    """
+    Fetch full span details for a single trace via GraphQL.
+    parentSpanID is not available in this API; parent relationships are
+    inferred in build_fingerprint() from span timing.
+    """
     query = (
         "query TraceFullDetailsLessValidation($id: ID!) {"
         " trace(id: $id) {"
         " traceID startTime duration"
-        " spans { spanID operationName serviceName parentSpanID"
+        " spans { spanID operationName serviceName"
         "         startTime duration tags { key value } } } }"
     )
     gql_body = {
@@ -283,6 +287,38 @@ def get_trace_full(trace_id: str) -> dict | None:
     return (result.get("data") or {}).get("trace")
 
 
+def _infer_parent_id(spans: list[dict]) -> dict[str, str | None]:
+    """
+    Infer parent-child span relationships from timing containment since
+    parentSpanID is not available in the GraphQL API response.
+
+    A span B is considered a child of span A when:
+      - A contains B's startTime (A.start <= B.start < A.start + A.duration)
+      - A != B
+    Among all containing spans, the one with the smallest duration is the
+    most direct parent (tightest enclosing window).
+
+    Returns: {spanID: parentSpanID or None}
+    """
+    parents: dict[str, str | None] = {}
+    for span in spans:
+        sid   = span["spanID"]
+        start = span.get("startTime", 0)
+        best_parent_id  = None
+        best_duration   = float("inf")
+        for candidate in spans:
+            if candidate["spanID"] == sid:
+                continue
+            c_start = candidate.get("startTime", 0)
+            c_dur   = candidate.get("duration", 0)
+            if c_start <= start < c_start + c_dur:
+                if c_dur < best_duration:
+                    best_duration  = c_dur
+                    best_parent_id = candidate["spanID"]
+        parents[sid] = best_parent_id
+    return parents
+
+
 def send_custom_event(event_type: str, dimensions: dict, properties: dict) -> None:
     """Emit a custom event to Splunk Observability Cloud."""
     _request("POST", "/v2/event", {
@@ -291,7 +327,7 @@ def send_custom_event(event_type: str, dimensions: dict, properties: dict) -> No
         "dimensions": dimensions,
         "properties": properties,
         "timestamp":  int(time.time() * 1000),
-    })
+    }, base_url=INGEST_URL)
 
 
 # ── Noise filtering ────────────────────────────────────────────────────────────
@@ -319,12 +355,14 @@ def build_fingerprint(trace: dict) -> dict | None:
     if len(spans) < MIN_SPANS:
         return None
 
-    by_id       = {s["spanID"]: s for s in spans}
+    by_id        = {s["spanID"]: s for s in spans}
     sorted_spans = sorted(spans, key=lambda s: s.get("startTime", 0))
 
+    # Infer parent relationships from timing containment
+    parent_map = _infer_parent_id(spans)
+
     root_span = next(
-        (s for s in sorted_spans
-         if not s.get("parentSpanID") or s["parentSpanID"] not in by_id),
+        (s for s in sorted_spans if parent_map.get(s["spanID"]) is None),
         sorted_spans[0] if sorted_spans else None,
     )
     if not root_span:
@@ -336,7 +374,7 @@ def build_fingerprint(trace: dict) -> dict | None:
 
     edges = []
     for span in sorted_spans:
-        parent_id = span.get("parentSpanID")
+        parent_id = parent_map.get(span["spanID"])
         if parent_id and parent_id in by_id:
             parent = by_id[parent_id]
             edges.append((
@@ -582,10 +620,14 @@ def cmd_watch(window_minutes: int = 10,
               file=sys.stderr)
         sys.exit(1)
 
-    # Alert on new services not present at baseline time
-    baseline_services = set((baseline.get("topology") or {}).get("services", []))
-    current_services  = set(topo["services"]) | set(topo["inferred"])
-    new_topo_services = current_services - baseline_services
+    # Alert on new *instrumented* services not present at baseline time.
+    # Inferred nodes (db nodes, gateways) are excluded — they vary by trace
+    # sampling and should not trigger topology alerts.
+    baseline_topo     = baseline.get("topology") or {}
+    baseline_services = set(baseline_topo.get("services", []))
+    baseline_inferred = set(baseline_topo.get("inferred", []))
+    current_services  = set(topo["services"])
+    new_topo_services = current_services - baseline_services - baseline_inferred
     if new_topo_services:
         print(f"\n  WARNING: New service(s) in topology since baseline: "
               f"{sorted(new_topo_services)}")
