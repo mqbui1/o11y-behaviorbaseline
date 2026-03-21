@@ -46,7 +46,8 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN")
+ACCESS_TOKEN  = os.environ.get("SPLUNK_ACCESS_TOKEN")
+INGEST_TOKEN  = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
 REALM        = os.environ.get("SPLUNK_REALM", "us0")
 
 if not ACCESS_TOKEN:
@@ -62,7 +63,8 @@ INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 def _request(method: str, path: str, body: dict | None = None,
              base_url: str = BASE_URL) -> Any:
     url     = f"{base_url}{path}"
-    headers = {"X-SF-Token": ACCESS_TOKEN, "Content-Type": "application/json"}
+    token   = INGEST_TOKEN if base_url == INGEST_URL else ACCESS_TOKEN
+    headers = {"X-SF-Token": token, "Content-Type": "application/json"}
     data    = json.dumps(body).encode() if body is not None else None
     req     = urllib.request.Request(url, data=data, headers=headers,
                                      method=method)
@@ -125,7 +127,7 @@ def notify(
             print(f"    version={version or 'n/a'}  deployer={deployer or 'n/a'}  "
                   f"commit={commit or 'n/a'}")
         else:
-            _request("POST", "/v2/event", body, base_url=INGEST_URL)
+            _request("POST", "/v2/event", [body], base_url=INGEST_URL)
             print(f"  [sent] deployment.started  service={service}  "
                   f"environment={env_label}  version={version or 'n/a'}")
 
