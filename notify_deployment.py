@@ -54,12 +54,14 @@ if not ACCESS_TOKEN:
           file=sys.stderr)
     sys.exit(1)
 
-BASE_URL = f"https://api.{REALM}.signalfx.com"
+BASE_URL   = f"https://api.{REALM}.signalfx.com"
+INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 
 # ── HTTP helper ────────────────────────────────────────────────────────────────
 
-def _request(method: str, path: str, body: dict | None = None) -> Any:
-    url     = f"{BASE_URL}{path}"
+def _request(method: str, path: str, body: dict | None = None,
+             base_url: str = BASE_URL) -> Any:
+    url     = f"{base_url}{path}"
     headers = {"X-SF-Token": ACCESS_TOKEN, "Content-Type": "application/json"}
     data    = json.dumps(body).encode() if body is not None else None
     req     = urllib.request.Request(url, data=data, headers=headers,
@@ -123,7 +125,7 @@ def notify(
             print(f"    version={version or 'n/a'}  deployer={deployer or 'n/a'}  "
                   f"commit={commit or 'n/a'}")
         else:
-            _request("POST", "/v2/event", body)
+            _request("POST", "/v2/event", body, base_url=INGEST_URL)
             print(f"  [sent] deployment.started  service={service}  "
                   f"environment={env_label}  version={version or 'n/a'}")
 

@@ -248,7 +248,7 @@ def program_missing_db_caller(db_node: str, caller: str,
         f".sum(by=['sf_environment', 'sf_initiating_service']).mean(over='30m')\n"
         f"B = data('spans.count', filter={combined})"
         f".sum(by=['sf_environment', 'sf_initiating_service']).mean(over='6h')\n"
-        f"detect(when(A == 0 and B > 0), lasting='30m')"
+        f"detect(when(A == 0 and B > 0, lasting='30m'))"
         f".publish('{caller} stopped calling {db_node}')"
     )
 
