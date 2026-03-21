@@ -18,14 +18,24 @@ Correlation rules:
   TIER2_TIER1  — trace path drift + topology new-service event on same service
   MULTI_TIER   — 3+ different tiers hit the same service (highest confidence)
 
+Deployment correlation:
+  If notify_deployment.py was called within DEPLOYMENT_CORRELATION_WINDOW_MINUTES
+  of the anomalies, the correlated alert is annotated with deployment context
+  and its severity is downgraded by one level (Critical→Major, Major→Minor).
+  This distinguishes "bad change" from "expected change" without suppressing
+  the alert entirely.
+
 How it works:
   1. Queries recent custom events from Splunk:
        trace.path.drift        (Tier 2)
        error.signature.drift   (Tier 3)
        topology.new_service    (Tier 1)
-  2. Groups events by service within a correlation window
+       deployment.started      (from notify_deployment.py)
+  2. Groups anomaly events by service within a correlation window
   3. If 2+ tiers are represented for the same service, fires a
      behavioral_baseline.correlated_anomaly event with full context
+  4. If a deployment event matches the same service+environment within
+     DEPLOYMENT_CORRELATION_WINDOW_MINUTES, annotates and downgrades severity
 
 Usage:
   python correlate.py [--window-minutes 30] [--environment petclinicmbtest]
@@ -67,12 +77,22 @@ BASE_URL = f"https://api.{REALM}.signalfx.com"
 # within the correlation window to emit a correlated alert.
 MIN_TIERS_FOR_CORRELATION = 2
 
+# How far back (in minutes) to look for deployment events when annotating
+# correlated anomalies. A deployment within this window of the anomalies
+# is considered a likely cause and downgrades severity by one level.
+DEPLOYMENT_CORRELATION_WINDOW_MINUTES = int(
+    os.environ.get("DEPLOYMENT_CORRELATION_WINDOW_MINUTES", "60")
+)
+
 # Event types emitted by the fingerprint scripts — these are what we query
 TIER_EVENT_MAP = {
     "trace.path.drift":       "tier2",
     "error.signature.drift":  "tier3",
     "topology.new_service":   "tier1",
 }
+
+# Severity downgrade map for deployment-correlated anomalies
+_SEVERITY_DOWNGRADE = {"Critical": "Major", "Major": "Minor", "Minor": "Info"}
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
@@ -152,6 +172,47 @@ def fetch_anomaly_events(start_ms: int, end_ms: int,
     return all_events
 
 
+def fetch_deployment_events(start_ms: int, end_ms: int,
+                             environment: str | None = None) -> list[dict]:
+    """
+    Fetch deployment.started events emitted by notify_deployment.py within
+    the given time window. Returns a list of deployment dicts keyed by
+    service and environment.
+    """
+    params = (
+        f"type=deployment.started"
+        f"&startTime={start_ms}"
+        f"&endTime={end_ms}"
+        f"&limit=200"
+    )
+    try:
+        result = _request("GET", f"/v2/event?{params}")
+    except RuntimeError as e:
+        print(f"  [warn] Could not fetch deployment events: {e}", file=sys.stderr)
+        return []
+
+    deployments = []
+    for event in result.get("results", []):
+        dims  = event.get("dimensions", {})
+        props = event.get("properties", {})
+        svc   = dims.get("service") or props.get("service")
+        if not svc:
+            continue
+        event_env = dims.get("environment") or props.get("environment") or "all"
+        if environment and event_env not in (environment, "all"):
+            continue
+        deployments.append({
+            "service":     svc,
+            "environment": event_env,
+            "version":     props.get("version", ""),
+            "deployer":    props.get("deployer", ""),
+            "commit":      props.get("commit", ""),
+            "description": props.get("description", ""),
+            "timestamp":   event.get("timestamp", 0),
+        })
+    return deployments
+
+
 def _infer_service_from_event(dims: dict, props: dict) -> str | None:
     """
     Try to infer a service name from event dimensions/properties when
@@ -167,13 +228,23 @@ def _infer_service_from_event(dims: dict, props: dict) -> str | None:
 
 # ── Correlation ────────────────────────────────────────────────────────────────
 
-def correlate(events: list[dict]) -> list[dict]:
+def correlate(events: list[dict],
+              deployments: list[dict] | None = None) -> list[dict]:
     """
     Group events by service and identify cases where multiple tiers fired.
     Returns a list of correlation results — one per affected service that
     meets the MIN_TIERS_FOR_CORRELATION threshold.
+
+    deployments: list of deployment events from fetch_deployment_events().
+    When provided, any correlated anomaly whose service+environment matches
+    a recent deployment is annotated and its severity downgraded by one level.
     """
-    # Group by service
+    # Index deployments by service for fast lookup
+    deploy_by_service: dict[str, list[dict]] = defaultdict(list)
+    for d in (deployments or []):
+        deploy_by_service[d["service"]].append(d)
+
+    # Group anomaly events by service
     by_service: dict[str, list[dict]] = defaultdict(list)
     for event in events:
         by_service[event["service"]].append(event)
@@ -208,28 +279,74 @@ def correlate(events: list[dict]) -> list[dict]:
         )
         environment = svc_events[0].get("environment", "all")
 
+        # ── Deployment correlation ────────────────────────────────────────────
+        # Check if a deployment event for this service exists within the
+        # deployment correlation window relative to the earliest anomaly.
+        deployment_match: dict | None = None
+        earliest_ms = min(timestamps) if timestamps else 0
+        window_ms   = DEPLOYMENT_CORRELATION_WINDOW_MINUTES * 60 * 1000
+        for d in deploy_by_service.get(service, []):
+            delta_ms = abs(d["timestamp"] - earliest_ms)
+            if delta_ms <= window_ms:
+                deployment_match = d
+                break  # use the first (closest) match
+
+        if deployment_match:
+            # Downgrade severity — change is likely intentional
+            severity = _SEVERITY_DOWNGRADE.get(severity, severity)
+
         correlations.append({
-            "service":       service,
-            "corr_type":     corr_type,
-            "severity":      severity,
-            "tiers":         sorted(tiers_present),
-            "event_count":   len(svc_events),
-            "anomaly_types": anomaly_types,
-            "messages":      messages,
-            "time_span_s":   time_span_s,
-            "environment":   environment,
-            "earliest_ms":   min(timestamps) if timestamps else 0,
-            "latest_ms":     max(timestamps) if timestamps else 0,
+            "service":           service,
+            "corr_type":         corr_type,
+            "severity":          severity,
+            "tiers":             sorted(tiers_present),
+            "event_count":       len(svc_events),
+            "anomaly_types":     anomaly_types,
+            "messages":          messages,
+            "time_span_s":       time_span_s,
+            "environment":       environment,
+            "earliest_ms":       earliest_ms,
+            "latest_ms":         max(timestamps) if timestamps else 0,
+            "deployment":        deployment_match,
         })
 
     # Sort by severity then event count
-    order = {"Critical": 0, "Major": 1, "Minor": 2}
+    order = {"Critical": 0, "Major": 1, "Minor": 2, "Info": 3}
     correlations.sort(key=lambda x: (order.get(x["severity"], 9),
                                      -x["event_count"]))
     return correlations
 
 
 def send_correlated_event(corr: dict) -> None:
+    deploy = corr.get("deployment")
+    deploy_note = (
+        f" [deployment: {deploy.get('version') or deploy.get('commit') or 'unknown'}]"
+        if deploy else ""
+    )
+    props = {
+        "message": (
+            f"[{corr['severity']}] {corr['corr_type']} on "
+            f"{corr['service']}: {len(corr['tiers'])} tiers fired "
+            f"({', '.join(corr['tiers'])}) within "
+            f"{corr['time_span_s']}s{deploy_note}"
+        ),
+        "tiers":         ",".join(corr["tiers"]),
+        "anomaly_types": ",".join(corr["anomaly_types"]),
+        "event_count":   corr["event_count"],
+        "time_span_s":   corr["time_span_s"],
+        "environment":   corr["environment"],
+        "details":       " | ".join(corr["messages"][:5]),
+        "detector_tier": "correlation",
+        "detector_name": "cross-tier-correlator",
+    }
+    if deploy:
+        props["deployment_version"]  = deploy.get("version", "")
+        props["deployment_commit"]   = deploy.get("commit", "")
+        props["deployment_deployer"] = deploy.get("deployer", "")
+        props["deployment_desc"]     = deploy.get("description", "")
+        props["deployment_ts_ms"]    = str(deploy.get("timestamp", ""))
+        props["deployment_correlated"] = "true"
+
     _request("POST", "/v2/event", {
         "eventType":  "behavioral_baseline.correlated_anomaly",
         "category":   "ALERT",
@@ -240,23 +357,8 @@ def send_correlated_event(corr: dict) -> None:
             "environment": corr["environment"],
             "tiers":       ",".join(corr["tiers"]),
         },
-        "properties": {
-            "message": (
-                f"[{corr['severity']}] {corr['corr_type']} on "
-                f"{corr['service']}: {len(corr['tiers'])} tiers fired "
-                f"({', '.join(corr['tiers'])}) within "
-                f"{corr['time_span_s']}s"
-            ),
-            "tiers":         ",".join(corr["tiers"]),
-            "anomaly_types": ",".join(corr["anomaly_types"]),
-            "event_count":   corr["event_count"],
-            "time_span_s":   corr["time_span_s"],
-            "environment":   corr["environment"],
-            "details":       " | ".join(corr["messages"][:5]),
-            "detector_tier": "correlation",
-            "detector_name": "cross-tier-correlator",
-        },
-        "timestamp": int(time.time() * 1000),
+        "properties": props,
+        "timestamp":  int(time.time() * 1000),
     })
 
 
@@ -266,6 +368,8 @@ def run(window_minutes: int = 30, environment: str | None = None,
         dry_run: bool = False) -> None:
     now_ms   = int(time.time() * 1000)
     start_ms = now_ms - window_minutes * 60 * 1000
+    # Deployment window extends further back than the anomaly window
+    deploy_start_ms = now_ms - DEPLOYMENT_CORRELATION_WINDOW_MINUTES * 60 * 1000
     env_desc = f"environment '{environment}'" if environment else "all environments"
 
     print(f"[correlate] Fetching anomaly events for {env_desc} "
@@ -286,7 +390,18 @@ def run(window_minutes: int = 30, environment: str | None = None,
     for tier, count in sorted(tier_counts.items()):
         print(f"    {tier}: {count} event(s)")
 
-    correlations = correlate(events)
+    # Fetch deployment events for context
+    deployments = fetch_deployment_events(
+        deploy_start_ms, now_ms, environment=environment
+    )
+    if deployments:
+        print(f"  Found {len(deployments)} deployment event(s) in last "
+              f"{DEPLOYMENT_CORRELATION_WINDOW_MINUTES}m:")
+        for d in deployments:
+            print(f"    {d['service']}  version={d.get('version') or 'n/a'}  "
+                  f"deployer={d.get('deployer') or 'n/a'}")
+
+    correlations = correlate(events, deployments=deployments)
     if not correlations:
         print(f"\n  No correlations found "
               f"(threshold: {MIN_TIERS_FOR_CORRELATION} tiers per service).")
@@ -294,10 +409,19 @@ def run(window_minutes: int = 30, environment: str | None = None,
 
     print(f"\n  Found {len(correlations)} correlated anomaly group(s):\n")
     for corr in correlations:
-        print(f"  [{corr['severity']}] {corr['corr_type']} — {corr['service']}")
-        print(f"    Tiers:        {', '.join(corr['tiers'])}")
+        deploy = corr.get("deployment")
+        deploy_tag = "  [deployment-correlated]" if deploy else ""
+        print(f"  [{corr['severity']}] {corr['corr_type']} — "
+              f"{corr['service']}{deploy_tag}")
+        print(f"    Tiers:         {', '.join(corr['tiers'])}")
         print(f"    Anomaly types: {', '.join(corr['anomaly_types'])}")
-        print(f"    Events:       {corr['event_count']} over {corr['time_span_s']}s")
+        print(f"    Events:        {corr['event_count']} over {corr['time_span_s']}s")
+        if deploy:
+            print(f"    Deployment:    version={deploy.get('version') or 'n/a'}  "
+                  f"commit={deploy.get('commit') or 'n/a'}  "
+                  f"deployer={deploy.get('deployer') or 'n/a'}")
+            if deploy.get("description"):
+                print(f"                   \"{deploy['description']}\"")
         for msg in corr["messages"][:3]:
             print(f"    - {msg}")
         if not dry_run:
