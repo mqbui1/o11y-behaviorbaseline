@@ -54,6 +54,7 @@ from typing import Any
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 ACCESS_TOKEN            = os.environ.get("SPLUNK_ACCESS_TOKEN")
+INGEST_TOKEN            = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
 REALM                   = os.environ.get("SPLUNK_REALM", "us0")
 BASELINE_PATH           = Path(os.environ.get("ERROR_BASELINE_PATH",
                                               "./error_baseline.json"))
@@ -108,7 +109,8 @@ ERROR_TAG_KEYS = [
 def _request(method: str, path: str, body: dict | None = None,
              base_url: str = BASE_URL) -> Any:
     url = f"{base_url}{path}"
-    headers = {"X-SF-Token": ACCESS_TOKEN, "Content-Type": "application/json"}
+    token = INGEST_TOKEN if base_url == INGEST_URL else ACCESS_TOKEN
+    headers = {"X-SF-Token": token, "Content-Type": "application/json"}
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
@@ -221,13 +223,13 @@ def get_trace_full(trace_id: str) -> dict | None:
 
 def send_custom_event(event_type: str, dimensions: dict,
                       properties: dict) -> None:
-    _request("POST", "/v2/event", {
+    _request("POST", "/v2/event", [{
         "eventType":  event_type,
         "category":   "USER_DEFINED",
         "dimensions": dimensions,
         "properties": properties,
         "timestamp":  int(time.time() * 1000),
-    }, base_url=INGEST_URL)
+    }], base_url=INGEST_URL)
 
 
 # ── Signature extraction ───────────────────────────────────────────────────────

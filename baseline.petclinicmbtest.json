@@ -319,6 +319,38 @@
       "auto_promoted": false,
       "promoted_at": null,
       "first_seen": "2026-03-21T05:42:57.403326+00:00"
+    },
+    "bfc9a1f13d9cea3c": {
+      "hash": "bfc9a1f13d9cea3c",
+      "path": "admin-server:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "admin-server:PUT",
+      "services": [
+        "admin-server",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:50:33.498071+00:00"
+    },
+    "e3ff96013645305b": {
+      "hash": "e3ff96013645305b",
+      "path": "admin-server:GET -> customers-service:GET /actuator/info",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "customers-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-21T05:56:01.698476+00:00"
     }
   },
   "topology": {
@@ -445,6 +477,6 @@
     "environment": "petclinicmbtest"
   },
   "created_at": "2026-03-21T05:21:16.869881+00:00",
-  "updated_at": "2026-03-21T05:43:31.947764+00:00",
+  "updated_at": "2026-03-21T05:58:42.366796+00:00",
   "environment": "petclinicmbtest"
 }
