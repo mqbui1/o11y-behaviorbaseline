@@ -75,6 +75,7 @@ if not ACCESS_TOKEN:
 
 BASE_URL   = f"https://api.{REALM}.signalfx.com"
 INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
+STREAM_URL = f"https://stream.{REALM}.signalfx.com"
 
 # Minimum number of distinct tiers that must fire on the same service
 # within the correlation window to emit a correlated alert.
@@ -122,26 +123,61 @@ def _request(method: str, path: str, body: dict | None = None,
 
 # ── Event fetching ─────────────────────────────────────────────────────────────
 
+def _signalflow_events(event_type: str, start_ms: int, end_ms: int,
+                       timeout: float = 10.0) -> list[dict]:
+    """
+    Query custom events via the SignalFlow streaming API.
+    Returns a list of raw event dicts parsed from the SSE stream.
+    Uses events(eventType="...") — works on all realms including us1.
+    """
+    program = f'events(eventType="{event_type}").publish()'
+    url = (f"{STREAM_URL}/v2/signalflow/execute"
+           f"?start={start_ms}&stop={end_ms}&immediate=true")
+    req = urllib.request.Request(
+        url,
+        data=program.encode(),
+        headers={"X-SF-Token": ACCESS_TOKEN, "Content-Type": "text/plain"},
+        method="POST",
+    )
+    results = []
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # SSE streams each object as multiple "data: <line>" lines followed
+            # by a blank line. Accumulate data lines until blank, then parse.
+            data_lines: list[str] = []
+            for raw_line in resp:
+                line = raw_line.decode()
+                stripped = line.strip()
+
+                if stripped.startswith("data:"):
+                    data_lines.append(stripped[5:].strip())
+                elif stripped == "" and data_lines:
+                    # End of one SSE message block — parse accumulated JSON
+                    payload = "".join(data_lines)
+                    data_lines = []
+                    try:
+                        msg = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if "properties" in msg and "metadata" in msg:
+                        results.append(msg)
+                    if msg.get("event") in ("STREAM_STOP", "END_OF_CHANNEL"):
+                        break
+    except Exception as e:
+        print(f"  [warn] SignalFlow query for {event_type}: {e}", file=sys.stderr)
+    return results
+
+
 def _fetch_events_for_type(event_type: str, tier: str,
                             start_ms: int, end_ms: int,
                             environment: str | None) -> list[dict]:
-    """Fetch and normalize events for a single event type."""
-    params = (
-        f"type={event_type}"
-        f"&startTime={start_ms}"
-        f"&endTime={end_ms}"
-        f"&limit=200"
-    )
-    try:
-        result = _request("GET", f"/v2/event?{params}")
-    except RuntimeError as e:
-        print(f"  [warn] Could not fetch {event_type}: {e}", file=sys.stderr)
-        return []
+    """Fetch and normalize events for a single event type via SignalFlow."""
+    raw_events = _signalflow_events(event_type, start_ms, end_ms)
 
     events = []
-    for event in result.get("results", []):
-        dims  = event.get("dimensions", {})
-        props = event.get("properties", {})
+    for msg in raw_events:
+        dims  = msg.get("metadata", {})
+        props = msg.get("properties", {})
 
         service = (
             dims.get("service")
@@ -153,7 +189,7 @@ def _fetch_events_for_type(event_type: str, tier: str,
             continue
 
         event_env = dims.get("environment") or props.get("environment")
-        if environment and event_env and event_env != environment:
+        if environment and event_env and event_env not in (environment, "all"):
             continue
 
         events.append({
@@ -162,9 +198,9 @@ def _fetch_events_for_type(event_type: str, tier: str,
             "service":      service,
             "anomaly_type": dims.get("anomaly_type", event_type),
             "message":      props.get("message", ""),
-            "timestamp":    event.get("timestamp", 0),
+            "timestamp":    msg.get("timestampMs", 0),
             "environment":  event_env or environment or "all",
-            "raw":          event,
+            "raw":          msg,
         })
     return events
 
@@ -196,25 +232,14 @@ def fetch_deployment_events(start_ms: int, end_ms: int,
                              environment: str | None = None) -> list[dict]:
     """
     Fetch deployment.started events emitted by notify_deployment.py within
-    the given time window. Returns a list of deployment dicts keyed by
-    service and environment.
+    the given time window via SignalFlow. Returns a list of deployment dicts.
     """
-    params = (
-        f"type=deployment.started"
-        f"&startTime={start_ms}"
-        f"&endTime={end_ms}"
-        f"&limit=200"
-    )
-    try:
-        result = _request("GET", f"/v2/event?{params}")
-    except RuntimeError as e:
-        print(f"  [warn] Could not fetch deployment events: {e}", file=sys.stderr)
-        return []
+    raw_events = _signalflow_events("deployment.started", start_ms, end_ms)
 
     deployments = []
-    for event in result.get("results", []):
-        dims  = event.get("dimensions", {})
-        props = event.get("properties", {})
+    for msg in raw_events:
+        dims  = msg.get("metadata", {})
+        props = msg.get("properties", {})
         svc   = dims.get("service") or props.get("service")
         if not svc:
             continue
@@ -228,7 +253,7 @@ def fetch_deployment_events(start_ms: int, end_ms: int,
             "deployer":    props.get("deployer", ""),
             "commit":      props.get("commit", ""),
             "description": props.get("description", ""),
-            "timestamp":   event.get("timestamp", 0),
+            "timestamp":   msg.get("timestampMs", 0),
         })
     return deployments
 
