@@ -59,6 +59,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -154,18 +155,27 @@ def discover_all_environments() -> dict[str, list[str]]:
     ]
 
     if env_values:
-        # For each env, get its scoped topology
-        for env in env_values:
+        # Fetch scoped topology for each environment in parallel
+        def _fetch_env_topology(env: str) -> tuple[str, list[str]]:
             env_result = _request("POST", "/v2/apm/topology", {
                 "timeRange": f"{then}/{now}",
                 "tagFilters": [{"name": "sf_environment", "operator": "equals",
                                 "value": env, "scope": "global"}]
             })
             env_nodes = (env_result.get("data") or {}).get("nodes", [])
-            env_svcs  = sorted([n["serviceName"] for n in env_nodes
+            return env, sorted([n["serviceName"] for n in env_nodes
                                  if not n.get("inferred")])
-            if env_svcs:
-                env_services[env] = env_svcs
+
+        with ThreadPoolExecutor(max_workers=min(len(env_values), 10)) as pool:
+            futures = {pool.submit(_fetch_env_topology, env): env
+                       for env in env_values}
+            for future in as_completed(futures):
+                try:
+                    env, svcs = future.result()
+                    if svcs:
+                        env_services[env] = svcs
+                except Exception as e:
+                    print(f"  [warn] topology fetch error: {e}", file=sys.stderr)
     else:
         # No explicit environment tags found — treat the whole org as one
         # un-tagged environment (key = None)
@@ -369,35 +379,63 @@ def run(
     # ── Act ────────────────────────────────────────────────────────────────────
     print(f"\n[onboard] {'[DRY RUN] ' if dry_run else ''}Acting on changes...")
 
-    for env in to_provision:
-        label = env or "(no environment tag)"
+    def _onboard_one(env: str) -> dict:
+        """Provision + baseline a single environment. Returns result dict."""
+        label  = env or "(no environment tag)"
         action = "new" if env in new_envs else "updated"
         print(f"\n  [{action}] {label}")
 
-        ok_provision      = provision_environment(env, dry_run=dry_run)
-        ok_baseline       = build_baseline(env, window_minutes=learn_window,
-                                           dry_run=dry_run)
-        ok_error_baseline = build_error_baseline(env, window_minutes=learn_window,
-                                                  dry_run=dry_run)
+        # Provision detectors first (prerequisite), then run both baselines
+        # concurrently since they're independent of each other.
+        ok_provision = provision_environment(env, dry_run=dry_run)
 
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            bl_future  = pool.submit(build_baseline, env, learn_window, dry_run)
+            ebl_future = pool.submit(build_error_baseline, env, learn_window,
+                                     dry_run)
+            ok_baseline       = bl_future.result()
+            ok_error_baseline = ebl_future.result()
+
+        return {
+            "env":               env,
+            "label":             label,
+            "action":            action,
+            "ok_provision":      ok_provision,
+            "ok_baseline":       ok_baseline,
+            "ok_error_baseline": ok_error_baseline,
+        }
+
+    # Process all environments concurrently
+    results = []
+    with ThreadPoolExecutor(max_workers=min(len(to_provision), 4)) as pool:
+        futures = {pool.submit(_onboard_one, env): env for env in to_provision}
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as e:
+                env = futures[future]
+                print(f"  [error] onboarding {env or '(none)'}: {e}",
+                      file=sys.stderr)
+
+    for r in results:
         if not dry_run:
-            env_key = env or "__none__"
+            env_key = r["env"] or "__none__"
             state.setdefault("environments", {})[env_key] = {
-                "services":                sorted(current_envs.get(env, [])),
+                "services":                sorted(current_envs.get(r["env"], [])),
                 "provisioned_at":          ts,
-                "baseline_built_at":       ts if ok_baseline else None,
-                "error_baseline_built_at": ts if ok_error_baseline else None,
-                "last_action":             action,
-                "provision_ok":            ok_provision,
-                "baseline_ok":             ok_baseline,
-                "error_baseline_ok":       ok_error_baseline,
+                "baseline_built_at":       ts if r["ok_baseline"] else None,
+                "error_baseline_built_at": ts if r["ok_error_baseline"] else None,
+                "last_action":             r["action"],
+                "provision_ok":            r["ok_provision"],
+                "baseline_ok":             r["ok_baseline"],
+                "error_baseline_ok":       r["ok_error_baseline"],
             }
             send_audit_event("behavioral_baseline.onboarded", {
-                "environment":        label,
-                "action":             action,
-                "provision_ok":       str(ok_provision),
-                "baseline_ok":        str(ok_baseline),
-                "error_baseline_ok":  str(ok_error_baseline),
+                "environment":        r["label"],
+                "action":             r["action"],
+                "provision_ok":       str(r["ok_provision"]),
+                "baseline_ok":        str(r["ok_baseline"]),
+                "error_baseline_ok":  str(r["ok_error_baseline"]),
             })
 
     if teardown_removed:
