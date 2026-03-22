@@ -548,8 +548,8 @@ def cmd_watch(window_minutes: int = 10,
     print(f"[watch] Discovering services + searching error traces in parallel ({env_desc})...")
 
     baseline = load_baseline(environment)
-    if not baseline["signatures"]:
-        print(f"  [warn] Baseline for {env_desc} is empty — run 'learn' first.",
+    if not baseline.get("created_at"):
+        print(f"  [warn] No baseline found for {env_desc} — run 'learn' first.",
               file=sys.stderr)
         sys.exit(1)
 
