@@ -58,6 +58,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
@@ -121,58 +122,73 @@ def _request(method: str, path: str, body: dict | None = None,
 
 # ── Event fetching ─────────────────────────────────────────────────────────────
 
+def _fetch_events_for_type(event_type: str, tier: str,
+                            start_ms: int, end_ms: int,
+                            environment: str | None) -> list[dict]:
+    """Fetch and normalize events for a single event type."""
+    params = (
+        f"type={event_type}"
+        f"&startTime={start_ms}"
+        f"&endTime={end_ms}"
+        f"&limit=200"
+    )
+    try:
+        result = _request("GET", f"/v2/event?{params}")
+    except RuntimeError as e:
+        print(f"  [warn] Could not fetch {event_type}: {e}", file=sys.stderr)
+        return []
+
+    events = []
+    for event in result.get("results", []):
+        dims  = event.get("dimensions", {})
+        props = event.get("properties", {})
+
+        service = (
+            dims.get("service")
+            or dims.get("new_service")
+            or props.get("service")
+            or _infer_service_from_event(dims, props)
+        )
+        if not service:
+            continue
+
+        event_env = dims.get("environment") or props.get("environment")
+        if environment and event_env and event_env != environment:
+            continue
+
+        events.append({
+            "tier":         tier,
+            "event_type":   event_type,
+            "service":      service,
+            "anomaly_type": dims.get("anomaly_type", event_type),
+            "message":      props.get("message", ""),
+            "timestamp":    event.get("timestamp", 0),
+            "environment":  event_env or environment or "all",
+            "raw":          event,
+        })
+    return events
+
+
 def fetch_anomaly_events(start_ms: int, end_ms: int,
                           environment: str | None = None) -> list[dict]:
     """
     Fetch all behavioral baseline anomaly events from Splunk within the window.
     Returns a flat list of event dicts, each with injected 'tier' and 'service'
     fields derived from the event dimensions.
+    All tier fetches run in parallel.
     """
     all_events: list[dict] = []
-
-    for event_type, tier in TIER_EVENT_MAP.items():
-        params = (
-            f"type={event_type}"
-            f"&startTime={start_ms}"
-            f"&endTime={end_ms}"
-            f"&limit=200"
-        )
-        try:
-            result = _request("GET", f"/v2/event?{params}")
-        except RuntimeError as e:
-            print(f"  [warn] Could not fetch {event_type}: {e}", file=sys.stderr)
-            continue
-
-        for event in result.get("results", []):
-            dims = event.get("dimensions", {})
-            props = event.get("properties", {})
-
-            # Extract service from dimensions (varies by event type)
-            service = (
-                dims.get("service")
-                or dims.get("new_service")
-                or props.get("service")
-                or _infer_service_from_event(dims, props)
-            )
-            if not service:
-                continue
-
-            # Filter by environment if specified
-            event_env = dims.get("environment") or props.get("environment")
-            if environment and event_env and event_env != environment:
-                continue
-
-            all_events.append({
-                "tier":         tier,
-                "event_type":   event_type,
-                "service":      service,
-                "anomaly_type": dims.get("anomaly_type", event_type),
-                "message":      props.get("message", ""),
-                "timestamp":    event.get("timestamp", 0),
-                "environment":  event_env or environment or "all",
-                "raw":          event,
-            })
-
+    with ThreadPoolExecutor(max_workers=len(TIER_EVENT_MAP)) as pool:
+        futures = {
+            pool.submit(_fetch_events_for_type, et, tier, start_ms, end_ms,
+                        environment): et
+            for et, tier in TIER_EVENT_MAP.items()
+        }
+        for future in as_completed(futures):
+            try:
+                all_events.extend(future.result())
+            except Exception as e:
+                print(f"  [warn] fetch error: {e}", file=sys.stderr)
     return all_events
 
 
@@ -376,10 +392,17 @@ def run(window_minutes: int = 30, environment: str | None = None,
     deploy_start_ms = now_ms - DEPLOYMENT_CORRELATION_WINDOW_MINUTES * 60 * 1000
     env_desc = f"environment '{environment}'" if environment else "all environments"
 
-    print(f"[correlate] Fetching anomaly events for {env_desc} "
-          f"(last {window_minutes}m)...")
+    print(f"[correlate] Fetching anomaly + deployment events in parallel ({env_desc})...")
 
-    events = fetch_anomaly_events(start_ms, now_ms, environment=environment)
+    # Fetch anomaly events (3 tier types) and deployment events concurrently
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        anomaly_future    = pool.submit(fetch_anomaly_events, start_ms, now_ms,
+                                        environment)
+        deployment_future = pool.submit(fetch_deployment_events, deploy_start_ms,
+                                        now_ms, environment)
+        events      = anomaly_future.result()
+        deployments = deployment_future.result()
+
     print(f"  Found {len(events)} anomaly events across "
           f"{len({e['tier'] for e in events})} tiers")
 
@@ -394,10 +417,6 @@ def run(window_minutes: int = 30, environment: str | None = None,
     for tier, count in sorted(tier_counts.items()):
         print(f"    {tier}: {count} event(s)")
 
-    # Fetch deployment events for context
-    deployments = fetch_deployment_events(
-        deploy_start_ms, now_ms, environment=environment
-    )
     if deployments:
         print(f"  Found {len(deployments)} deployment event(s) in last "
               f"{DEPLOYMENT_CORRELATION_WINDOW_MINUTES}m:")
@@ -428,18 +447,28 @@ def run(window_minutes: int = 30, environment: str | None = None,
                 print(f"                   \"{deploy['description']}\"")
         for msg in corr["messages"][:3]:
             print(f"    - {msg}")
-        if not dry_run:
-            try:
-                send_correlated_event(corr)
-                print(f"    Event sent (behavioral_baseline.correlated_anomaly)")
-            except Exception as e:
-                print(f"    Failed to send event: {e}", file=sys.stderr)
-        else:
+        if dry_run:
             print(f"    [dry-run] Would send correlated event")
         print()
 
     if dry_run:
         print(f"  Dry run complete — no events sent.")
+        return
+
+    # Send all correlated events in parallel
+    if correlations:
+        with ThreadPoolExecutor(max_workers=len(correlations)) as pool:
+            futures = {pool.submit(send_correlated_event, c): c["service"]
+                       for c in correlations}
+            for future in as_completed(futures):
+                svc = futures[future]
+                try:
+                    future.result()
+                    print(f"  Event sent for {svc} "
+                          f"(behavioral_baseline.correlated_anomaly)")
+                except Exception as e:
+                    print(f"  Failed to send event for {svc}: {e}",
+                          file=sys.stderr)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
