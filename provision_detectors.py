@@ -40,6 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
@@ -466,11 +467,20 @@ def teardown_managed_detectors(environment: str | None = None,
     print(f"  Found {len(detectors)} detector(s) to remove:")
     for d in detectors:
         print(f"    {d['id']}  {d['name']}")
-        if not dry_run:
-            _request("DELETE", f"/v2/detector/{d['id']}")
-            print(f"    Deleted.")
-        else:
+        if dry_run:
             print(f"    [dry-run] Would delete.")
+
+    if not dry_run:
+        with ThreadPoolExecutor(max_workers=min(len(detectors), 10)) as pool:
+            futures = {pool.submit(_request, "DELETE",
+                                   f"/v2/detector/{d['id']}"): d for d in detectors}
+            for future in as_completed(futures):
+                d = futures[future]
+                try:
+                    future.result()
+                    print(f"    Deleted: {d['id']}")
+                except Exception as e:
+                    print(f"    [error] deleting {d['id']}: {e}", file=sys.stderr)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -530,10 +540,20 @@ def main() -> None:
         print("\n[provision] Creating detectors...\n")
 
     created_ids = []
-    for spec in plan:
-        result = create_detector(spec, dry_run=args.dry_run)
-        if result and result.get("id"):
-            created_ids.append(result["id"])
+    if args.dry_run:
+        for spec in plan:
+            create_detector(spec, dry_run=True)
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(plan), 10)) as pool:
+            futures = {pool.submit(create_detector, spec): spec for spec in plan}
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result and result.get("id"):
+                        created_ids.append(result["id"])
+                except Exception as e:
+                    spec = futures[future]
+                    print(f"  [error] {spec['name']}: {e}", file=sys.stderr)
 
     if args.dry_run:
         print(f"\n  Dry run complete. {len(plan)} detector(s) would be created.")
