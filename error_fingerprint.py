@@ -70,8 +70,12 @@ BASE_URL   = f"https://api.{REALM}.signalfx.com"
 APP_URL    = f"https://app.{REALM}.signalfx.com"
 INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 
-# Traces to sample per watch/learn run
+# Traces to sample per learn run
 TRACES_SAMPLE_LIMIT = 200
+
+# Traces to sample per watch run — lower is faster; new signatures surface
+# on the first occurrence so high volume adds little signal.
+WATCH_SAMPLE_LIMIT = int(os.environ.get("WATCH_SAMPLE_LIMIT", "50"))
 
 # Signatures seen fewer times than this in baseline are "rare" (lower confidence)
 MIN_BASELINE_OCCURRENCES = 2
@@ -96,7 +100,7 @@ SIGNATURE_TOP_FRAMES = 5
 AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
 
 # Number of parallel threads for fetching trace details.
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
 
 # Tags examined when building error signatures
 ERROR_TAG_KEYS = [
@@ -192,7 +196,9 @@ def search_error_traces(services: list[str], start_ms: int, end_ms: int,
         "query": ("query GetAnalyticsSearch($jobId: ID!) "
                   "{ getAnalyticsSearch(jobId: $jobId) }"),
     }
-    for _ in range(15):
+    delay = 0.1
+    elapsed = 0.0
+    while elapsed < 30.0:
         result = _request("POST", "/v2/apm/graphql?op=GetAnalyticsSearch",
                           get_body, base_url=APP_URL)
         sections = (
@@ -203,7 +209,9 @@ def search_error_traces(services: list[str], start_ms: int, end_ms: int,
             if section.get("sectionType") == "traceExamples":
                 if section.get("isComplete"):
                     return (section.get("legacyTraceExamples") or [])[:limit]
-        time.sleep(0.5)
+        time.sleep(delay)
+        elapsed += delay
+        delay = min(delay * 2, 2.0)
     return []
 
 
@@ -537,8 +545,7 @@ def cmd_learn(window_minutes: int = 120,
 def cmd_watch(window_minutes: int = 10,
               environment: str | None = None) -> None:
     env_desc = f"environment '{environment}'" if environment else "all environments"
-    print(f"[watch] Discovering services for {env_desc}...")
-    services = discover_services(environment)
+    print(f"[watch] Discovering services + searching error traces in parallel ({env_desc})...")
 
     baseline = load_baseline(environment)
     if not baseline["signatures"]:
@@ -549,11 +556,20 @@ def cmd_watch(window_minutes: int = 10,
     now_ms   = int(time.time() * 1000)
     start_ms = now_ms - window_minutes * 60 * 1000
 
-    print(f"[watch] Checking last {window_minutes}m of error traces "
-          f"across {len(services)} services ({env_desc})...")
-    traces = search_error_traces(services, start_ms, now_ms,
-                                 environment=environment)
-    print(f"  Found {len(traces)} error trace candidates")
+    # Seed search with baseline services; run discovery concurrently.
+    baseline_services = list(set(
+        sig["service"] for sig in baseline.get("signatures", {}).values()
+    ))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        svc_future    = pool.submit(discover_services, environment)
+        traces_future = pool.submit(search_error_traces, baseline_services,
+                                    start_ms, now_ms, WATCH_SAMPLE_LIMIT,
+                                    environment)
+        services = svc_future.result()
+        traces   = traces_future.result()
+
+    print(f"  Services: {len(services)} | Error trace candidates: {len(traces)}")
 
     anomalies_found = checked = skipped = 0
     alerted_hashes: set[str] = set()
