@@ -47,6 +47,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,9 @@ SIGNATURE_TOP_FRAMES = 5
 # New signatures consistently seen across N watch runs are auto-promoted
 # to the baseline (stops alerting on them). Set to 0 to disable.
 AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
+
+# Number of parallel threads for fetching trace details.
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
 
 # Tags examined when building error signatures
 ERROR_TAG_KEYS = [
@@ -476,44 +480,46 @@ def cmd_learn(window_minutes: int = 120,
     signatures = baseline.setdefault("signatures", {})
     new_count = updated_count = skipped = 0
 
-    for meta in traces:
-        trace_id = meta.get("traceId")
-        if not trace_id:
-            continue
-        trace = get_trace_full(trace_id)
-        if not trace:
-            skipped += 1
-            continue
+    trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
+    print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
 
-        sigs = build_error_signatures(trace)
-        if not sigs:
-            skipped += 1
-            continue
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_id = {pool.submit(get_trace_full, tid): tid for tid in trace_ids}
+        for future in as_completed(future_to_id):
+            trace = future.result()
+            if not trace:
+                skipped += 1
+                continue
 
-        for sig in sigs:
-            h = sig["hash"]
-            if h in signatures:
-                signatures[h]["occurrences"] = \
-                    signatures[h].get("occurrences", 1) + 1
-                updated_count += 1
-            else:
-                signatures[h] = {
-                    "hash":          h,
-                    "service":       sig["service"],
-                    "error_type":    sig["error_type"],
-                    "http_status":   sig["http_status"],
-                    "db_system":     sig["db_system"],
-                    "operation":     sig["operation"],
-                    "call_path":     sig["call_path"],
-                    "occurrences":   1,
-                    "watch_hits":    0,
-                    "auto_promoted": False,
-                    "promoted_at":   None,
-                    "first_seen":    datetime.now(timezone.utc).isoformat(),
-                }
-                new_count += 1
-                print(f"  [new] {sig['service']}  "
-                      f"{sig['error_type']} on {sig['operation']}")
+            sigs = build_error_signatures(trace)
+            if not sigs:
+                skipped += 1
+                continue
+
+            for sig in sigs:
+                h = sig["hash"]
+                if h in signatures:
+                    signatures[h]["occurrences"] = \
+                        signatures[h].get("occurrences", 1) + 1
+                    updated_count += 1
+                else:
+                    signatures[h] = {
+                        "hash":          h,
+                        "service":       sig["service"],
+                        "error_type":    sig["error_type"],
+                        "http_status":   sig["http_status"],
+                        "db_system":     sig["db_system"],
+                        "operation":     sig["operation"],
+                        "call_path":     sig["call_path"],
+                        "occurrences":   1,
+                        "watch_hits":    0,
+                        "auto_promoted": False,
+                        "promoted_at":   None,
+                        "first_seen":    datetime.now(timezone.utc).isoformat(),
+                    }
+                    new_count += 1
+                    print(f"  [new] {sig['service']}  "
+                          f"{sig['error_type']} on {sig['operation']}")
 
     # Track number of learn runs — used to compute per-run baseline rate
     baseline["learn_runs"] = baseline.get("learn_runs", 0) + 1
@@ -551,25 +557,28 @@ def cmd_watch(window_minutes: int = 10,
     # Track which services appeared in this window (for vanished check)
     seen_services: set[str] = set()
 
-    # First pass: collect all signatures and counts
+    # First pass: fetch all traces in parallel, then collect signatures and counts
+    trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
+    print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
+
     all_trace_sigs: list[tuple[str, list[dict]]] = []
-    for meta in traces:
-        trace_id = meta.get("traceId")
-        if not trace_id:
-            continue
-        trace = get_trace_full(trace_id)
-        if not trace:
-            skipped += 1
-            continue
-        sigs = build_error_signatures(trace)
-        if not sigs:
-            skipped += 1
-            continue
-        checked += 1
-        for sig in sigs:
-            watch_counts[sig["hash"]] += 1
-            seen_services.add(sig["service"])
-        all_trace_sigs.append((trace_id, sigs))
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_id = {pool.submit(get_trace_full, tid): tid for tid in trace_ids}
+        for future in as_completed(future_to_id):
+            tid = future_to_id[future]
+            trace = future.result()
+            if not trace:
+                skipped += 1
+                continue
+            sigs = build_error_signatures(trace)
+            if not sigs:
+                skipped += 1
+                continue
+            checked += 1
+            for sig in sigs:
+                watch_counts[sig["hash"]] += 1
+                seen_services.add(sig["service"])
+            all_trace_sigs.append((tid, sigs))
 
     # Second pass: classify anomalies now that watch_counts is fully populated
     new_sigs_seen: set[str] = set()
