@@ -59,6 +59,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,9 @@ SPAN_COUNT_SPIKE_MULTIPLIER = 2
 # without manual intervention is auto-promoted to the baseline (stops alerting).
 # Set to 0 to disable auto-promotion.
 AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
+
+# Number of parallel threads for fetching trace details.
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
 
 # ── Noise patterns ─────────────────────────────────────────────────────────────
 # Matched case-insensitively as substrings of a trace's root operation name.
@@ -567,39 +571,41 @@ def cmd_learn(window_minutes: int = 120,
     fingerprints = baseline.setdefault("fingerprints", {})
     new_count = updated_count = skipped = 0
 
-    for meta in traces:
-        trace_id = meta.get("traceId")
-        if not trace_id:
-            continue
-        trace = get_trace_full(trace_id)
-        if not trace:
-            skipped += 1
-            continue
-        fp = build_fingerprint(trace)
-        if fp is None:
-            skipped += 1
-            continue
-        h = fp["hash"]
-        if h in fingerprints:
-            fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
-            updated_count += 1
-        else:
-            fingerprints[h] = {
-                "hash":           h,
-                "path":           fp["path"],
-                "root_op":        fp["root_op"],
-                "services":       fp["services"],
-                "span_count":     fp["span_count"],
-                "edge_count":     fp["edge_count"],
-                "occurrences":    1,
-                "watch_hits":     0,
-                "auto_promoted":  False,
-                "promoted_at":    None,
-                "first_seen":     datetime.now(timezone.utc).isoformat(),
-            }
-            new_count += 1
-            print(f"  [new] {fp['root_op']}  ->  "
-                  f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
+    trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
+    print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_id = {pool.submit(get_trace_full, tid): tid for tid in trace_ids}
+        for future in as_completed(future_to_id):
+            trace = future.result()
+            if not trace:
+                skipped += 1
+                continue
+            fp = build_fingerprint(trace)
+            if fp is None:
+                skipped += 1
+                continue
+            h = fp["hash"]
+            if h in fingerprints:
+                fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
+                updated_count += 1
+            else:
+                fingerprints[h] = {
+                    "hash":           h,
+                    "path":           fp["path"],
+                    "root_op":        fp["root_op"],
+                    "services":       fp["services"],
+                    "span_count":     fp["span_count"],
+                    "edge_count":     fp["edge_count"],
+                    "occurrences":    1,
+                    "watch_hits":     0,
+                    "auto_promoted":  False,
+                    "promoted_at":    None,
+                    "first_seen":     datetime.now(timezone.utc).isoformat(),
+                }
+                new_count += 1
+                print(f"  [new] {fp['root_op']}  ->  "
+                      f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
 
     print(f"  Summary: {new_count} new, {updated_count} updated, "
           f"{skipped} skipped (noise/shallow)")
@@ -664,14 +670,22 @@ def cmd_watch(window_minutes: int = 10,
     # Track which new hashes were seen this run (for auto-promotion)
     new_hashes_seen: set[str] = set()
 
-    for meta in traces:
-        trace_id = meta.get("traceId")
-        if not trace_id:
-            continue
-        trace = get_trace_full(trace_id)
-        if not trace:
-            skipped += 1
-            continue
+    trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
+    print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
+
+    # Fetch all traces in parallel, then process results
+    fetched: list[tuple[str, dict]] = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_id = {pool.submit(get_trace_full, tid): tid for tid in trace_ids}
+        for future in as_completed(future_to_id):
+            tid = future_to_id[future]
+            trace = future.result()
+            if not trace:
+                skipped += 1
+                continue
+            fetched.append((tid, trace))
+
+    for trace_id, trace in fetched:
         fp = build_fingerprint(trace)
         if fp is None:
             skipped += 1
