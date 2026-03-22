@@ -577,7 +577,12 @@ def cmd_learn(window_minutes: int = 120,
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         future_to_id = {pool.submit(get_trace_full, tid): tid for tid in trace_ids}
         for future in as_completed(future_to_id):
-            trace = future.result()
+            try:
+                trace = future.result()
+            except Exception as e:
+                print(f"  [warn] fetch error: {e}", file=sys.stderr)
+                skipped += 1
+                continue
             if not trace:
                 skipped += 1
                 continue
@@ -679,7 +684,12 @@ def cmd_watch(window_minutes: int = 10,
         future_to_id = {pool.submit(get_trace_full, tid): tid for tid in trace_ids}
         for future in as_completed(future_to_id):
             tid = future_to_id[future]
-            trace = future.result()
+            try:
+                trace = future.result()
+            except Exception as e:
+                print(f"  [warn] trace {tid}: {e}", file=sys.stderr)
+                skipped += 1
+                continue
             if not trace:
                 skipped += 1
                 continue
