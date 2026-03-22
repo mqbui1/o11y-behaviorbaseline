@@ -83,8 +83,12 @@ INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 # Minimum span count for a trace to be fingerprint-worthy.
 MIN_SPANS = 2
 
-# Traces to sample per run (across all discovered services)
+# Traces to sample per learn run (for broad baseline coverage)
 TRACES_SAMPLE_LIMIT = 200
+
+# Traces to sample per watch run — lower is faster; new patterns are detected
+# after the first occurrence so high volume adds little signal.
+WATCH_SAMPLE_LIMIT = int(os.environ.get("WATCH_SAMPLE_LIMIT", "50"))
 
 # Fingerprints seen fewer times than this in baseline are treated as "rare"
 MIN_BASELINE_OCCURRENCES = 2
@@ -98,7 +102,7 @@ SPAN_COUNT_SPIKE_MULTIPLIER = 2
 AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
 
 # Number of parallel threads for fetching trace details.
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
 
 # ── Noise patterns ─────────────────────────────────────────────────────────────
 # Matched case-insensitively as substrings of a trace's root operation name.
@@ -254,7 +258,9 @@ def search_traces(services: list[str], start_ms: int, end_ms: int,
         "query": ("query GetAnalyticsSearch($jobId: ID!) "
                   "{ getAnalyticsSearch(jobId: $jobId) }"),
     }
-    for _ in range(15):
+    delay = 0.1
+    elapsed = 0.0
+    while elapsed < 30.0:
         result = _request("POST", "/v2/apm/graphql?op=GetAnalyticsSearch",
                           get_body, base_url=APP_URL)
         sections = (
@@ -266,7 +272,9 @@ def search_traces(services: list[str], start_ms: int, end_ms: int,
                 examples = section.get("legacyTraceExamples") or []
                 if section.get("isComplete"):
                     return examples[:limit]
-        time.sleep(0.5)
+        time.sleep(delay)
+        elapsed += delay
+        delay = min(delay * 2, 2.0)
     return []
 
 
@@ -624,8 +632,7 @@ def cmd_watch(window_minutes: int = 10,
     Also detects entirely new services that have appeared since baseline was built.
     """
     env_desc = f"environment '{environment}'" if environment else "all environments"
-    print(f"[watch] Discovering current topology for {env_desc}...")
-    topo = discover_topology(environment=environment)
+    print(f"[watch] Discovering topology + searching traces in parallel ({env_desc})...")
 
     baseline = load_baseline(environment)
     if not baseline["fingerprints"]:
@@ -633,12 +640,31 @@ def cmd_watch(window_minutes: int = 10,
               file=sys.stderr)
         sys.exit(1)
 
+    # Run topology discovery and trace search concurrently — they're independent.
+    now_ms   = int(time.time() * 1000)
+    start_ms = now_ms - window_minutes * 60 * 1000
+
+    # Seed the trace search with baseline services so we don't need to wait for topo.
+    baseline_topo_services = list(
+        set(baseline.get("topology", {}).get("services", []))
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        topo_future   = pool.submit(discover_topology, environment=environment)
+        traces_future = pool.submit(search_traces, baseline_topo_services,
+                                    start_ms, now_ms, WATCH_SAMPLE_LIMIT,
+                                    environment)
+        topo   = topo_future.result()
+        traces = traces_future.result()
+
+    print(f"  Topology: {len(topo['services'])} services | "
+          f"Traces: {len(traces)} candidates")
+
     # Alert on new *instrumented* services not present at baseline time.
     # Inferred nodes (db nodes, gateways) are excluded — they vary by trace
     # sampling and should not trigger topology alerts.
-    baseline_topo     = baseline.get("topology") or {}
-    baseline_services = set(baseline_topo.get("services", []))
-    baseline_inferred = set(baseline_topo.get("inferred", []))
+    baseline_services = set(baseline.get("topology", {}).get("services", []))
+    baseline_inferred = set(baseline.get("topology", {}).get("inferred", []))
     current_services  = set(topo["services"])
     new_topo_services = current_services - baseline_services - baseline_inferred
     if new_topo_services:
@@ -660,15 +686,6 @@ def cmd_watch(window_minutes: int = 10,
                 print(f"    Event sent for {svc}")
             except Exception as e:
                 print(f"    Failed to send event: {e}", file=sys.stderr)
-
-    now_ms   = int(time.time() * 1000)
-    start_ms = now_ms - window_minutes * 60 * 1000
-
-    print(f"\n[watch] Checking last {window_minutes}m across "
-          f"{len(topo['services'])} services ({env_desc})...")
-    traces = search_traces(topo["services"], start_ms, now_ms,
-                           environment=environment)
-    print(f"  Found {len(traces)} candidate traces")
 
     anomalies_found = checked = skipped = 0
     alerted_hashes: set[str] = set()
