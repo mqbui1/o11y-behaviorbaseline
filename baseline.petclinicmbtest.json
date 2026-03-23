@@ -11,7 +11,7 @@
       ],
       "span_count": 12,
       "edge_count": 11,
-      "occurrences": 7,
+      "occurrences": 11,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -27,7 +27,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 2,
+      "occurrences": 4,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -43,7 +43,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 3,
+      "occurrences": 6,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -59,7 +59,7 @@
       ],
       "span_count": 6,
       "edge_count": 5,
-      "occurrences": 7,
+      "occurrences": 9,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -75,7 +75,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 4,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -107,7 +107,7 @@
       ],
       "span_count": 8,
       "edge_count": 7,
-      "occurrences": 2,
+      "occurrences": 4,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -123,7 +123,7 @@
       ],
       "span_count": 16,
       "edge_count": 15,
-      "occurrences": 4,
+      "occurrences": 6,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -139,7 +139,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 5,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -155,7 +155,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 3,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -170,7 +170,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 3,
+      "occurrences": 15,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -186,7 +186,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 4,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -202,7 +202,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 3,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -218,7 +218,7 @@
       ],
       "span_count": 8,
       "edge_count": 7,
-      "occurrences": 1,
+      "occurrences": 5,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -234,7 +234,7 @@
       ],
       "span_count": 8,
       "edge_count": 7,
-      "occurrences": 1,
+      "occurrences": 3,
       "watch_hits": 1,
       "auto_promoted": false,
       "promoted_at": null,
@@ -250,7 +250,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 4,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -266,7 +266,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 5,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -282,7 +282,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 3,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -298,7 +298,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 4,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -314,7 +314,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 3,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -330,7 +330,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 4,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -346,7 +346,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 2,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -378,7 +378,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 2,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -394,7 +394,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 2,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -427,11 +427,27 @@
       ],
       "span_count": 12,
       "edge_count": 11,
-      "occurrences": 1,
+      "occurrences": 2,
       "watch_hits": 1,
       "auto_promoted": false,
       "promoted_at": null,
       "first_seen": "2026-03-22T05:27:20.442832+00:00"
+    },
+    "1113ce60cff54373": {
+      "hash": "1113ce60cff54373",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /petTypes -> api-gateway:GET -> customers-service:PetRepository.findPetTypes -> customers-service:PetRepository.findPetTypes -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 6,
+      "edge_count": 5,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-23T06:19:52.849168+00:00"
     }
   },
   "topology": {
@@ -440,28 +456,15 @@
       "customers-service",
       "discovery-server",
       "visits-service",
-      "vets-service",
-      "config-server"
+      "vets-service"
     ],
     "inferred": [
-      "mysql:petclinic",
-      "localhost:8888",
-      "config-server:8888"
+      "mysql:petclinic"
     ],
     "db_nodes": [
-      "mysql:petclinic",
-      "localhost:8888",
-      "config-server:8888"
+      "mysql:petclinic"
     ],
     "edges": [
-      [
-        "api-gateway",
-        "config-server"
-      ],
-      [
-        "api-gateway",
-        "config-server:8888"
-      ],
       [
         "api-gateway",
         "customers-service"
@@ -469,10 +472,6 @@
       [
         "api-gateway",
         "discovery-server"
-      ],
-      [
-        "api-gateway",
-        "localhost:8888"
       ],
       [
         "api-gateway",
@@ -484,51 +483,15 @@
       ],
       [
         "customers-service",
-        "config-server"
-      ],
-      [
-        "customers-service",
-        "config-server:8888"
-      ],
-      [
-        "customers-service",
         "discovery-server"
-      ],
-      [
-        "customers-service",
-        "localhost:8888"
       ],
       [
         "customers-service",
         "mysql:petclinic"
       ],
       [
-        "discovery-server",
-        "config-server"
-      ],
-      [
-        "discovery-server",
-        "config-server:8888"
-      ],
-      [
-        "discovery-server",
-        "localhost:8888"
-      ],
-      [
-        "vets-service",
-        "config-server"
-      ],
-      [
-        "vets-service",
-        "config-server:8888"
-      ],
-      [
         "vets-service",
         "discovery-server"
-      ],
-      [
-        "vets-service",
-        "localhost:8888"
       ],
       [
         "vets-service",
@@ -536,15 +499,7 @@
       ],
       [
         "visits-service",
-        "config-server"
-      ],
-      [
-        "visits-service",
         "discovery-server"
-      ],
-      [
-        "visits-service",
-        "localhost:8888"
       ],
       [
         "visits-service",
@@ -554,10 +509,10 @@
     "ingress_nodes": [
       "api-gateway"
     ],
-    "discovered_at": "2026-03-21T05:21:15.628924+00:00",
+    "discovered_at": "2026-03-23T06:19:23.834593+00:00",
     "environment": "petclinicmbtest"
   },
   "created_at": "2026-03-21T05:21:16.869881+00:00",
-  "updated_at": "2026-03-22T05:27:20.640217+00:00",
+  "updated_at": "2026-03-23T06:19:59.740488+00:00",
   "environment": "petclinicmbtest"
 }
