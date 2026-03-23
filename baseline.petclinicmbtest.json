@@ -448,6 +448,22 @@
       "auto_promoted": false,
       "promoted_at": null,
       "first_seen": "2026-03-23T06:19:52.849168+00:00"
+    },
+    "cc33d3a4140c2b3c": {
+      "hash": "cc33d3a4140c2b3c",
+      "path": "api-gateway:POST visits-service -> api-gateway:POST -> api-gateway:POST -> visits-service:POST /owners/*/pets/{petId}/visits -> visits-service:POST /owners/*/pets/{petId}/visits -> visits-service:VisitRepository.save -> visits-service:VisitRepository.save -> visits-service:Session.persist org.springframework.samples.petclinic.visits.model.Visit -> visits-service:Session.persist org.springframework.samples.petclinic.visits.model.Visit -> visits-service:INSERT petclinic.visits",
+      "root_op": "api-gateway:POST visits-service",
+      "services": [
+        "api-gateway",
+        "visits-service"
+      ],
+      "span_count": 6,
+      "edge_count": 5,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-23T06:40:34.228491+00:00"
     }
   },
   "topology": {
@@ -513,6 +529,6 @@
     "environment": "petclinicmbtest"
   },
   "created_at": "2026-03-21T05:21:16.869881+00:00",
-  "updated_at": "2026-03-23T06:19:59.740488+00:00",
+  "updated_at": "2026-03-23T06:40:34.424768+00:00",
   "environment": "petclinicmbtest"
 }
