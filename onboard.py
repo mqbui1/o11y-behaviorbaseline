@@ -304,6 +304,155 @@ def teardown_environment(env: str | None, dry_run: bool = False) -> bool:
     return _run("provision_detectors.py", args, dry_run=dry_run)
 
 
+# ── Dashboard provisioning ─────────────────────────────────────────────────────
+
+def _get_or_create_dashboard_group(env: str) -> str | None:
+    """
+    Find the user's personal dashboard group (first group owned by this token's
+    user), or fall back to the first writable group. Returns the group ID.
+    """
+    try:
+        result = _request("GET", "/v2/dashboardgroup?limit=50")
+        groups = result.get("results", [])
+        # Prefer a group named after the env or already containing our dashboards
+        for g in groups:
+            if "behavioral" in g.get("name", "").lower():
+                return g["id"]
+        # Fall back to first personal group (email-named)
+        for g in groups:
+            if "@" in g.get("name", ""):
+                return g["id"]
+        return groups[0]["id"] if groups else None
+    except Exception as e:
+        print(f"    [warn] Could not find dashboard group: {e}", file=sys.stderr)
+        return None
+
+
+def _create_chart(name: str, program_text: str, chart_type: str = "Event",
+                  extra_options: dict | None = None) -> str | None:
+    """Create a single chart and return its ID, or None on failure."""
+    options: dict = {"type": chart_type, "time": {"type": "relative", "range": 86400000}}
+    if extra_options:
+        options.update(extra_options)
+    try:
+        result = _request("POST", "/v2/chart", {
+            "name": name,
+            "options": options,
+            "programText": program_text,
+        })
+        return result.get("id")
+    except Exception as e:
+        print(f"    [warn] Could not create chart '{name}': {e}", file=sys.stderr)
+        return None
+
+
+def provision_dashboard(env: str, dry_run: bool = False) -> str | None:
+    """
+    Create a 4-panel Behavioral Baseline dashboard for the given environment
+    in Splunk Observability. Returns the dashboard ID, or None on failure.
+
+    Panels:
+      - Trace Path Drift event feed
+      - Error Signature Drift event feed
+      - Correlated Anomalies event feed
+      - Anomaly event count over time (column chart)
+    """
+    label = env or "all"
+    print(f"    Provisioning dashboard for environment '{label}'...")
+
+    if dry_run:
+        print(f"      [dry-run] Would create dashboard: "
+              f"Behavioral Baseline — {label}")
+        return None
+
+    group_id = _get_or_create_dashboard_group(env)
+    if not group_id:
+        print(f"    [warn] No dashboard group found — skipping dashboard",
+              file=sys.stderr)
+        return None
+
+    # Create the 4 charts
+    env_filter = f" and sf_environment='{env}'" if env else ""
+    charts = [
+        _create_chart(
+            "Trace Path Drift",
+            f"E = events(eventType='trace.path.drift'{env_filter}).publish('Trace Path Drift')",
+        ),
+        _create_chart(
+            "Error Signature Drift",
+            f"E = events(eventType='error.signature.drift'{env_filter}).publish('Error Signature Drift')",
+        ),
+        _create_chart(
+            "Correlated Anomalies",
+            f"E = events(eventType='behavioral_baseline.correlated_anomaly'{env_filter}).publish('Correlated Anomaly')",
+        ),
+        _create_chart(
+            "Anomaly Event Count (24h)",
+            (
+                f"A = events(eventType='trace.path.drift'{env_filter}).count().publish('Trace Drift')\n"
+                f"B = events(eventType='error.signature.drift'{env_filter}).count().publish('Error Signature')\n"
+                f"C = events(eventType='behavioral_baseline.correlated_anomaly'{env_filter}).count().publish('Correlated')"
+            ),
+            chart_type="TimeSeriesChart",
+            extra_options={"defaultPlotType": "ColumnChart"},
+        ),
+    ]
+
+    chart_ids = [c for c in charts if c]
+    if not chart_ids:
+        print(f"    [warn] All chart creations failed — skipping dashboard",
+              file=sys.stderr)
+        return None
+
+    # Layout: 2×2 grid, each chart 6 wide × 3 tall
+    positions = [(0, 0), (0, 6), (3, 0), (3, 6)]
+    chart_specs = [
+        {"chartId": cid, "row": row, "column": col, "width": 6, "height": 3}
+        for cid, (row, col) in zip(chart_ids, positions)
+    ]
+
+    try:
+        result = _request("POST", "/v2/dashboard", {
+            "name": f"Behavioral Baseline — {label}",
+            "description": (
+                f"Real-time behavioral anomalies for environment '{label}'. "
+                f"Populated by trace_fingerprint.py, error_fingerprint.py, "
+                f"and correlate.py running every 5 minutes."
+            ),
+            "tags": ["behavioral-baseline", f"env-{label}"],
+            "groupId": group_id,
+            "charts": chart_specs,
+        })
+        dashboard_id = result.get("id")
+        print(f"    Dashboard created: {dashboard_id} "
+              f"(group: {group_id})")
+        return dashboard_id
+    except Exception as e:
+        print(f"    [warn] Could not create dashboard: {e}", file=sys.stderr)
+        return None
+
+
+def teardown_dashboard(dashboard_id: str, dry_run: bool = False) -> None:
+    """Delete the dashboard and its charts for a torn-down environment."""
+    if dry_run:
+        print(f"      [dry-run] Would delete dashboard {dashboard_id}")
+        return
+    try:
+        # Fetch chart IDs before deleting the dashboard
+        charts = _request("GET", f"/v2/dashboard/{dashboard_id}/chart")
+        chart_ids = [c["id"] for c in charts.get("results", [])]
+        _request("DELETE", f"/v2/dashboard/{dashboard_id}")
+        for cid in chart_ids:
+            try:
+                _request("DELETE", f"/v2/chart/{cid}")
+            except Exception:
+                pass
+        print(f"    Dashboard {dashboard_id} deleted ({len(chart_ids)} charts)")
+    except Exception as e:
+        print(f"    [warn] Could not delete dashboard {dashboard_id}: {e}",
+              file=sys.stderr)
+
+
 def send_audit_event(event_type: str, properties: dict) -> None:
     """Emit an audit event to Splunk so onboarding actions are observable."""
     try:
@@ -386,15 +535,17 @@ def run(
         print(f"\n  [{action}] {label}")
 
         # Provision detectors first (prerequisite), then run both baselines
-        # concurrently since they're independent of each other.
+        # and create the dashboard concurrently.
         ok_provision = provision_environment(env, dry_run=dry_run)
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            bl_future  = pool.submit(build_baseline, env, learn_window, dry_run)
-            ebl_future = pool.submit(build_error_baseline, env, learn_window,
-                                     dry_run)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            bl_future   = pool.submit(build_baseline, env, learn_window, dry_run)
+            ebl_future  = pool.submit(build_error_baseline, env, learn_window,
+                                      dry_run)
+            dash_future = pool.submit(provision_dashboard, env, dry_run)
             ok_baseline       = bl_future.result()
             ok_error_baseline = ebl_future.result()
+            dashboard_id      = dash_future.result()
 
         return {
             "env":               env,
@@ -403,6 +554,7 @@ def run(
             "ok_provision":      ok_provision,
             "ok_baseline":       ok_baseline,
             "ok_error_baseline": ok_error_baseline,
+            "dashboard_id":      dashboard_id,
         }
 
     # Process all environments concurrently
@@ -429,6 +581,7 @@ def run(
                 "provision_ok":            r["ok_provision"],
                 "baseline_ok":             r["ok_baseline"],
                 "error_baseline_ok":       r["ok_error_baseline"],
+                "dashboard_id":            r["dashboard_id"],
             }
             send_audit_event("behavioral_baseline.onboarded", {
                 "environment":        r["label"],
@@ -441,10 +594,13 @@ def run(
     if teardown_removed:
         for env in removed_envs:
             label = env or "(no environment tag)"
-            print(f"\n  [removed] {label} — tearing down detectors")
+            print(f"\n  [removed] {label} — tearing down detectors and dashboard")
             teardown_environment(env, dry_run=dry_run)
             if not dry_run:
                 env_key = env or "__none__"
+                env_state = state["environments"].get(env_key, {})
+                if env_state.get("dashboard_id"):
+                    teardown_dashboard(env_state["dashboard_id"], dry_run=dry_run)
                 state["environments"].pop(env_key, None)
                 send_audit_event("behavioral_baseline.torn_down",
                                  {"environment": label})
