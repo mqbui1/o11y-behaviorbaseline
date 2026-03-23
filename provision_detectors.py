@@ -3,16 +3,20 @@
 Behavioral Baseline Detector Provisioner
 =========================================
 Auto-discovers your APM topology from Splunk Observability and provisions
-all SignalFlow detectors (Tiers 1, 3, 4) for any onboarded application.
+APM AutoDetect customization detectors (Tiers 3, 4) plus request rate
+detectors for any onboarded application.
 
-No hardcoded service names. Everything is derived from the live service map.
+Uses Splunk's native APM AutoDetect detector library (signalfx.detectors.autodetect.apm)
+which operates on the APM analytics path — no dependency on spans.count MTS
+or APM MetricSets being configured.
 
 What gets created:
-  Tier 1a — New caller of any inferred database node          [Critical]
-  Tier 1b — Call volume spike on any ingress service          [Major]
-  Tier 1c — Missing edge (known DB caller goes silent)        [Major]
-  Tier 3  — Error rate spike on any DB-calling service        [Major]
-  Tier 4  — p99 latency drift on any DB-calling service       [Warning]
+  Tier 3  — Error rate spike per service         [Critical] (AutoDetectCustomization)
+  Tier 4  — Latency drift per service            [Critical] (AutoDetectCustomization)
+  Tier 1b — Request rate spike per ingress svc   [Critical] (AutoDetectCustomization)
+
+Topology drift (new/missing DB callers) is handled by trace_fingerprint.py
+since it requires trace-level analysis that SignalFlow cannot provide.
 
 Usage:
   # Preview what would be created (dry run)
@@ -150,139 +154,77 @@ def discover_topology(environment: str | None = None) -> dict:
     }
 
 
+# ── AutoDetect parent detector IDs ─────────────────────────────────────────────
+# These are the org-wide AutoDetect detectors created by Splunk.
+# We create AutoDetectCustomization children scoped to specific services/envs.
+
+AUTODETECT_ERROR_RATE_ID    = "GmlOPziA4AA"
+AUTODETECT_LATENCY_ID       = "GmlOOWLAwAA"
+AUTODETECT_REQUEST_RATE_ID  = "GmlOP2iA4AI"
+
+
 # ── SignalFlow program builders ────────────────────────────────────────────────
-# Each function accepts an optional environment string.
-# When provided, an sf_environment filter is ANDed into every data() call so
-# the detector fires only for that environment — production, staging, dev, etc.
-# When None, the detector covers all environments (useful for orgs with a
-# single environment or where environment tagging is not yet configured).
+# These use the signalfx.detectors.autodetect.apm library — same path as the
+# built-in AutoDetect detectors. The filter_ kwarg accepts a SignalFlow filter
+# expression to scope to a specific service and/or environment.
 
-def _env_filter_expr(environment: str | None) -> str:
-    """Return a SignalFlow filter expression string for the given environment."""
+def _filter_expr(service: str, environment: str | None) -> str:
+    """Build a SignalFlow filter() expression for service + environment."""
+    parts = [f"filter('sf_service', '{service}')"]
     if environment:
-        return f"filter('sf_environment', '{environment}')"
-    return None
+        parts.append(f"filter('sf_environment', '{environment}')")
+    return " and ".join(parts)
 
 
-def program_new_db_caller(db_node: str, environment: str | None = None) -> str:
+def program_error_rate(service: str, environment: str | None = None) -> tuple[str, str]:
     """
-    Tier 1a: Fire when any service calls a database node.
-    Groups by sf_service (the calling service) since sf_initiating_service
-    is not a dimension on spans.count MTS.
-    Scoped to environment when provided.
+    Tier 3: Error rate sudden change detector scoped to a single service.
+    Returns (programText, detectLabel).
+    Uses APM autodetect library — no spans.count dependency.
     """
-    env_f = _env_filter_expr(environment)
-    svc_f = f"filter('sf_service', '{db_node}')"
-    combined = f"{env_f} and {svc_f}" if env_f else svc_f
-    return (
-        f"A = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_service']).mean(over='5m')\n"
-        f"detect(when(A > 0)).publish('New caller of {db_node} detected')"
+    label = f"[Behavioral Baseline] {service} error rate spike"
+    filt  = _filter_expr(service, environment)
+    program = (
+        f"from signalfx.detectors.autodetect.apm import errors\n"
+        f"errors.error_rate_sudden_change_detector("
+        f"filter_={filt}"
+        f").publish('{label}')"
     )
+    return program, label
 
 
-def program_ingress_volume_spike(ingress_service: str,
-                                  environment: str | None = None) -> str:
+def program_latency(service: str, environment: str | None = None) -> tuple[str, str]:
     """
-    Tier 1b: Fire when an ingress service's call volume spikes to >10x
-    its 1-hour rolling mean. Uses a rolling baseline instead of timeshift('1w')
-    so it works on environments less than 1 week old.
-    Scoped to environment when provided.
+    Tier 4: Latency deviation from norm detector scoped to a single service.
+    Returns (programText, detectLabel).
+    Uses APM autodetect library — no spans.count dependency.
     """
-    env_f = _env_filter_expr(environment)
-    svc_f = f"filter('sf_service', '{ingress_service}')"
-    combined = f"{env_f} and {svc_f}" if env_f else svc_f
-    return (
-        f"A = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_operation']).mean(over='5m')\n"
-        f"B = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_operation']).mean(over='1h')\n"
-        f"detect(when(A > B * 10))"
-        f".publish('{ingress_service} edge volume spike (>10x hourly mean)')"
+    label = f"[Behavioral Baseline] {service} latency drift"
+    filt  = _filter_expr(service, environment)
+    program = (
+        f"from signalfx.detectors.autodetect.apm import latency\n"
+        f"latency.latency_deviations_from_norm_detector("
+        f"filter_={filt}"
+        f").publish('{label}')"
     )
+    return program, label
 
 
-def program_error_rate_spike(db_callers: list[str],
-                              environment: str | None = None) -> str:
+def program_request_rate(service: str, environment: str | None = None) -> tuple[str, str]:
     """
-    Tier 3: Fire when the error span rate across DB-calling services exceeds
-    3x their 1-hour rolling mean, sustained for 5 minutes.
-    Scoped to environment when provided.
+    Tier 1b: Request rate sudden change detector scoped to a single ingress service.
+    Returns (programText, detectLabel).
+    Uses APM autodetect library — no spans.count dependency.
     """
-    svc_list = ", ".join(f"'{s}'" for s in db_callers)
-    env_f = _env_filter_expr(environment)
-    base = (
-        f"svc_filter = filter('sf_service', {svc_list})\n"
-        f"err_filter = filter('sf_error', 'true')\n"
+    label = f"[Behavioral Baseline] {service} request rate spike"
+    filt  = _filter_expr(service, environment)
+    program = (
+        f"from signalfx.detectors.autodetect.apm import requests\n"
+        f"requests.request_rate_mean_std_detector("
+        f"filter_={filt}"
+        f").publish('{label}')"
     )
-    if env_f:
-        total_filter = f"{env_f} and svc_filter"
-        err_filter   = f"{env_f} and svc_filter and err_filter"
-    else:
-        total_filter = "svc_filter"
-        err_filter   = "svc_filter and err_filter"
-    return (
-        base
-        + f"total_filter = {total_filter}\n"
-        f"err_data_filter = {err_filter}\n"
-        f"errors = data('spans.count', filter=err_data_filter)"
-        f".sum(by=['sf_service', 'sf_environment']).mean(over='5m')\n"
-        f"total = data('spans.count', filter=total_filter)"
-        f".sum(by=['sf_service', 'sf_environment']).mean(over='5m')\n"
-        f"error_rate = errors / total\n"
-        f"baseline_rate = (errors / total).timeshift('1h')\n"
-        f"detect(when(error_rate > baseline_rate * 3 and error_rate > 0.1))"
-        f".publish('DB service error rate spike (>3x hourly mean)')"
-    )
-
-
-def program_missing_db_caller(db_node: str, caller: str,
-                               environment: str | None = None) -> str:
-    """
-    Tier 1c: Fire when a known DB caller goes silent — i.e. its span count
-    drops to zero for a sustained window. This catches:
-      - circuit breakers opening
-      - service being removed or renamed
-      - DB connection pool exhaustion causing fallback paths
-    Fires when a 30-minute mean drops to 0 after a non-zero 6-hour mean.
-    Groups by sf_service (the DB node) since sf_initiating_service is not
-    a dimension on spans.count MTS.
-    """
-    env_f    = _env_filter_expr(environment)
-    svc_f    = f"filter('sf_service', '{caller}')"
-    combined = " and ".join(f for f in [env_f, svc_f] if f)
-    return (
-        f"A = data('spans.count', filter={combined})"
-        f".sum(by=['sf_service', 'sf_environment']).mean(over='30m')\n"
-        f"B = data('spans.count', filter={combined})"
-        f".sum(by=['sf_service', 'sf_environment']).mean(over='6h')\n"
-        f"detect(when(A == 0 and B > 0))"
-        f".publish('{caller} stopped calling {db_node}')"
-    )
-
-
-def program_p99_latency_drift(db_callers: list[str],
-                               environment: str | None = None) -> str:
-    """
-    Tier 4: Fire when p99 latency for any DB-calling service exceeds 2x
-    its 1-hour rolling mean, sustained for 15 minutes. Uses a rolling
-    baseline instead of timeshift('1w') so it works on environments less
-    than 1 week old.
-    Scoped to environment when provided.
-    """
-    svc_list = ", ".join(f"'{s}'" for s in db_callers)
-    env_f = _env_filter_expr(environment)
-    base = f"svc_filter = filter('sf_service', {svc_list})\n"
-    data_filter = f"{env_f} and svc_filter" if env_f else "svc_filter"
-    return (
-        base
-        + f"A = data('service.request.duration.ns.p99', filter={data_filter})"
-        f".mean(by=['sf_service', 'sf_environment']).mean(over='15m')\n"
-        f"B = data('service.request.duration.ns.p99', filter={data_filter})"
-        f".mean(by=['sf_service', 'sf_environment']).mean(over='1h')\n"
-        f"detect(when(A > B * 2))"
-        f".publish('DB service p99 latency drift (>2x hourly mean)')"
-    )
+    return program, label
 
 
 # ── Detector plan builder ──────────────────────────────────────────────────────
@@ -290,145 +232,88 @@ def program_p99_latency_drift(db_callers: list[str],
 def build_detector_plan(topo: dict) -> list[dict]:
     """
     Given a topology dict (which includes topo["environment"]), return a list
-    of detector specs to create. Detector names and tags are scoped per
-    environment so multiple environments can coexist without name collisions.
+    of AutoDetectCustomization detector specs to create. One error rate + one
+    latency detector per service, plus one request rate detector per ingress
+    service. All use the APM autodetect library path.
     """
     detectors = []
-    env       = topo.get("environment")          # None = all environments
-    env_label = f" [{env}]" if env else ""        # appended to detector names
+    env       = topo.get("environment")
+    env_label = f" [{env}]" if env else ""
     env_tag   = f"env-{env}" if env else "env-all"
     ts        = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # ── Tier 1a: one detector per database node ───────────────────────────────
-    for db_node in topo["db_nodes"]:
+    all_services = sorted(set(topo["services"]))
+
+    # ── Tier 3: error rate detector per service ───────────────────────────────
+    for svc in all_services:
+        program, label = program_error_rate(svc, env)
         detectors.append({
-            "name": f"[Behavioral Baseline]{env_label} New caller of {db_node}",
+            "name": f"[Behavioral Baseline]{env_label} {svc} error rate spike",
             "description": (
-                f"Tier 1 topology anomaly{env_label}. Fires when any service "
-                f"sends spans to {db_node}. Use the sf_initiating_service "
-                f"dimension to identify callers and compare against your "
-                f"known baseline set."
+                f"Tier 3 error anomaly{env_label}. Fires when {svc} error rate "
+                f"suddenly increases. Uses APM autodetect analytics path."
             ),
-            "programText": program_new_db_caller(db_node, env),
+            "programText": program,
+            "detectorOrigin": "AutoDetectCustomization",
+            "parentDetectorId": AUTODETECT_ERROR_RATE_ID,
             "rules": [{
                 "severity":    "Critical",
-                "detectLabel": f"New caller of {db_node} detected",
-                "name":        f"New {db_node} caller",
+                "detectLabel": label,
                 "description": (
-                    f"A service is calling {db_node}. Verify it is an expected "
-                    f"caller — unexpected DB access may indicate topology drift "
-                    f"or unauthorized data access."
+                    f"Error rate in {svc} has suddenly grown. Investigate for "
+                    f"new error signatures, failed queries, or dependency changes."
                 ),
             }],
-            "tags": [MANAGED_TAG, "topology-anomaly", "tier1", env_tag,
-                     f"db-{db_node.replace(':', '-').replace(' ', '-')}",
-                     f"provisioned-{ts}"],
-        })
-
-    # ── Tier 1b: one detector per ingress service ─────────────────────────────
-    for svc in topo["ingress_nodes"]:
-        detectors.append({
-            "name": f"[Behavioral Baseline]{env_label} {svc} edge call volume spike",
-            "description": (
-                f"Tier 1 topology anomaly{env_label}. Fires when {svc}'s "
-                f"5-minute call volume on any operation exceeds 10x the same "
-                f"5-minute window from 1 week ago. Seasonality-aware: accounts "
-                f"for time-of-day and day-of-week traffic patterns."
-            ),
-            "programText": program_ingress_volume_spike(svc, env),
-            "rules": [{
-                "severity":    "Major",
-                "detectLabel": f"{svc} edge volume spike (>10x hourly mean)",
-                "name":        f"{svc} volume spike",
-                "description": (
-                    f"Outbound call volume from {svc} has exceeded 10x the "
-                    f"same window from last week. Investigate for routing "
-                    f"loops, retry storms, or unexpected fan-out."
-                ),
-            }],
-            "tags": [MANAGED_TAG, "topology-anomaly", "tier1", env_tag,
+            "tags": [MANAGED_TAG, "error-rate", "tier3", env_tag,
                      f"svc-{svc}", f"provisioned-{ts}"],
         })
 
-    # ── Tier 1c: one detector per (db_caller, db_node) pair ──────────────────
-    for db_node in topo["db_nodes"]:
-        for caller in topo["db_callers"]:
-            detectors.append({
-                "name": f"[Behavioral Baseline]{env_label} {caller} stopped calling {db_node}",
-                "description": (
-                    f"Tier 1 topology anomaly{env_label}. Fires when {caller} "
-                    f"goes silent — its span count to {db_node} drops to zero "
-                    f"over a 30-minute window after being non-zero in the prior "
-                    f"6 hours. May indicate a circuit breaker opening, service "
-                    f"removal, or DB connection failure."
-                ),
-                "programText": program_missing_db_caller(db_node, caller, env),
-                "rules": [{
-                    "severity":    "Major",
-                    "detectLabel": f"{caller} stopped calling {db_node}",
-                    "name":        f"{caller} missing edge to {db_node}",
-                    "description": (
-                        f"{caller} has stopped sending spans to {db_node}. "
-                        f"Verify the service is healthy and its DB connection "
-                        f"is intact. This may indicate a silent failure."
-                    ),
-                }],
-                "tags": [MANAGED_TAG, "topology-anomaly", "tier1", "missing-edge",
-                         env_tag,
-                         f"db-{db_node.replace(':', '-').replace(' ', '-')}",
-                         f"svc-{caller}", f"provisioned-{ts}"],
-            })
-
-    # ── Tier 3: one detector across all DB-calling services ───────────────────
-    if topo["db_callers"]:
+    # ── Tier 4: latency detector per service ─────────────────────────────────
+    for svc in all_services:
+        program, label = program_latency(svc, env)
         detectors.append({
-            "name": f"[Behavioral Baseline]{env_label} DB service error rate spike",
+            "name": f"[Behavioral Baseline]{env_label} {svc} latency drift",
             "description": (
-                f"Tier 3 error signature anomaly{env_label}. Fires when the "
-                f"error span rate for any DB-calling service "
-                f"({', '.join(topo['db_callers'])}) exceeds 3x its 1-hour "
-                f"rolling mean, sustained for 5 minutes."
+                f"Tier 4 latency anomaly{env_label}. Fires when {svc} latency "
+                f"deviates from its norm. Uses APM autodetect analytics path."
             ),
-            "programText": program_error_rate_spike(topo["db_callers"], env),
+            "programText": program,
+            "detectorOrigin": "AutoDetectCustomization",
+            "parentDetectorId": AUTODETECT_LATENCY_ID,
             "rules": [{
-                "severity":    "Major",
-                "detectLabel": "DB service error rate spike (>3x hourly mean)",
-                "name":        "DB service error rate spike",
+                "severity":    "Critical",
+                "detectLabel": label,
                 "description": (
-                    "Error span rate has exceeded 3x the 1-hour rolling mean. "
-                    "Investigate for new error signatures, failed queries, or "
-                    "dependency changes."
-                ),
-            }],
-            "tags": [MANAGED_TAG, "error-signature", "tier3", env_tag,
-                     f"provisioned-{ts}"],
-        })
-
-    # ── Tier 4: one detector across all DB-calling services ───────────────────
-    if topo["db_callers"]:
-        detectors.append({
-            "name": f"[Behavioral Baseline]{env_label} DB service p99 latency drift",
-            "description": (
-                f"Tier 4 latency drift anomaly{env_label}. Fires when p99 "
-                f"latency for any DB-calling service "
-                f"({', '.join(topo['db_callers'])}) exceeds 2x the same "
-                f"15-minute window from 1 week ago, sustained for 15 minutes. "
-                f"Seasonality-aware: accounts for legitimate latency variation "
-                f"by time-of-day and day-of-week."
-            ),
-            "programText": program_p99_latency_drift(topo["db_callers"], env),
-            "rules": [{
-                "severity":    "Warning",
-                "detectLabel": "DB service p99 latency drift (>2x hourly mean)",
-                "name":        "DB service p99 latency drift",
-                "description": (
-                    "p99 latency has sustained >2x the same window from last "
-                    "week. Investigate for slow new dependencies, added "
-                    "execution path hops, or query regressions."
+                    f"Latency in {svc} has deviated from its historical norm. "
+                    f"Investigate for slow dependencies or query regressions."
                 ),
             }],
             "tags": [MANAGED_TAG, "latency-drift", "tier4", env_tag,
-                     f"provisioned-{ts}"],
+                     f"svc-{svc}", f"provisioned-{ts}"],
+        })
+
+    # ── Tier 1b: request rate detector per ingress service ────────────────────
+    for svc in sorted(topo["ingress_nodes"]):
+        program, label = program_request_rate(svc, env)
+        detectors.append({
+            "name": f"[Behavioral Baseline]{env_label} {svc} request rate spike",
+            "description": (
+                f"Tier 1b volume anomaly{env_label}. Fires when {svc} request "
+                f"rate suddenly changes. Uses APM autodetect analytics path."
+            ),
+            "programText": program,
+            "detectorOrigin": "AutoDetectCustomization",
+            "parentDetectorId": AUTODETECT_REQUEST_RATE_ID,
+            "rules": [{
+                "severity":    "Critical",
+                "detectLabel": label,
+                "description": (
+                    f"Request rate on {svc} has suddenly changed. Investigate "
+                    f"for routing loops, retry storms, or traffic anomalies."
+                ),
+            }],
+            "tags": [MANAGED_TAG, "request-rate", "tier1b", env_tag,
+                     f"svc-{svc}", f"provisioned-{ts}"],
         })
 
     return detectors
