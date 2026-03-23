@@ -29,8 +29,8 @@
       "edge_count": 1,
       "occurrences": 2,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:21:26.990262+00:00"
     },
     "b9afb45b1b438c28": {
@@ -45,8 +45,8 @@
       "edge_count": 1,
       "occurrences": 3,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:21:36.090051+00:00"
     },
     "274259c13efab1d4": {
@@ -77,8 +77,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:21:48.490994+00:00"
     },
     "53479a40e442b4d2": {
@@ -93,8 +93,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:22:06.320502+00:00"
     },
     "31ddc9717bc4e16a": {
@@ -141,8 +141,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:22:13.319018+00:00"
     },
     "2b56da2c75201db7": {
@@ -157,8 +157,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:22:28.914641+00:00"
     },
     "fec58438476b84c3": {
@@ -172,8 +172,8 @@
       "edge_count": 1,
       "occurrences": 3,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:22:57.600986+00:00"
     },
     "6a1bfdfd56412abe": {
@@ -188,8 +188,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:23:14.154256+00:00"
     },
     "f3b9960369c3735a": {
@@ -204,8 +204,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:25:08.595071+00:00"
     },
     "5c9790ab7205061f": {
@@ -252,8 +252,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:28:40.207505+00:00"
     },
     "ca038370769c1351": {
@@ -268,8 +268,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:29:26.341379+00:00"
     },
     "0801202ac1bb60e3": {
@@ -284,8 +284,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:30:51.638008+00:00"
     },
     "da41c8d4dbea5aef": {
@@ -300,8 +300,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:41:49.451014+00:00"
     },
     "40845ddcd911de64": {
@@ -316,8 +316,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:42:57.403326+00:00"
     },
     "bfc9a1f13d9cea3c": {
@@ -332,8 +332,8 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
       "first_seen": "2026-03-21T05:50:33.498071+00:00"
     },
     "e3ff96013645305b": {
@@ -348,9 +348,90 @@
       "edge_count": 1,
       "occurrences": 1,
       "watch_hits": 1,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
+      "first_seen": "2026-03-21T05:56:01.698476+00:00"
+    },
+    "de057764f8bb4e97": {
+      "hash": "de057764f8bb4e97",
+      "path": "admin-server:GET -> visits-service:GET /actuator/info",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
+      "first_seen": "2026-03-22T05:05:59.205887+00:00"
+    },
+    "f86d2bf72dd41a63": {
+      "hash": "f86d2bf72dd41a63",
+      "path": "admin-server:GET -> vets-service:GET /actuator/info",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
+      "first_seen": "2026-03-22T05:05:59.995395+00:00"
+    },
+    "2f4a9c2f671f931f": {
+      "hash": "2f4a9c2f671f931f",
+      "path": "admin-server:GET -> api-gateway:GET /actuator/info",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "api-gateway"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
+      "first_seen": "2026-03-22T05:06:00.259116+00:00"
+    },
+    "c3c5e8992fe33213": {
+      "hash": "c3c5e8992fe33213",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> customers-service:GET /owners/{ownerId} -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 7,
+      "edge_count": 6,
+      "occurrences": 1,
+      "watch_hits": 1,
       "auto_promoted": false,
       "promoted_at": null,
-      "first_seen": "2026-03-21T05:56:01.698476+00:00"
+      "first_seen": "2026-03-22T05:25:14.859337+00:00"
+    },
+    "e9ce1220352fd0d7": {
+      "hash": "e9ce1220352fd0d7",
+      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> customers-service:GET /owners/{ownerId} -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> api-gateway:GET -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
+      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
+      "services": [
+        "api-gateway",
+        "customers-service",
+        "visits-service"
+      ],
+      "span_count": 12,
+      "edge_count": 11,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-22T05:27:20.442832+00:00"
     }
   },
   "topology": {
@@ -477,6 +558,6 @@
     "environment": "petclinicmbtest"
   },
   "created_at": "2026-03-21T05:21:16.869881+00:00",
-  "updated_at": "2026-03-21T05:58:42.366796+00:00",
+  "updated_at": "2026-03-22T05:27:20.640217+00:00",
   "environment": "petclinicmbtest"
 }

@@ -216,11 +216,13 @@ def search_error_traces(services: list[str], start_ms: int, end_ms: int,
 
 
 def get_trace_full(trace_id: str) -> dict | None:
+    # parentSpanID is not available in this API; parent relationships are
+    # inferred in build_error_signatures() from span timing containment.
     query = (
         "query TraceFullDetailsLessValidation($id: ID!) {"
         " trace(id: $id) {"
         " traceID startTime duration"
-        " spans { spanID operationName serviceName parentSpanID"
+        " spans { spanID operationName serviceName"
         "         startTime duration tags { key value } } } }"
     )
     gql_body = {
@@ -231,6 +233,32 @@ def get_trace_full(trace_id: str) -> dict | None:
     result = _request("POST", "/v2/apm/graphql?op=TraceFullDetailsLessValidation",
                       gql_body, base_url=APP_URL)
     return (result.get("data") or {}).get("trace")
+
+
+def _infer_parent_id(spans: list[dict]) -> dict[str, str | None]:
+    """
+    Infer parent-child span relationships from timing containment since
+    parentSpanID is not available in the GraphQL API response.
+    Among all containing spans, the one with the smallest duration is the
+    most direct parent (tightest enclosing window).
+    """
+    parents: dict[str, str | None] = {}
+    for span in spans:
+        sid   = span["spanID"]
+        start = span.get("startTime", 0)
+        best_parent_id = None
+        best_duration  = float("inf")
+        for candidate in spans:
+            if candidate["spanID"] == sid:
+                continue
+            c_start = candidate.get("startTime", 0)
+            c_dur   = candidate.get("duration", 0)
+            if c_start <= start < c_start + c_dur:
+                if c_dur < best_duration:
+                    best_duration  = c_dur
+                    best_parent_id = candidate["spanID"]
+        parents[sid] = best_parent_id
+    return parents
 
 
 def send_custom_event(event_type: str, dimensions: dict,
@@ -276,8 +304,9 @@ def build_error_signatures(trace: dict) -> list[dict]:
     if not spans:
         return []
 
-    by_id = {s["spanID"]: s for s in spans}
-    sigs  = []
+    by_id   = {s["spanID"]: s for s in spans}
+    parents = _infer_parent_id(spans)
+    sigs    = []
 
     for span in spans:
         if not _is_error_span(span):
@@ -293,11 +322,11 @@ def build_error_signatures(trace: dict) -> list[dict]:
         http_status = tags.get("http.status_code", "")
         db_system   = tags.get("db.system", "")
 
-        # Build ancestor call path (root → error span)
+        # Build ancestor call path (root → error span) using inferred parents.
         path_frames: list[str] = []
         cur = span
         while cur:
-            pid = cur.get("parentSpanID")
+            pid    = parents.get(cur["spanID"])
             parent = by_id.get(pid) if pid else None
             if parent:
                 path_frames.insert(0,
@@ -556,18 +585,25 @@ def cmd_watch(window_minutes: int = 10,
     now_ms   = int(time.time() * 1000)
     start_ms = now_ms - window_minutes * 60 * 1000
 
-    # Seed search with baseline services; run discovery concurrently.
+    # Seed search with baseline services; fall back to topology discovery.
     baseline_services = list(set(
         sig["service"] for sig in baseline.get("signatures", {}).values()
     ))
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        svc_future    = pool.submit(discover_services, environment)
-        traces_future = pool.submit(search_error_traces, baseline_services,
-                                    start_ms, now_ms, WATCH_SAMPLE_LIMIT,
-                                    environment)
-        services = svc_future.result()
-        traces   = traces_future.result()
+    if baseline_services:
+        # Known services from baseline — discover topology concurrently.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            svc_future    = pool.submit(discover_services, environment)
+            traces_future = pool.submit(search_error_traces, baseline_services,
+                                        start_ms, now_ms, WATCH_SAMPLE_LIMIT,
+                                        environment)
+            services = svc_future.result()
+            traces   = traces_future.result()
+    else:
+        # No learned signatures yet — discover services first, then search.
+        services = discover_services(environment)
+        traces   = search_error_traces(services, start_ms, now_ms,
+                                       WATCH_SAMPLE_LIMIT, environment)
 
     print(f"  Services: {len(services)} | Error trace candidates: {len(traces)}")
 
