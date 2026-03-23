@@ -167,6 +167,8 @@ def _env_filter_expr(environment: str | None) -> str:
 def program_new_db_caller(db_node: str, environment: str | None = None) -> str:
     """
     Tier 1a: Fire when any service calls a database node.
+    Groups by sf_service (the calling service) since sf_initiating_service
+    is not a dimension on spans.count MTS.
     Scoped to environment when provided.
     """
     env_f = _env_filter_expr(environment)
@@ -174,7 +176,7 @@ def program_new_db_caller(db_node: str, environment: str | None = None) -> str:
     combined = f"{env_f} and {svc_f}" if env_f else svc_f
     return (
         f"A = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_initiating_service']).mean(over='5m')\n"
+        f".sum(by=['sf_environment', 'sf_service']).mean(over='5m')\n"
         f"detect(when(A > 0)).publish('New caller of {db_node} detected')"
     )
 
@@ -183,9 +185,8 @@ def program_ingress_volume_spike(ingress_service: str,
                                   environment: str | None = None) -> str:
     """
     Tier 1b: Fire when an ingress service's call volume spikes to >10x
-    the same 5-minute window from exactly 1 week ago (seasonality-aware).
-    Using timeshift('1w') instead of a rolling hourly mean avoids false
-    positives from legitimate time-of-day or day-of-week traffic patterns.
+    its 1-hour rolling mean. Uses a rolling baseline instead of timeshift('1w')
+    so it works on environments less than 1 week old.
     Scoped to environment when provided.
     """
     env_f = _env_filter_expr(environment)
@@ -195,10 +196,9 @@ def program_ingress_volume_spike(ingress_service: str,
         f"A = data('spans.count', filter={combined})"
         f".sum(by=['sf_environment', 'sf_operation']).mean(over='5m')\n"
         f"B = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_operation']).mean(over='5m')"
-        f".timeshift('1w')\n"
+        f".sum(by=['sf_environment', 'sf_operation']).mean(over='1h')\n"
         f"detect(when(A > B * 10))"
-        f".publish('{ingress_service} edge volume spike (>10x same window last week)')"
+        f".publish('{ingress_service} edge volume spike (>10x hourly mean)')"
     )
 
 
@@ -213,7 +213,7 @@ def program_error_rate_spike(db_callers: list[str],
     env_f = _env_filter_expr(environment)
     base = (
         f"svc_filter = filter('sf_service', {svc_list})\n"
-        f"err_filter = filter('error', 'true')\n"
+        f"err_filter = filter('sf_error', 'true')\n"
     )
     if env_f:
         data_filter = f"{env_f} and svc_filter and err_filter"
@@ -225,7 +225,7 @@ def program_error_rate_spike(db_callers: list[str],
         f".sum(by=['sf_service', 'sf_environment']).mean(over='5m')\n"
         f"B = data('spans.count', filter={data_filter})"
         f".sum(by=['sf_service', 'sf_environment']).mean(over='1h')\n"
-        f"detect(when(A > B * 3, lasting='5m'))"
+        f"detect(when(A > B * 3, lasting=duration('5m')))"
         f".publish('DB service error rate spike (>3x hourly mean)')"
     )
 
@@ -239,17 +239,18 @@ def program_missing_db_caller(db_node: str, caller: str,
       - service being removed or renamed
       - DB connection pool exhaustion causing fallback paths
     Fires when a 30-minute mean drops to 0 after a non-zero 6-hour mean.
+    Groups by sf_service (the DB node) since sf_initiating_service is not
+    a dimension on spans.count MTS.
     """
     env_f    = _env_filter_expr(environment)
-    svc_f    = f"filter('sf_service', '{db_node}')"
-    init_f   = f"filter('sf_initiating_service', '{caller}')"
-    combined = " and ".join(f for f in [env_f, svc_f, init_f] if f)
+    svc_f    = f"filter('sf_service', '{caller}')"
+    combined = " and ".join(f for f in [env_f, svc_f] if f)
     return (
         f"A = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_initiating_service']).mean(over='30m')\n"
+        f".sum(by=['sf_service', 'sf_environment']).mean(over='30m')\n"
         f"B = data('spans.count', filter={combined})"
-        f".sum(by=['sf_environment', 'sf_initiating_service']).mean(over='6h')\n"
-        f"detect(when(A == 0 and B > 0, lasting='30m'))"
+        f".sum(by=['sf_service', 'sf_environment']).mean(over='6h')\n"
+        f"detect(when(A == 0 and B > 0, lasting=duration('30m')))"
         f".publish('{caller} stopped calling {db_node}')"
     )
 
@@ -258,10 +259,9 @@ def program_p99_latency_drift(db_callers: list[str],
                                environment: str | None = None) -> str:
     """
     Tier 4: Fire when p99 latency for any DB-calling service exceeds 2x
-    the same 15-minute window from exactly 1 week ago (seasonality-aware),
-    sustained for 15 minutes. Using timeshift('1w') accounts for legitimate
-    latency variation by time-of-day and day-of-week (e.g. batch jobs, peak
-    hours) that would produce false positives with a simple rolling mean.
+    its 1-hour rolling mean, sustained for 15 minutes. Uses a rolling
+    baseline instead of timeshift('1w') so it works on environments less
+    than 1 week old.
     Scoped to environment when provided.
     """
     svc_list = ", ".join(f"'{s}'" for s in db_callers)
@@ -273,10 +273,9 @@ def program_p99_latency_drift(db_callers: list[str],
         + f"A = data('service.request.duration.ns.p99', filter={data_filter})"
         f".mean(by=['sf_service', 'sf_environment']).mean(over='15m')\n"
         f"B = data('service.request.duration.ns.p99', filter={data_filter})"
-        f".mean(by=['sf_service', 'sf_environment']).mean(over='15m')"
-        f".timeshift('1w')\n"
-        f"detect(when(A > B * 2, lasting='15m'))"
-        f".publish('DB service p99 latency drift (>2x same window last week)')"
+        f".mean(by=['sf_service', 'sf_environment']).mean(over='1h')\n"
+        f"detect(when(A > B * 2, lasting=duration('15m')))"
+        f".publish('DB service p99 latency drift (>2x hourly mean)')"
     )
 
 
@@ -333,7 +332,7 @@ def build_detector_plan(topo: dict) -> list[dict]:
             "programText": program_ingress_volume_spike(svc, env),
             "rules": [{
                 "severity":    "Major",
-                "detectLabel": f"{svc} edge volume spike (>10x same window last week)",
+                "detectLabel": f"{svc} edge volume spike (>10x hourly mean)",
                 "name":        f"{svc} volume spike",
                 "description": (
                     f"Outbound call volume from {svc} has exceeded 10x the "
@@ -414,7 +413,7 @@ def build_detector_plan(topo: dict) -> list[dict]:
             "programText": program_p99_latency_drift(topo["db_callers"], env),
             "rules": [{
                 "severity":    "Warning",
-                "detectLabel": "DB service p99 latency drift (>2x same window last week)",
+                "detectLabel": "DB service p99 latency drift (>2x hourly mean)",
                 "name":        "DB service p99 latency drift",
                 "description": (
                     "p99 latency has sustained >2x the same window from last "
