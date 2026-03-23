@@ -216,16 +216,22 @@ def program_error_rate_spike(db_callers: list[str],
         f"err_filter = filter('sf_error', 'true')\n"
     )
     if env_f:
-        data_filter = f"{env_f} and svc_filter and err_filter"
+        total_filter = f"{env_f} and svc_filter"
+        err_filter   = f"{env_f} and svc_filter and err_filter"
     else:
-        data_filter = "svc_filter and err_filter"
+        total_filter = "svc_filter"
+        err_filter   = "svc_filter and err_filter"
     return (
         base
-        + f"A = data('spans.count', filter={data_filter})"
+        + f"total_filter = {total_filter}\n"
+        f"err_data_filter = {err_filter}\n"
+        f"errors = data('spans.count', filter=err_data_filter)"
         f".sum(by=['sf_service', 'sf_environment']).mean(over='5m')\n"
-        f"B = data('spans.count', filter={data_filter})"
-        f".sum(by=['sf_service', 'sf_environment']).mean(over='1h')\n"
-        f"detect(when(A > B * 3, lasting=duration('5m')))"
+        f"total = data('spans.count', filter=total_filter)"
+        f".sum(by=['sf_service', 'sf_environment']).mean(over='5m')\n"
+        f"error_rate = errors / total\n"
+        f"baseline_rate = (errors / total).timeshift('1h')\n"
+        f"detect(when(error_rate > baseline_rate * 3 and error_rate > 0.1))"
         f".publish('DB service error rate spike (>3x hourly mean)')"
     )
 
@@ -250,7 +256,7 @@ def program_missing_db_caller(db_node: str, caller: str,
         f".sum(by=['sf_service', 'sf_environment']).mean(over='30m')\n"
         f"B = data('spans.count', filter={combined})"
         f".sum(by=['sf_service', 'sf_environment']).mean(over='6h')\n"
-        f"detect(when(A == 0 and B > 0, lasting=duration('30m')))"
+        f"detect(when(A == 0 and B > 0))"
         f".publish('{caller} stopped calling {db_node}')"
     )
 
@@ -274,7 +280,7 @@ def program_p99_latency_drift(db_callers: list[str],
         f".mean(by=['sf_service', 'sf_environment']).mean(over='15m')\n"
         f"B = data('service.request.duration.ns.p99', filter={data_filter})"
         f".mean(by=['sf_service', 'sf_environment']).mean(over='1h')\n"
-        f"detect(when(A > B * 2, lasting=duration('15m')))"
+        f"detect(when(A > B * 2))"
         f".publish('DB service p99 latency drift (>2x hourly mean)')"
     )
 
