@@ -96,6 +96,12 @@ MIN_BASELINE_OCCURRENCES = 2
 # Span count must exceed this multiple of baseline max to fire SPAN_COUNT_SPIKE
 SPAN_COUNT_SPIKE_MULTIPLIER = 2
 
+# MISSING_SERVICE fires when a service is present in this fraction of baseline
+# patterns for the same root_op (e.g. 0.6 = present in ≥60% of variants).
+MISSING_SERVICE_DOMINANCE_THRESHOLD = float(
+    os.environ.get("MISSING_SERVICE_DOMINANCE_THRESHOLD", "0.6")
+)
+
 # Auto-promotion: a NEW_FINGERPRINT seen in this many consecutive watch runs
 # without manual intervention is auto-promoted to the baseline (stops alerting).
 # Set to 0 to disable auto-promotion.
@@ -427,12 +433,15 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES
     }
 
-    # NEW_FINGERPRINT — but skip if already auto-promoted
+    # NEW_FINGERPRINT — but skip if already auto-promoted.
+    # A fingerprint must be seen >= MIN_BASELINE_OCCURRENCES times to be
+    # considered "established". Rare/unseen hashes still fire as NEW_FINGERPRINT
+    # so they don't silently bypass MISSING_SERVICE detection.
     stored = baseline.get("fingerprints", {}).get(fp_hash)
     if stored and stored.get("auto_promoted"):
         return None
 
-    if fp_hash not in baseline.get("fingerprints", {}):
+    if not stored or stored.get("occurrences", 0) < MIN_BASELINE_OCCURRENCES:
         return {
             "type":    "NEW_FINGERPRINT",
             "message": f"Unknown execution path for '{root_op}'",
@@ -467,12 +476,22 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
             "fp":      fp,
         }
 
-    # MISSING_SERVICE
+    # MISSING_SERVICE — fire when a service is dominant (present in
+    # >= MISSING_SERVICE_DOMINANCE_THRESHOLD fraction of baseline patterns)
+    # but absent from the current trace. Using dominance rather than strict
+    # intersection prevents a single rare variant (occurrences=1) without the
+    # service from masking a genuine absence of an important service.
     if baseline_for_root:
-        always_present = set.intersection(
-            *[set(info.get("services", [])) for info in baseline_for_root.values()]
-        )
-        missing = always_present - set(fp["services"])
+        total_patterns = len(baseline_for_root)
+        service_counts: dict[str, int] = defaultdict(int)
+        for info in baseline_for_root.values():
+            for svc in info.get("services", []):
+                service_counts[svc] += 1
+        dominant_services = {
+            s for s, c in service_counts.items()
+            if c / total_patterns >= MISSING_SERVICE_DOMINANCE_THRESHOLD
+        }
+        missing = dominant_services - set(fp["services"])
         if missing:
             return {
                 "type":    "MISSING_SERVICE",
@@ -572,12 +591,14 @@ def cmd_learn(window_minutes: int = 120,
     print(f"  Found {len(traces)} candidate traces")
 
     baseline = load_baseline(environment)
-    if not baseline["created_at"]:
+    is_fresh = not baseline.get("created_at")
+    if is_fresh:
         baseline["created_at"] = datetime.now(timezone.utc).isoformat()
     baseline["topology"] = topo
 
     fingerprints = baseline.setdefault("fingerprints", {})
     new_count = updated_count = skipped = 0
+    observed_hashes: set[str] = set()
 
     trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
     print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
@@ -599,6 +620,7 @@ def cmd_learn(window_minutes: int = 120,
                 skipped += 1
                 continue
             h = fp["hash"]
+            observed_hashes.add(h)
             if h in fingerprints:
                 fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
                 updated_count += 1
@@ -619,6 +641,18 @@ def cmd_learn(window_minutes: int = 120,
                 new_count += 1
                 print(f"  [new] {fp['root_op']}  ->  "
                       f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
+
+    # Prune fingerprints not seen in this learn window (unless auto-promoted,
+    # which means they were deliberately accepted and should persist).
+    if observed_hashes or is_fresh:
+        stale = [
+            h for h, info in fingerprints.items()
+            if h not in observed_hashes and not info.get("auto_promoted")
+        ]
+        if stale:
+            for h in stale:
+                del fingerprints[h]
+            print(f"  Pruned {len(stale)} stale fingerprint(s) not seen in this window")
 
     print(f"  Summary: {new_count} new, {updated_count} updated, "
           f"{skipped} skipped (noise/shallow)")
