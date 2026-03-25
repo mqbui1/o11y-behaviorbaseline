@@ -34,6 +34,7 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 - Splunk Observability Cloud account with APM enabled
 - Services instrumented with OpenTelemetry (traces flowing)
 - `SPLUNK_ACCESS_TOKEN` — an API token with read+write access
+- `SPLUNK_INGEST_TOKEN` — an ingest token for writing custom events (if omitted, falls back to `SPLUNK_ACCESS_TOKEN`)
 - `SPLUNK_REALM` — your realm (e.g. `us1`, `eu0`)
 
 No third-party Python packages required. All scripts use the standard library only.
@@ -69,28 +70,28 @@ This runs all three steps in sequence:
 2. `trace_fingerprint.py learn` — builds Tier 2 trace path baseline
 3. `error_fingerprint.py learn` — builds Tier 3 error signature baseline
 
-### Automatic multi-environment mode (cron)
+### Automatic multi-environment mode
 
 ```bash
 # Discover all active environments and provision any new/changed ones
 python onboard.py --auto
-
-# Daily cron
-0 6 * * * cd /opt/behavioral-baseline && python onboard.py --auto >> onboard.log 2>&1
 ```
 
-### Continuous watch (cron every 5 minutes)
+`onboard.py` manages all cron jobs automatically. After onboarding an environment, the following entries are added to crontab (tagged `# behavioral-baseline-managed`):
 
-```bash
-# Tier 2 — trace path drift
-*/5 * * * * python trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-
-# Tier 3 — new error signatures, rate spikes, vanished signatures
-*/5 * * * * python error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-
-# Correlation — joins Tier 1/2/3 events, fires combined alert when 2+ tiers hit same service
-*/5 * * * * python correlate.py --environment petclinicmbtest --window-minutes 15
 ```
+# Per-environment (added once per environment)
+*/5 * * * *   trace_fingerprint.py --environment <env> watch
+*/5 * * * *   error_fingerprint.py --environment <env> watch
+*/5 * * * *   correlate.py --environment <env>
+0   2 * * *   trace_fingerprint.py --environment <env> learn --window-minutes 120
+0   2 * * *   error_fingerprint.py --environment <env> learn --window-minutes 120
+
+# Global (added once)
+*/30 * * * *  onboard.py --auto   ← discovers new environments every 30 min
+```
+
+Teardown (`onboard.py --teardown --environment <env>`) removes the per-environment entries. No manual crontab editing required.
 
 ### Individual scripts
 
@@ -147,6 +148,23 @@ python notify_deployment.py \
 
 This preserves full observability of what changed while preventing high-severity pages for expected behavior.
 
+**Post-deploy baseline re-learn:**
+
+`notify_deployment.py` also schedules a background re-learn that runs automatically after a configurable delay (default: 5 minutes). This allows new-version traces to start flowing before the baseline is rebuilt, so the new call patterns are learned rather than permanently alerted on.
+
+```bash
+# Default: re-learn fires 5 minutes after the deploy event
+python notify_deployment.py --service api-gateway --environment production --version v2.4.1
+
+# Custom delay
+python notify_deployment.py --service api-gateway --environment production --relearn-delay 10
+
+# Disable post-deploy re-learn entirely
+python notify_deployment.py --service api-gateway --environment production --relearn-delay 0
+```
+
+The re-learn uses a 30-minute window to capture the new trace patterns. Logs are written to `/tmp/bab_relearn_deploy.log`.
+
 ---
 
 ## Baseline auto-promotion
@@ -178,6 +196,8 @@ python error_fingerprint.py --environment petclinicmbtest promote abc123def456..
 | `AUTO_PROMOTE_THRESHOLD` | `5` | Watch runs before a new pattern is auto-promoted. Set to `0` to disable. |
 
 **When to re-run `learn` instead:** If you make a large structural change (many services added/removed, major refactor), a full `learn` rebuild is faster than waiting for auto-promotion to accumulate on dozens of new patterns.
+
+**Baseline pruning:** Each `learn` run also removes fingerprints and error signatures that were *not* observed in the current window (auto-promoted entries are always retained). This prevents stale patterns from accumulating over time — for example, startup-era errors that no longer occur will be removed on the next daily re-learn.
 
 ---
 
@@ -223,14 +243,19 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SPLUNK_ACCESS_TOKEN` | required | API token |
+| `SPLUNK_ACCESS_TOKEN` | required | API token (read/write) |
+| `SPLUNK_INGEST_TOKEN` | falls back to `SPLUNK_ACCESS_TOKEN` | Ingest token for writing custom events |
 | `SPLUNK_REALM` | `us0` | Splunk realm |
 | `BASELINE_PATH` | `./baseline.json` | Trace fingerprint baseline location |
 | `ERROR_BASELINE_PATH` | `./error_baseline.json` | Error signature baseline location |
 | `ONBOARDING_STATE_PATH` | `./onboarding_state.json` | Onboarding state file location |
 | `TOPOLOGY_LOOKBACK_HOURS` | `48` | How far back topology queries look |
 | `AUTO_PROMOTE_THRESHOLD` | `5` | Watch runs before a new pattern is auto-promoted (0 = disabled) |
-| `DEPLOYMENT_CORRELATION_WINDOW_MINUTES` | `60` | How far back to look for deployment events when annotating correlated anomalies |
+| `DEPLOYMENT_CORRELATION_WINDOW_MINUTES` | `60` | How far back to look for deployment events when correlating anomalies |
+| `RELEARN_DELAY_MINUTES` | `5` | Minutes after a deploy event before background re-learn fires (0 = disabled) |
+| `MISSING_SERVICE_DOMINANCE_THRESHOLD` | `0.6` | Fraction of baseline patterns a service must appear in to trigger `MISSING_SERVICE` |
+| `WATCH_SAMPLE_LIMIT` | `50` | Max traces fetched per watch run |
+| `MAX_WORKERS` | `20` | Parallel threads for trace detail fetching |
 
 ---
 
