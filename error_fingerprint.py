@@ -511,11 +511,13 @@ def cmd_learn(window_minutes: int = 120,
     print(f"  Found {len(traces)} error trace candidates")
 
     baseline = load_baseline(environment)
-    if not baseline["created_at"]:
+    is_fresh = not baseline.get("created_at")
+    if is_fresh:
         baseline["created_at"] = datetime.now(timezone.utc).isoformat()
 
     signatures = baseline.setdefault("signatures", {})
     new_count = updated_count = skipped = 0
+    observed_hashes: set[str] = set()
 
     trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
     print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
@@ -540,6 +542,7 @@ def cmd_learn(window_minutes: int = 120,
 
             for sig in sigs:
                 h = sig["hash"]
+                observed_hashes.add(h)
                 if h in signatures:
                     signatures[h]["occurrences"] = \
                         signatures[h].get("occurrences", 1) + 1
@@ -562,6 +565,18 @@ def cmd_learn(window_minutes: int = 120,
                     new_count += 1
                     print(f"  [new] {sig['service']}  "
                           f"{sig['error_type']} on {sig['operation']}")
+
+    # Prune signatures not seen in this learn window:
+    # - Always prune on a fresh baseline (first learn run)
+    # - On subsequent runs, only prune signatures that were never auto-promoted
+    #   and haven't been seen at all (avoids silently removing rare-but-real errors)
+    if observed_hashes or is_fresh:
+        stale = [h for h, info in signatures.items()
+                 if h not in observed_hashes and not info.get("auto_promoted")]
+        if stale:
+            for h in stale:
+                del signatures[h]
+            print(f"  Pruned {len(stale)} stale signature(s) not seen in this window")
 
     # Track number of learn runs — used to compute per-run baseline rate
     baseline["learn_runs"] = baseline.get("learn_runs", 0) + 1

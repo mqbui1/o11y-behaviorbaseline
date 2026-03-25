@@ -11,7 +11,7 @@
       ],
       "span_count": 12,
       "edge_count": 11,
-      "occurrences": 11,
+      "occurrences": 20,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -59,7 +59,7 @@
       ],
       "span_count": 6,
       "edge_count": 5,
-      "occurrences": 9,
+      "occurrences": 14,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -75,7 +75,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 4,
+      "occurrences": 7,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -91,7 +91,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 2,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -107,7 +107,7 @@
       ],
       "span_count": 8,
       "edge_count": 7,
-      "occurrences": 4,
+      "occurrences": 11,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -123,7 +123,7 @@
       ],
       "span_count": 16,
       "edge_count": 15,
-      "occurrences": 6,
+      "occurrences": 9,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -139,7 +139,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 5,
+      "occurrences": 8,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -155,7 +155,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 3,
+      "occurrences": 9,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -186,7 +186,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 4,
+      "occurrences": 7,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -202,7 +202,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 3,
+      "occurrences": 4,
       "watch_hits": 0,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -218,7 +218,7 @@
       ],
       "span_count": 8,
       "edge_count": 7,
-      "occurrences": 5,
+      "occurrences": 10,
       "watch_hits": 0,
       "auto_promoted": false,
       "promoted_at": null,
@@ -234,7 +234,7 @@
       ],
       "span_count": 8,
       "edge_count": 7,
-      "occurrences": 3,
+      "occurrences": 6,
       "watch_hits": 1,
       "auto_promoted": false,
       "promoted_at": null,
@@ -250,7 +250,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 4,
+      "occurrences": 6,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -266,7 +266,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 5,
+      "occurrences": 7,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -282,7 +282,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 3,
+      "occurrences": 4,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -298,7 +298,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 4,
+      "occurrences": 6,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -314,7 +314,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 3,
+      "occurrences": 4,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -346,7 +346,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 2,
+      "occurrences": 3,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -362,7 +362,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 1,
+      "occurrences": 2,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -378,7 +378,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 2,
+      "occurrences": 3,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -394,7 +394,7 @@
       ],
       "span_count": 2,
       "edge_count": 1,
-      "occurrences": 2,
+      "occurrences": 3,
       "watch_hits": 1,
       "auto_promoted": true,
       "promoted_at": "2026-03-22T05:27:00.692127+00:00",
@@ -464,21 +464,296 @@
       "auto_promoted": false,
       "promoted_at": null,
       "first_seen": "2026-03-23T06:40:34.228491+00:00"
+    },
+    "2a7c1f11c6393f2a": {
+      "hash": "2a7c1f11c6393f2a",
+      "path": "api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /** -> vets-service:GET /** -> vets-service:ResponseFacade.sendError",
+      "root_op": "api-gateway:GET vets-service",
+      "services": [
+        "api-gateway",
+        "vets-service"
+      ],
+      "span_count": 4,
+      "edge_count": 3,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-23T18:30:15.225659+00:00"
+    },
+    "6357ae5d76ac75b0": {
+      "hash": "6357ae5d76ac75b0",
+      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> api-gateway:GET -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> customers-service:GET /owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> visits-service:GET /pets/visits -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
+      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
+      "services": [
+        "api-gateway",
+        "customers-service",
+        "visits-service"
+      ],
+      "span_count": 12,
+      "edge_count": 11,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-23T18:35:12.273604+00:00"
+    },
+    "0effb31ff5250e78": {
+      "hash": "0effb31ff5250e78",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners -> api-gateway:GET -> customers-service:OwnerRepository.findAll -> customers-service:OwnerRepository.findAll -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic.owners -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findAll -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 8,
+      "edge_count": 7,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-24T05:49:44.350661+00:00"
+    },
+    "13ad5609cf0d1bc3": {
+      "hash": "13ad5609cf0d1bc3",
+      "path": "api-gateway:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
+      "root_op": "api-gateway:GET",
+      "services": [
+        "api-gateway",
+        "config-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:20:07.744800+00:00"
+    },
+    "fb9b51ee9edce84a": {
+      "hash": "fb9b51ee9edce84a",
+      "path": "customers-service:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
+      "root_op": "customers-service:GET",
+      "services": [
+        "config-server",
+        "customers-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:20:07.908465+00:00"
+    },
+    "fab59062b4161e58": {
+      "hash": "fab59062b4161e58",
+      "path": "api-gateway:GET -> discovery-server:GET /{version}/apps",
+      "root_op": "api-gateway:GET",
+      "services": [
+        "api-gateway",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:20:08.077958+00:00"
+    },
+    "7e33d2dcbcd33f37": {
+      "hash": "7e33d2dcbcd33f37",
+      "path": "visits-service:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
+      "root_op": "visits-service:GET",
+      "services": [
+        "config-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:20:08.227642+00:00"
+    },
+    "ac1dcc9db922df75": {
+      "hash": "ac1dcc9db922df75",
+      "path": "vets-service:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
+      "root_op": "vets-service:GET",
+      "services": [
+        "config-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:20:08.370959+00:00"
+    },
+    "ec481211719aac9c": {
+      "hash": "ec481211719aac9c",
+      "path": "customers-service:GET -> discovery-server:GET /{version}/apps",
+      "root_op": "customers-service:GET",
+      "services": [
+        "customers-service",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:23:58.632370+00:00"
+    },
+    "ee018af484afd8ce": {
+      "hash": "ee018af484afd8ce",
+      "path": "visits-service:GET -> discovery-server:GET /{version}/apps",
+      "root_op": "visits-service:GET",
+      "services": [
+        "discovery-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:23:59.060730+00:00"
+    },
+    "3d191cfa8627be5c": {
+      "hash": "3d191cfa8627be5c",
+      "path": "visits-service:POST -> discovery-server:POST /{version}/apps/{appId}",
+      "root_op": "visits-service:POST",
+      "services": [
+        "discovery-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:24:01.914544+00:00"
+    },
+    "1eb414deb7cae6b8": {
+      "hash": "1eb414deb7cae6b8",
+      "path": "admin-server:GET -> visits-service:GET /actuator",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:24:03.667412+00:00"
+    },
+    "7fcac01ef5380f02": {
+      "hash": "7fcac01ef5380f02",
+      "path": "admin-server:GET -> api-gateway:GET /actuator",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "api-gateway"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:24:06.975768+00:00"
+    },
+    "9ead899d8de08543": {
+      "hash": "9ead899d8de08543",
+      "path": "vets-service:GET -> discovery-server:GET /{version}/apps",
+      "root_op": "vets-service:GET",
+      "services": [
+        "discovery-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:24:09.283281+00:00"
+    },
+    "b478c7a19dd651a9": {
+      "hash": "b478c7a19dd651a9",
+      "path": "api-gateway:POST -> discovery-server:POST /{version}/apps/{appId}",
+      "root_op": "api-gateway:POST",
+      "services": [
+        "api-gateway",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:24:11.039275+00:00"
+    },
+    "2170e61884fdaad5": {
+      "hash": "2170e61884fdaad5",
+      "path": "vets-service:POST -> discovery-server:POST /{version}/apps/{appId}",
+      "root_op": "vets-service:POST",
+      "services": [
+        "discovery-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:24:17.263698+00:00"
+    },
+    "ff778a436a4a4dd1": {
+      "hash": "ff778a436a4a4dd1",
+      "path": "customers-service:POST -> discovery-server:POST /{version}/apps/{appId}",
+      "root_op": "customers-service:POST",
+      "services": [
+        "customers-service",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T15:24:18.116098+00:00"
     }
   },
   "topology": {
     "services": [
       "api-gateway",
-      "customers-service",
       "discovery-server",
+      "customers-service",
       "visits-service",
       "vets-service"
     ],
     "inferred": [
-      "mysql:petclinic"
+      "mysql:petclinic",
+      "localhost:8888"
     ],
     "db_nodes": [
-      "mysql:petclinic"
+      "mysql:petclinic",
+      "localhost:8888"
     ],
     "edges": [
       [
@@ -488,6 +763,10 @@
       [
         "api-gateway",
         "discovery-server"
+      ],
+      [
+        "api-gateway",
+        "localhost:8888"
       ],
       [
         "api-gateway",
@@ -503,11 +782,19 @@
       ],
       [
         "customers-service",
+        "localhost:8888"
+      ],
+      [
+        "customers-service",
         "mysql:petclinic"
       ],
       [
         "vets-service",
         "discovery-server"
+      ],
+      [
+        "vets-service",
+        "localhost:8888"
       ],
       [
         "vets-service",
@@ -516,6 +803,10 @@
       [
         "visits-service",
         "discovery-server"
+      ],
+      [
+        "visits-service",
+        "localhost:8888"
       ],
       [
         "visits-service",
@@ -525,10 +816,10 @@
     "ingress_nodes": [
       "api-gateway"
     ],
-    "discovered_at": "2026-03-23T06:19:23.834593+00:00",
+    "discovered_at": "2026-03-25T16:13:40.473604+00:00",
     "environment": "petclinicmbtest"
   },
   "created_at": "2026-03-21T05:21:16.869881+00:00",
-  "updated_at": "2026-03-23T06:40:34.424768+00:00",
+  "updated_at": "2026-03-25T16:14:13.443166+00:00",
   "environment": "petclinicmbtest"
 }
