@@ -152,12 +152,10 @@ bad behavior'. No one has to manually tune anything."*
 **Story:** *"vets-service crashes. The trace for the vets endpoint no longer
 includes it — the framework detects the structural change in the call graph."*
 
-### Step 0 — Prep: ensure clean baseline (run day before demo)
+### Step 0 — Verify baseline includes vets-service
 ```bash
-# Re-learn baseline so single-occurrence variants are pruned
-python3 trace_fingerprint.py --environment petclinicmbtest learn --window-minutes 120
-# Confirm vets fingerprints all include vets-service
-python3 trace_fingerprint.py --environment petclinicmbtest show | grep -A5 "api-gateway:GET vets"
+python3 trace_fingerprint.py --environment petclinicmbtest show | grep -A5 "GET /vets"
+# Should show vets-service in services list for vets patterns
 ```
 
 ### Step 1 — Scale down vets-service
