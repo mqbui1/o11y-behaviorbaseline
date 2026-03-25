@@ -75,8 +75,8 @@ CRON_TAG = "# behavioral-baseline-managed"
 # Cron schedule for per-environment watch jobs (every 5 minutes)
 WATCH_SCHEDULE = "*/5 * * * *"
 
-# Cron schedule for daily auto-onboarding discovery
-AUTO_SCHEDULE = "0 6 * * *"
+# Cron schedule for auto-onboarding discovery (every 30 minutes)
+AUTO_SCHEDULE = "*/30 * * * *"
 
 
 def _read_crontab() -> list[str]:
@@ -117,12 +117,18 @@ def _auto_cron_line() -> str:
             f">> /tmp/bab_onboard_auto.log 2>&1 {CRON_TAG} env=__auto__")
 
 
-def _weekly_relearn_cron_line(env: str) -> str:
+def _daily_relearn_cron_lines(env: str) -> list[str]:
+    """Return daily re-learn cron lines for both trace and error baselines."""
     base = f"{SCRIPT_DIR_STR}"
-    log = f"/tmp/bab_{env.replace('-', '_')}_relearn.log"
-    return (f"0 5 * * 0 {PYTHON} {base}/trace_fingerprint.py "
-            f"--environment {env} learn --window-minutes 120 "
-            f">> {log} 2>&1 {CRON_TAG} env={env}")
+    log_base = f"/tmp/bab_{env.replace('-', '_')}"
+    return [
+        (f"0 2 * * * {PYTHON} {base}/trace_fingerprint.py "
+         f"--environment {env} learn --window-minutes 120 "
+         f">> {log_base}_relearn.log 2>&1 {CRON_TAG} env={env}"),
+        (f"0 2 * * * {PYTHON} {base}/error_fingerprint.py "
+         f"--environment {env} learn --window-minutes 120 "
+         f">> {log_base}_relearn.log 2>&1 {CRON_TAG} env={env}"),
+    ]
 
 
 def add_env_cron(env: str, dry_run: bool = False) -> None:
@@ -132,7 +138,7 @@ def add_env_cron(env: str, dry_run: bool = False) -> None:
 
     new_lines = []
     added = 0
-    for line in _env_cron_lines(env) + [_weekly_relearn_cron_line(env)]:
+    for line in _env_cron_lines(env) + _daily_relearn_cron_lines(env):
         # Check by script + env tag to avoid duplicates
         marker = f"env={env}"
         script = line.split()[5] if len(line.split()) > 5 else ""
