@@ -1,7 +1,78 @@
 {
   "created_at": "2026-03-25T16:25:16.977651+00:00",
-  "signatures": {},
-  "learn_runs": 1,
-  "updated_at": "2026-03-25T16:25:16.977788+00:00",
+  "signatures": {
+    "81fb554dfa05696c": {
+      "hash": "81fb554dfa05696c",
+      "service": "vets-service",
+      "error_type": "java.net.ConnectException",
+      "http_status": "",
+      "db_system": "",
+      "operation": "GET",
+      "call_path": "",
+      "occurrences": 3,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T16:35:13.059267+00:00"
+    },
+    "53593be464b78948": {
+      "hash": "53593be464b78948",
+      "service": "customers-service",
+      "error_type": "java.net.ConnectException",
+      "http_status": "",
+      "db_system": "",
+      "operation": "GET",
+      "call_path": "",
+      "occurrences": 3,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T16:35:13.069322+00:00"
+    },
+    "8890888eef485661": {
+      "hash": "8890888eef485661",
+      "service": "api-gateway",
+      "error_type": "java.net.ConnectException",
+      "http_status": "",
+      "db_system": "",
+      "operation": "GET",
+      "call_path": "",
+      "occurrences": 3,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T16:35:13.462104+00:00"
+    },
+    "6ecc89f1e5278b39": {
+      "hash": "6ecc89f1e5278b39",
+      "service": "api-gateway",
+      "error_type": "503",
+      "http_status": "",
+      "db_system": "",
+      "operation": "GET customers-service",
+      "call_path": "",
+      "occurrences": 1,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T16:35:13.476475+00:00"
+    },
+    "f0896b2ce1cee24d": {
+      "hash": "f0896b2ce1cee24d",
+      "service": "visits-service",
+      "error_type": "java.net.ConnectException",
+      "http_status": "",
+      "db_system": "",
+      "operation": "GET",
+      "call_path": "",
+      "occurrences": 3,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-25T16:35:13.578691+00:00"
+    }
+  },
+  "learn_runs": 2,
+  "updated_at": "2026-03-25T16:35:14.001422+00:00",
   "environment": "petclinicmbtest"
 }

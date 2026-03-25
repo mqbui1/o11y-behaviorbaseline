@@ -64,6 +64,123 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# ── Cron management ────────────────────────────────────────────────────────────
+
+PYTHON = sys.executable
+SCRIPT_DIR_STR = str(Path(__file__).parent)
+
+# Tag embedded in cron comments so we can find/remove our own entries
+CRON_TAG = "# behavioral-baseline-managed"
+
+# Cron schedule for per-environment watch jobs (every 5 minutes)
+WATCH_SCHEDULE = "*/5 * * * *"
+
+# Cron schedule for daily auto-onboarding discovery
+AUTO_SCHEDULE = "0 6 * * *"
+
+
+def _read_crontab() -> list[str]:
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    return result.stdout.splitlines()
+
+
+def _write_crontab(lines: list[str]) -> None:
+    content = "\n".join(lines) + "\n"
+    proc = subprocess.run(["crontab", "-"], input=content, text=True,
+                          capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"crontab write failed: {proc.stderr}")
+
+
+def _env_cron_lines(env: str) -> list[str]:
+    """Return the 3 cron lines for a given environment."""
+    base = f"{SCRIPT_DIR_STR}"
+    log_base = f"/tmp/bab_{env.replace('-', '_')}"
+    return [
+        (f"{WATCH_SCHEDULE} {PYTHON} {base}/trace_fingerprint.py "
+         f"--environment {env} watch --window-minutes 5 "
+         f">> {log_base}_trace.log 2>&1 {CRON_TAG} env={env}"),
+        (f"{WATCH_SCHEDULE} {PYTHON} {base}/error_fingerprint.py "
+         f"--environment {env} watch --window-minutes 5 "
+         f">> {log_base}_error.log 2>&1 {CRON_TAG} env={env}"),
+        (f"{WATCH_SCHEDULE} {PYTHON} {base}/correlate.py "
+         f"--environment {env} --window-minutes 15 "
+         f">> {log_base}_correlate.log 2>&1 {CRON_TAG} env={env}"),
+    ]
+
+
+def _auto_cron_line() -> str:
+    base = f"{SCRIPT_DIR_STR}"
+    return (f"{AUTO_SCHEDULE} {PYTHON} {base}/onboard.py --auto "
+            f">> /tmp/bab_onboard_auto.log 2>&1 {CRON_TAG} env=__auto__")
+
+
+def _weekly_relearn_cron_line(env: str) -> str:
+    base = f"{SCRIPT_DIR_STR}"
+    log = f"/tmp/bab_{env.replace('-', '_')}_relearn.log"
+    return (f"0 5 * * 0 {PYTHON} {base}/trace_fingerprint.py "
+            f"--environment {env} learn --window-minutes 120 "
+            f">> {log} 2>&1 {CRON_TAG} env={env}")
+
+
+def add_env_cron(env: str, dry_run: bool = False) -> None:
+    """Add watch + correlate cron jobs for an environment if not already present."""
+    lines = _read_crontab()
+    existing = "\n".join(lines)
+
+    new_lines = []
+    added = 0
+    for line in _env_cron_lines(env) + [_weekly_relearn_cron_line(env)]:
+        # Check by script + env tag to avoid duplicates
+        marker = f"env={env}"
+        script = line.split()[5] if len(line.split()) > 5 else ""
+        if marker in existing and script in existing:
+            continue
+        new_lines.append(line)
+        added += 1
+
+    if not new_lines:
+        print(f"    Cron jobs for '{env}' already present — skipping")
+        return
+
+    if dry_run:
+        print(f"    [dry-run] Would add {added} cron job(s) for '{env}'")
+        return
+
+    _write_crontab(lines + new_lines)
+    print(f"    Added {added} cron job(s) for '{env}'")
+
+
+def remove_env_cron(env: str, dry_run: bool = False) -> None:
+    """Remove all managed cron jobs for an environment."""
+    lines = _read_crontab()
+    marker = f"{CRON_TAG} env={env}"
+    kept = [l for l in lines if marker not in l]
+    removed = len(lines) - len(kept)
+    if removed == 0:
+        return
+    if dry_run:
+        print(f"    [dry-run] Would remove {removed} cron job(s) for '{env}'")
+        return
+    _write_crontab(kept)
+    print(f"    Removed {removed} cron job(s) for '{env}'")
+
+
+def ensure_auto_cron(dry_run: bool = False) -> None:
+    """Add the daily --auto onboard cron job if not already present."""
+    lines = _read_crontab()
+    marker = f"{CRON_TAG} env=__auto__"
+    if any(marker in l for l in lines):
+        return
+    auto_line = _auto_cron_line()
+    if dry_run:
+        print(f"    [dry-run] Would add daily auto-onboard cron job")
+        return
+    _write_crontab(lines + [auto_line])
+    print(f"    Added daily auto-onboard cron job (6am)")
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 ACCESS_TOKEN         = os.environ.get("SPLUNK_ACCESS_TOKEN")
@@ -547,6 +664,9 @@ def run(
             ok_error_baseline = ebl_future.result()
             dashboard_id      = dash_future.result()
 
+        # Register cron jobs for this environment
+        add_env_cron(env, dry_run=dry_run)
+
         return {
             "env":               env,
             "label":             label,
@@ -569,11 +689,25 @@ def run(
                 print(f"  [error] onboarding {env or '(none)'}: {e}",
                       file=sys.stderr)
 
+    # Ensure the daily auto-onboard cron job exists
+    ensure_auto_cron(dry_run=dry_run)
+
     for r in results:
         if not dry_run:
             env_key = r["env"] or "__none__"
+            # Resolve services: prefer topology discovery result; fall back to
+            # what provision_detectors discovered (stored in state after first run).
+            discovered_services = current_envs.get(r["env"], [])
+            if not discovered_services:
+                # Single-env mode: re-query topology to capture real service set
+                try:
+                    from provision_detectors import discover_topology
+                    topo = discover_topology(r["env"])
+                    discovered_services = topo.get("services", [])
+                except Exception:
+                    pass
             state.setdefault("environments", {})[env_key] = {
-                "services":                sorted(current_envs.get(r["env"], [])),
+                "services":                sorted(discovered_services),
                 "provisioned_at":          ts,
                 "baseline_built_at":       ts if r["ok_baseline"] else None,
                 "error_baseline_built_at": ts if r["ok_error_baseline"] else None,
@@ -594,8 +728,9 @@ def run(
     if teardown_removed:
         for env in removed_envs:
             label = env or "(no environment tag)"
-            print(f"\n  [removed] {label} — tearing down detectors and dashboard")
+            print(f"\n  [removed] {label} — tearing down detectors, dashboard, and cron jobs")
             teardown_environment(env, dry_run=dry_run)
+            remove_env_cron(env, dry_run=dry_run)
             if not dry_run:
                 env_key = env or "__none__"
                 env_state = state["environments"].get(env_key, {})

@@ -1,16 +1,22 @@
 {
   "environments": {
     "petclinicmbtest": {
-      "services": [],
-      "provisioned_at": "2026-03-25T16:13:25.084626+00:00",
-      "baseline_built_at": "2026-03-25T16:13:25.084626+00:00",
-      "error_baseline_built_at": "2026-03-25T16:13:25.084626+00:00",
+      "services": [
+        "api-gateway",
+        "customers-service",
+        "discovery-server",
+        "vets-service",
+        "visits-service"
+      ],
+      "provisioned_at": "2026-03-25T16:34:44.089797+00:00",
+      "baseline_built_at": "2026-03-25T16:34:44.089797+00:00",
+      "error_baseline_built_at": "2026-03-25T16:34:44.089797+00:00",
       "last_action": "new",
       "provision_ok": true,
       "baseline_ok": true,
       "error_baseline_ok": true,
-      "dashboard_id": "HERHzImA0AE"
+      "dashboard_id": "HERM9jxA1po"
     }
   },
-  "last_run": "2026-03-25T16:14:13.727210+00:00"
+  "last_run": "2026-03-25T16:35:42.147935+00:00"
 }
