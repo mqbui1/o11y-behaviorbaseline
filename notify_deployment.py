@@ -37,11 +37,13 @@ Required env vars:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -57,6 +59,12 @@ if not ACCESS_TOKEN:
 
 BASE_URL   = f"https://api.{REALM}.signalfx.com"
 INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
+
+SCRIPT_DIR = Path(__file__).parent
+
+# How long to wait after a deployment before re-learning the baseline.
+# Should be long enough for new-version traces to start flowing.
+RELEARN_DELAY_MINUTES = int(os.environ.get("RELEARN_DELAY_MINUTES", "5"))
 
 # ── HTTP helper ────────────────────────────────────────────────────────────────
 
@@ -81,6 +89,45 @@ def _request(method: str, path: str, body: dict | None = None,
         raise RuntimeError(f"Splunk API error {e.code}: {json.dumps(detail)}")
 
 
+# ── Post-deploy re-learn ───────────────────────────────────────────────────────
+
+def trigger_relearn(environment: str | None, delay_minutes: int = RELEARN_DELAY_MINUTES,
+                    dry_run: bool = False) -> None:
+    """
+    Spawn a detached background process that waits `delay_minutes` then runs
+    trace_fingerprint.py learn and error_fingerprint.py learn for the environment.
+    Returns immediately — the CD pipeline is not blocked.
+    """
+    env_args = ["--environment", environment] if environment else []
+    delay_s  = delay_minutes * 60
+    learn_args = " ".join(env_args + ["learn", "--window-minutes", "30"])
+
+    # Build a shell one-liner: sleep, then run both learns sequentially
+    cmd = (
+        f"sleep {delay_s} && "
+        f"{sys.executable} {SCRIPT_DIR}/trace_fingerprint.py {learn_args} "
+        f">> /tmp/bab_relearn_deploy.log 2>&1 && "
+        f"{sys.executable} {SCRIPT_DIR}/error_fingerprint.py {learn_args} "
+        f">> /tmp/bab_relearn_deploy.log 2>&1"
+    )
+
+    env_label = environment or "all"
+    if dry_run:
+        print(f"  [dry-run] Would trigger re-learn for '{env_label}' "
+              f"in {delay_minutes}m")
+        return
+
+    # start_new_session=True detaches from the parent process group so it
+    # survives even if the CI job exits immediately after this script returns.
+    subprocess.Popen(
+        cmd, shell=True, start_new_session=True,
+        env={**os.environ},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    print(f"  [scheduled] baseline re-learn for '{env_label}' "
+          f"in {delay_minutes}m (background)")
+
+
 # ── Event emission ─────────────────────────────────────────────────────────────
 
 def notify(
@@ -90,6 +137,7 @@ def notify(
     deployer: str | None,
     commit: str | None,
     description: str | None,
+    relearn_delay: int = RELEARN_DELAY_MINUTES,
     dry_run: bool = False,
 ) -> None:
     now_ms  = int(time.time() * 1000)
@@ -131,6 +179,9 @@ def notify(
             print(f"  [sent] deployment.started  service={service}  "
                   f"environment={env_label}  version={version or 'n/a'}")
 
+    # Schedule a baseline re-learn once per environment (not per service)
+    trigger_relearn(environment, delay_minutes=relearn_delay, dry_run=dry_run)
+
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -164,6 +215,11 @@ def main() -> None:
         help="Short human-readable description of what changed",
     )
     parser.add_argument(
+        "--relearn-delay", type=int, default=RELEARN_DELAY_MINUTES,
+        help=f"Minutes to wait after deploy before re-learning baseline "
+             f"(default: {RELEARN_DELAY_MINUTES}, set 0 to disable)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Print what would be sent without making API calls",
     )
@@ -176,6 +232,7 @@ def main() -> None:
         deployer=args.deployer,
         commit=args.commit,
         description=args.description,
+        relearn_delay=args.relearn_delay,
         dry_run=args.dry_run,
     )
 
