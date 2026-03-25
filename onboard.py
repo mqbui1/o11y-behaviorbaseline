@@ -372,7 +372,7 @@ def provision_dashboard(env: str, dry_run: bool = False) -> str | None:
         return None
 
     # Create the 4 charts
-    env_filter = f" and sf_environment='{env}'" if env else ""
+    env_filter = f", filter=filter('sf_environment', '{env}')" if env else ""
     charts = [
         _create_chart(
             "Trace Path Drift",
