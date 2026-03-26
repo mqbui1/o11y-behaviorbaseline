@@ -10,7 +10,7 @@ export SPLUNK_REALM=us1
 cd /Users/mbui/Documents/o11y-behaviorbaseline
 
 # SSH alias for cluster commands
-alias k='sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no splunk@18.207.160.194'
+alias k='sshpass -p "<EC2_PASSWORD>" ssh -p 2222 -o StrictHostKeyChecking=no splunk@18.207.160.194'
 ```
 
 ### Splunk O11y URLs to have open
@@ -175,23 +175,25 @@ includes it — the framework detects the structural change in the call graph."*
 
 ### Step 0 — Verify baseline includes vets-service
 ```bash
-python3 trace_fingerprint.py --environment petclinicmbtest show | grep -A5 "GET /vets"
-# Should show vets-service in services list for vets patterns
+python3 trace_fingerprint.py --environment petclinicmbtest show | grep -A5 "vets-service"
+# Should show: api-gateway:GET vets-service pattern with services=[api-gateway, vets-service]
 ```
 
 ### Step 1 — Scale down vets-service
 ```bash
 k "kubectl scale deployment vets-service --replicas=0"
-k "kubectl get pods | grep vets"   # confirm gone
+k "kubectl get pods | grep vets"   # confirm gone (Terminating → no output)
 ```
 
 ### Step 2 — Generate traffic to the vets endpoint
 ```bash
-k "for i in \$(seq 1 10); do curl -s -o /dev/null http://localhost:81/api/gateway/vets; sleep 1; done"
+# Note: /api/vet/vets is the correct route (not /api/gateway/vets)
+k "for i in \$(seq 1 10); do curl -s -o /dev/null http://localhost:81/api/vet/vets; sleep 0.5; done"
 ```
 
 ### Step 3 — Run detection
 ```bash
+sleep 10  # allow trace ingestion
 python3 trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
 ```
 
@@ -200,9 +202,13 @@ python3 trace_fingerprint.py --environment petclinicmbtest watch --window-minute
 ANOMALY DETECTED
   Type:    MISSING_SERVICE
   Message: Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-  Detail:  Path: api-gateway:GET -> api-gateway:GET -> api-gateway:GET
+  Detail:  Path: api-gateway:GET vets-service
   Event sent (trace.path.drift)
 ```
+
+**Key talking point:** *"When vets-service disappears, the gateway trace collapses to a single
+span — no child spans, no downstream calls. The framework detects the structural absence:
+this root operation normally reaches vets-service, and now it doesn't."*
 
 **Show:** **Trace Path Drift** panel in dashboard.
 
@@ -232,14 +238,15 @@ k "kubectl scale deployment petclinic-db --replicas=0"
 
 # Generate traffic
 k "for i in \$(seq 1 15); do
-  curl -s -o /dev/null http://localhost:81/api/gateway/vets
-  curl -s -o /dev/null http://localhost:81/api/customer/owners
+  curl -s -o /dev/null --max-time 3 http://localhost:81/api/vet/vets
+  curl -s -o /dev/null --max-time 3 http://localhost:81/api/customer/owners
   sleep 0.5
 done"
 ```
 
 ### Step 2 — Run both watch cycles
 ```bash
+sleep 10  # allow trace ingestion
 python3 trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
 python3 error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
 ```
@@ -255,10 +262,10 @@ Found 1 correlated anomaly group(s):
 
 [Major] TIER2_TIER3 — customers-service
   Tiers:         tier2, tier3
-  Anomaly types: MISSING_SERVICE, SIGNATURE_SPIKE
+  Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
   Events:        4 over 38s
   - Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-  - Error spike in customers-service: java.net.ConnectException on GET
+  - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on ...
 
 Event sent (behavioral_baseline.correlated_anomaly)
 ```
@@ -305,8 +312,8 @@ python3 notify_deployment.py \
 k "kubectl scale deployment vets-service --replicas=0"
 k "kubectl scale deployment petclinic-db --replicas=0"
 k "for i in \$(seq 1 15); do
-  curl -s -o /dev/null http://localhost:81/api/gateway/vets
-  curl -s -o /dev/null http://localhost:81/api/customer/owners
+  curl -s -o /dev/null --max-time 3 http://localhost:81/api/vet/vets
+  curl -s -o /dev/null --max-time 3 http://localhost:81/api/customer/owners
   sleep 0.5
 done"
 ```
