@@ -584,6 +584,7 @@ def cmd_discover(environment: str | None = None) -> None:
 
 def cmd_learn(window_minutes: int = 120,
               window_offset_minutes: int = 0,
+              reset: bool = False,
               environment: str | None = None) -> None:
     """Sample recent traces and build the baseline fingerprint DB."""
     env_desc = f"environment '{environment}'" if environment else "all environments"
@@ -604,6 +605,9 @@ def cmd_learn(window_minutes: int = 120,
     print(f"  Found {len(traces)} candidate traces")
 
     baseline = load_baseline(environment)
+    if reset:
+        baseline = {}
+        print("  [reset] Wiped existing baseline — starting fresh.")
     is_fresh = not baseline.get("created_at")
     if is_fresh:
         baseline["created_at"] = datetime.now(timezone.utc).isoformat()
@@ -955,6 +959,8 @@ def main() -> None:
     p_learn.add_argument("--window-minutes", type=int, default=120)
     p_learn.add_argument("--window-offset-minutes", type=int, default=0,
                          help="Shift the learn window back by N minutes (useful for re-baselining after an incident)")
+    p_learn.add_argument("--reset", action="store_true",
+                         help="Wipe the existing baseline before learning (start fresh)")
     p_watch = sub.add_parser("watch", help="Compare recent traces to baseline")
     p_watch.add_argument("--window-minutes", type=int, default=10)
     sub.add_parser("show", help="Print current baseline")
@@ -973,7 +979,7 @@ def main() -> None:
     if args.command == "discover":
         cmd_discover(environment=env)
     elif args.command == "learn":
-        cmd_learn(args.window_minutes, args.window_offset_minutes, environment=env)
+        cmd_learn(args.window_minutes, args.window_offset_minutes, args.reset, environment=env)
     elif args.command == "watch":
         cmd_watch(args.window_minutes, environment=env)
     elif args.command == "show":
