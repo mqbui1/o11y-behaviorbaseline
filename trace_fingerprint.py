@@ -372,17 +372,30 @@ def _is_noise_trace(root_operation: str) -> bool:
 
 # ── Fingerprinting ─────────────────────────────────────────────────────────────
 
-def build_fingerprint(trace: dict) -> dict | None:
+def build_fingerprint(trace: dict, known_root_ops: set[str] | None = None) -> dict | None:
     """
     Build a stable structural fingerprint from a trace's span tree.
 
     Returns None if the trace has fewer than MIN_SPANS spans or is noise.
     The fingerprint is the ordered parent->child edge sequence hashed to
     a stable 16-char ID, immune to timing and span ID variation.
+
+    known_root_ops: if provided, single-span traces whose root op is in this
+    set are fingerprinted anyway (enables MISSING_SERVICE detection when a
+    downstream service is completely gone and the trace collapses to 1 span).
     """
     spans = trace.get("spans", [])
     if len(spans) < MIN_SPANS:
-        return None
+        if not known_root_ops:
+            return None
+        # Allow through if root op is known — may be a collapsed trace
+        sorted_tmp = sorted(spans, key=lambda s: s.get("startTime", 0))
+        root_tmp = sorted_tmp[0] if sorted_tmp else None
+        if not root_tmp:
+            return None
+        candidate_root_op = f"{root_tmp['serviceName']}:{root_tmp['operationName']}"
+        if candidate_root_op not in known_root_ops:
+            return None
 
     by_id        = {s["spanID"]: s for s in spans}
     sorted_spans = sorted(spans, key=lambda s: s.get("startTime", 0))
@@ -451,6 +464,28 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         return None
 
     if not stored or stored.get("occurrences", 0) < MIN_BASELINE_OCCURRENCES:
+        # Before firing NEW_FINGERPRINT, check if this is actually a
+        # MISSING_SERVICE case: same root_op as baseline but fewer services
+        # (e.g. downstream service gone → trace collapses to 1 span).
+        if baseline_for_root:
+            total_patterns = len(baseline_for_root)
+            service_counts: dict[str, int] = defaultdict(int)
+            for info in baseline_for_root.values():
+                for svc in info.get("services", []):
+                    service_counts[svc] += 1
+            dominant_services = {
+                s for s, c in service_counts.items()
+                if c / total_patterns >= MISSING_SERVICE_DOMINANCE_THRESHOLD
+            }
+            missing = dominant_services - set(fp["services"])
+            if missing:
+                return {
+                    "type":    "MISSING_SERVICE",
+                    "message": (f"Expected service(s) absent from '{root_op}': "
+                                f"{sorted(missing)}"),
+                    "detail":  f"Path: {fp['path']}",
+                    "fp":      fp,
+                }
         return {
             "type":    "NEW_FINGERPRINT",
             "message": f"Unknown execution path for '{root_op}'",
@@ -779,8 +814,16 @@ def cmd_watch(window_minutes: int = 10,
                 continue
             fetched.append((tid, trace))
 
+    # Pre-compute known root ops from baseline so collapsed 1-span traces
+    # (e.g. when a downstream service is completely gone) can still be
+    # fingerprinted and trigger MISSING_SERVICE detection.
+    known_root_ops = {
+        v["root_op"] for v in baseline.get("fingerprints", {}).values()
+        if v.get("root_op")
+    }
+
     for trace_id, trace in fetched:
-        fp = build_fingerprint(trace)
+        fp = build_fingerprint(trace, known_root_ops=known_root_ops)
         if fp is None:
             skipped += 1
             continue
