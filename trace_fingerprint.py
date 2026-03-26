@@ -583,6 +583,7 @@ def cmd_discover(environment: str | None = None) -> None:
 
 
 def cmd_learn(window_minutes: int = 120,
+              window_offset_minutes: int = 0,
               environment: str | None = None) -> None:
     """Sample recent traces and build the baseline fingerprint DB."""
     env_desc = f"environment '{environment}'" if environment else "all environments"
@@ -590,9 +591,12 @@ def cmd_learn(window_minutes: int = 120,
     topo = discover_topology(environment=environment)
     print(f"  Found {len(topo['services'])} services + "
           f"{len(topo['inferred'])} inferred nodes")
-    print(f"  Sampling last {window_minutes}m of traces...")
+    if window_offset_minutes:
+        print(f"  Sampling {window_minutes}m window ending {window_offset_minutes}m ago...")
+    else:
+        print(f"  Sampling last {window_minutes}m of traces...")
 
-    now_ms   = int(time.time() * 1000)
+    now_ms   = int(time.time() * 1000) - window_offset_minutes * 60 * 1000
     start_ms = now_ms - window_minutes * 60 * 1000
 
     traces = search_traces(topo["services"], start_ms, now_ms,
@@ -949,6 +953,8 @@ def main() -> None:
     sub.add_parser("discover", help="Auto-discover services from live topology")
     p_learn = sub.add_parser("learn", help="Build baseline from recent traces")
     p_learn.add_argument("--window-minutes", type=int, default=120)
+    p_learn.add_argument("--window-offset-minutes", type=int, default=0,
+                         help="Shift the learn window back by N minutes (useful for re-baselining after an incident)")
     p_watch = sub.add_parser("watch", help="Compare recent traces to baseline")
     p_watch.add_argument("--window-minutes", type=int, default=10)
     sub.add_parser("show", help="Print current baseline")
@@ -967,7 +973,7 @@ def main() -> None:
     if args.command == "discover":
         cmd_discover(environment=env)
     elif args.command == "learn":
-        cmd_learn(args.window_minutes, environment=env)
+        cmd_learn(args.window_minutes, args.window_offset_minutes, environment=env)
     elif args.command == "watch":
         cmd_watch(args.window_minutes, environment=env)
     elif args.command == "show":
