@@ -600,6 +600,12 @@ def cmd_learn(window_minutes: int = 120,
     new_count = updated_count = skipped = 0
     observed_hashes: set[str] = set()
 
+    # Stage new fingerprints separately — only graduate to baseline once they
+    # reach MIN_BASELINE_OCCURRENCES within this learn window. This prevents
+    # rare one-off traces from entering the baseline as seen=1 entries, which
+    # would fire spurious NEW_FINGERPRINT alerts on every subsequent watch run.
+    staged: dict[str, dict] = {}
+
     trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
     print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
 
@@ -622,25 +628,31 @@ def cmd_learn(window_minutes: int = 120,
             h = fp["hash"]
             observed_hashes.add(h)
             if h in fingerprints:
+                # Already established — increment occurrence count
                 fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
                 updated_count += 1
             else:
-                fingerprints[h] = {
-                    "hash":           h,
-                    "path":           fp["path"],
-                    "root_op":        fp["root_op"],
-                    "services":       fp["services"],
-                    "span_count":     fp["span_count"],
-                    "edge_count":     fp["edge_count"],
-                    "occurrences":    1,
-                    "watch_hits":     0,
-                    "auto_promoted":  False,
-                    "promoted_at":    None,
-                    "first_seen":     datetime.now(timezone.utc).isoformat(),
-                }
-                new_count += 1
-                print(f"  [new] {fp['root_op']}  ->  "
-                      f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
+                # Stage until seen MIN_BASELINE_OCCURRENCES times this window
+                if h not in staged:
+                    staged[h] = {
+                        "hash":          h,
+                        "path":          fp["path"],
+                        "root_op":       fp["root_op"],
+                        "services":      fp["services"],
+                        "span_count":    fp["span_count"],
+                        "edge_count":    fp["edge_count"],
+                        "occurrences":   0,
+                        "watch_hits":    0,
+                        "auto_promoted": False,
+                        "promoted_at":   None,
+                        "first_seen":    datetime.now(timezone.utc).isoformat(),
+                    }
+                staged[h]["occurrences"] += 1
+                if staged[h]["occurrences"] >= MIN_BASELINE_OCCURRENCES:
+                    fingerprints[h] = staged[h]
+                    new_count += 1
+                    print(f"  [new] {fp['root_op']}  ->  "
+                          f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
 
     # Prune fingerprints not seen in this learn window (unless auto-promoted,
     # which means they were deliberately accepted and should persist).
@@ -653,6 +665,10 @@ def cmd_learn(window_minutes: int = 120,
             for h in stale:
                 del fingerprints[h]
             print(f"  Pruned {len(stale)} stale fingerprint(s) not seen in this window")
+
+    rare = len([h for h in staged if h not in fingerprints])
+    if rare:
+        print(f"  Excluded {rare} rare fingerprint(s) seen < {MIN_BASELINE_OCCURRENCES}x in window")
 
     print(f"  Summary: {new_count} new, {updated_count} updated, "
           f"{skipped} skipped (noise/shallow)")
