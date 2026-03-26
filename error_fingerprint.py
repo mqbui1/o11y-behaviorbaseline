@@ -519,6 +519,10 @@ def cmd_learn(window_minutes: int = 120,
     new_count = updated_count = skipped = 0
     observed_hashes: set[str] = set()
 
+    # Stage new signatures separately — only graduate to baseline once they
+    # reach MIN_BASELINE_OCCURRENCES within this learn window.
+    staged: dict[str, dict] = {}
+
     trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
     print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
 
@@ -548,23 +552,27 @@ def cmd_learn(window_minutes: int = 120,
                         signatures[h].get("occurrences", 1) + 1
                     updated_count += 1
                 else:
-                    signatures[h] = {
-                        "hash":          h,
-                        "service":       sig["service"],
-                        "error_type":    sig["error_type"],
-                        "http_status":   sig["http_status"],
-                        "db_system":     sig["db_system"],
-                        "operation":     sig["operation"],
-                        "call_path":     sig["call_path"],
-                        "occurrences":   1,
-                        "watch_hits":    0,
-                        "auto_promoted": False,
-                        "promoted_at":   None,
-                        "first_seen":    datetime.now(timezone.utc).isoformat(),
-                    }
-                    new_count += 1
-                    print(f"  [new] {sig['service']}  "
-                          f"{sig['error_type']} on {sig['operation']}")
+                    if h not in staged:
+                        staged[h] = {
+                            "hash":          h,
+                            "service":       sig["service"],
+                            "error_type":    sig["error_type"],
+                            "http_status":   sig["http_status"],
+                            "db_system":     sig["db_system"],
+                            "operation":     sig["operation"],
+                            "call_path":     sig["call_path"],
+                            "occurrences":   0,
+                            "watch_hits":    0,
+                            "auto_promoted": False,
+                            "promoted_at":   None,
+                            "first_seen":    datetime.now(timezone.utc).isoformat(),
+                        }
+                    staged[h]["occurrences"] += 1
+                    if staged[h]["occurrences"] >= MIN_BASELINE_OCCURRENCES:
+                        signatures[h] = staged[h]
+                        new_count += 1
+                        print(f"  [new] {sig['service']}  "
+                              f"{sig['error_type']} on {sig['operation']}")
 
     # Prune signatures not seen in this learn window:
     # - Always prune on a fresh baseline (first learn run)
@@ -577,6 +585,10 @@ def cmd_learn(window_minutes: int = 120,
             for h in stale:
                 del signatures[h]
             print(f"  Pruned {len(stale)} stale signature(s) not seen in this window")
+
+    rare = len([h for h in staged if h not in signatures])
+    if rare:
+        print(f"  Excluded {rare} rare signature(s) seen < {MIN_BASELINE_OCCURRENCES}x in window")
 
     # Track number of learn runs — used to compute per-run baseline rate
     baseline["learn_runs"] = baseline.get("learn_runs", 0) + 1
