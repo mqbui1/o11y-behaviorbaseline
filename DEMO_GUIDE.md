@@ -57,29 +57,31 @@ Open the Behavioral Baseline Dashboard — 4 panels live, empty = healthy.
 
 ---
 
-## Demo 1: Error Spike — DB Goes Down ⭐ Most Reliable
+## Demo 1: New Error Signatures — DB Goes Down ⭐ Most Reliable
 
-**What fires:** `SIGNATURE_SPIKE` → `error.signature.drift` event
+**What fires:** `NEW_ERROR_SIGNATURE` + `SIGNATURE_VANISHED` → `error.signature.drift` events
 
-**Story:** *"The database becomes unavailable. Services start throwing
-ConnectExceptions at 10× their normal rate. No alerting rules needed —
-the framework already knows what 'normal errors' look like and flags the spike."*
+**Story:** *"The database goes down. Services start throwing transaction errors and
+health check 503s that have never appeared before. Simultaneously, the normal
+heartbeat errors that were always present disappear — because now everything is
+broken, not just intermittent. The framework catches both the new errors AND the
+shift in error pattern."*
 
 ### Step 1 — Prep: confirm error baseline
 ```bash
 python3 error_fingerprint.py --environment petclinicmbtest show
-# Should show java.net.ConnectException signatures with occurrences >= 2
+# Should show 4 java.net.ConnectException signatures, all seen >= 2
 ```
 
 ### Step 2 — Take down the DB
 ```bash
-k "kubectl scale deployment petclinic-db --replicas=0"
-k "kubectl get pods | grep petclinic-db"   # confirm gone
+kubectl scale deployment petclinic-db --replicas=0
+kubectl get pods | grep petclinic-db   # confirm gone
 ```
 
 ### Step 3 — Generate traffic to create errors
 ```bash
-k "for i in \$(seq 1 20); do curl -s -o /dev/null http://localhost:81/api/customer/owners; sleep 0.5; done"
+for i in $(seq 1 5); do curl -s -o /dev/null --max-time 3 http://localhost:81/api/customer/owners; done
 ```
 
 ### Step 4 — Run detection (or wait for cron)
@@ -90,19 +92,38 @@ python3 error_fingerprint.py --environment petclinicmbtest watch --window-minute
 **Expected output:**
 ```
 ANOMALY DETECTED
-  Type:    SIGNATURE_SPIKE
-  Message: Error spike in customers-service: java.net.ConnectException on GET
-           (12× in window vs baseline rate 2.0/run)
-  Detail:  watch_count=12  baseline_rate=2.00/run  multiplier=6.0×
-  Event sent (error.signature.drift)
+  Type:    NEW_ERROR_SIGNATURE
+  Message: New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on OwnerRepository.findAll
+  Detail:  call_path=api-gateway:GET customers-service -> api-gateway:GET
+
+ANOMALY DETECTED
+  Type:    NEW_ERROR_SIGNATURE
+  Message: New error signature in customers-service: 503 on GET /actuator/health
+  Detail:  call_path=admin-server:GET
+
+ANOMALY DETECTED
+  Type:    SIGNATURE_VANISHED
+  Message: Dominant error signature disappeared in customers-service: java.net.ConnectException on GET (was 43% of service errors)
+  Detail:  baseline_rate=0.75/run  service_share=43%
+
+  Checked N traces, 0 skipped, 8 anomalies detected
 ```
+
+**Key talking point:** *"A full DB outage doesn't just spike existing errors — it changes
+the entire error signature profile. The framework detected brand new error types AND
+noticed that the previously dominant patterns vanished, replaced by something worse."*
 
 **Show:** **Error Signature Drift** panel in dashboard updates.
 
 ### Step 5 — Restore
 ```bash
-k "kubectl scale deployment petclinic-db --replicas=1"
-k "kubectl rollout status deployment/petclinic-db --timeout=60s"
+kubectl scale deployment petclinic-db --replicas=1
+kubectl rollout status deployment/petclinic-db --timeout=60s
+```
+
+### Step 6 — Re-learn to clean baseline after demo
+```bash
+python3 error_fingerprint.py --environment petclinicmbtest learn --window-minutes 30
 ```
 
 ---
