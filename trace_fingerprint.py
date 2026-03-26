@@ -66,6 +66,15 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
+# Load .env file from script directory if present (fallback for cron/non-shell contexts)
+_ENV_FILE = Path(__file__).parent / ".env"
+if _ENV_FILE.exists():
+    for _line in _ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
 ACCESS_TOKEN            = os.environ.get("SPLUNK_ACCESS_TOKEN")
 INGEST_TOKEN            = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
 REALM                   = os.environ.get("SPLUNK_REALM", "us0")
