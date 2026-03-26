@@ -278,6 +278,152 @@ Splunk Observability
 
 ---
 
+## Fingerprinting & Baselining Architecture
+
+### Data flow
+
+```
+Splunk APM
+  ├── search_traces()        → all traces (by service + environment)
+  └── search_error_traces()  → error traces only (traces with error spans)
+          │
+          ▼
+  FINGERPRINTING
+  ┌─────────────────────────────────┬──────────────────────────────────────┐
+  │  build_fingerprint(trace)       │  build_error_signatures(trace)       │
+  │  • root_op = svc:operation      │  • error_type (exception class or    │
+  │  • edges = parent→child spans   │    HTTP status code)                 │
+  │  • services = set of svc names  │  • operation (span op name)          │
+  │  • path = edge chain string     │  • call_path (root→error hop)        │
+  │  • hash = SHA256(path)[:16]     │  • hash = SHA256(sig_key)[:16]       │
+  │  • requires MIN_SPANS=2         │  • skips spans without error tags    │
+  │    (or known root op in watch)  │                                      │
+  └─────────────────────────────────┴──────────────────────────────────────┘
+```
+
+### Learn command
+
+```
+learn [--window-minutes N] [--window-offset-minutes M] [--reset]
+
+  For each trace/error in the window:
+  ┌──────────────────────────────────────────────────────┐
+  │  STAGING (in-memory, per learn run)                  │
+  │                                                      │
+  │  fingerprint seen → staged[hash].occurrences++       │
+  │                                                      │
+  │  occurrences < MIN_BASELINE_OCCURRENCES (2)?         │
+  │      └─► EXCLUDED — never written to baseline        │
+  │                                                      │
+  │  occurrences ≥ MIN_BASELINE_OCCURRENCES?             │
+  │      └─► GRADUATE → baseline[hash]                   │
+  └──────────────────────────────────────────────────────┘
+
+  Prune stale: entries in baseline NOT seen in window → deleted
+               (except auto_promoted=true, which are always kept)
+
+  --window-offset-minutes M  shifts the window back M minutes
+                             (re-baseline after an incident without
+                              waiting for bad traces to age out)
+  --reset                    wipes the existing baseline before
+                             learning (clean-slate re-baseline)
+```
+
+### Watch command — anomaly classification
+
+```
+watch [--window-minutes N] (default: 10)
+
+  For each TRACE fingerprint fp:
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │  classify_anomaly(fp, baseline)                                        │
+  │                                                                        │
+  │  1. MISSING_SERVICE (early)  ─── new hash, but known root_op has      │
+  │                                  fewer services than baseline dominant  │
+  │                                  (catches collapsed 1-span traces when  │
+  │                                   downstream service is completely gone)│
+  │                                                                        │
+  │  2. NEW_FINGERPRINT          ─── hash not in baseline, or             │
+  │                                  occurrences < MIN_BASELINE_OCC       │
+  │                                                                        │
+  │  3. NEW_SERVICE              ─── services in trace not seen in any    │
+  │                                  baseline pattern for this root_op     │
+  │                                                                        │
+  │  4. SPAN_COUNT_SPIKE         ─── span_count > 2× baseline max        │
+  │                                                                        │
+  │  5. MISSING_SERVICE (estab.) ─── dominant service (≥60% of baseline  │
+  │                                  patterns for root_op) absent from    │
+  │                                  current trace                         │
+  └────────────────────────────────────────────────────────────────────────┘
+
+  For each ERROR signature sig:
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │  NEW_ERROR_SIGNATURE   ─── hash not in baseline                       │
+  │  SIGNATURE_SPIKE       ─── rate > 3× baseline rate                   │
+  │                            (requires occurrences ≥ 5 in baseline)     │
+  │  SIGNATURE_VANISHED    ─── dominant sig (≥20% of service errors)      │
+  │                            absent from watch window                    │
+  └────────────────────────────────────────────────────────────────────────┘
+
+  AUTO-PROMOTION: NEW_FINGERPRINT seen in N consecutive watch runs
+      └─► hash.auto_promoted = true  (silenced permanently)
+          (N = AUTO_PROMOTE_THRESHOLD, default 5 → ~25 min at 5m cron)
+```
+
+### State transitions
+
+```
+  TRACE FINGERPRINT                      ERROR SIGNATURE
+  ─────────────────                      ───────────────
+  [unseen]                               [unseen]
+      │ seen ≥2x in learn window             │ seen ≥2x in learn window
+      ▼                                      ▼
+  [established]  ◄── re-learn           [established]  ◄── re-learn
+      │ not seen in learn window             │ not seen in learn window
+      ▼                                      ▼
+  [pruned]                               [pruned]
+      │
+  [established]                          [established]
+      │ in watch: services mismatch          │ in watch: rate > 3× baseline
+      ▼                                      ▼
+  MISSING_SERVICE fired              SIGNATURE_SPIKE fired
+
+  [established / new hash]               [established]
+      │ in watch: hash unknown               │ in watch: dominant + absent
+      ▼                                      ▼
+  NEW_FINGERPRINT fired              SIGNATURE_VANISHED fired
+      │ seen N consec. watch runs
+      ▼
+  [auto_promoted]  ◄── promote cmd
+      (silent forever)                   [any]  ◄── promote cmd
+                                             ▼
+                                         [auto_promoted]
+                                             (silent forever)
+```
+
+### Baseline file schema
+
+```
+baseline.<env>.json                    error_baseline.<env>.json
+───────────────────                    ─────────────────────────
+{                                      {
+  "created_at": "...",                   "created_at": "...",
+  "topology": { services, inferred },    "signatures": {
+  "fingerprints": {                        "<hash>": {
+    "<hash>": {                              "hash", "service",
+      "hash", "root_op",                     "error_type", "operation",
+      "path", "services",                    "call_path", "occurrences",
+      "span_count", "occurrences",           "auto_promoted",
+      "auto_promoted", "watch_hits",         "last_seen"
+      "last_seen"                          }
+    }                                    }
+  },                                   }
+  "learn_runs": N
+}
+```
+
+---
+
 ## Limitations
 
 - **MetricSets required for Tiers 1/4**: SignalFlow detectors read `spans.count` and `service.request.duration.ns.p99` which are derived metrics. Enable APM MetricSets in Splunk Observability settings for your services.
