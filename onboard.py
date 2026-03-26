@@ -99,13 +99,13 @@ def _env_cron_lines(env: str) -> list[str]:
     base = f"{SCRIPT_DIR_STR}"
     log_base = f"/tmp/bab_{env.replace('-', '_')}"
     return [
-        (f"{WATCH_SCHEDULE} {PYTHON} {base}/trace_fingerprint.py "
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/trace_fingerprint.py "
          f"--environment {env} watch --window-minutes 5 "
          f">> {log_base}_trace.log 2>&1 {CRON_TAG} env={env}"),
-        (f"{WATCH_SCHEDULE} {PYTHON} {base}/error_fingerprint.py "
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/error_fingerprint.py "
          f"--environment {env} watch --window-minutes 5 "
          f">> {log_base}_error.log 2>&1 {CRON_TAG} env={env}"),
-        (f"{WATCH_SCHEDULE} {PYTHON} {base}/correlate.py "
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/correlate.py "
          f"--environment {env} --window-minutes 15 "
          f">> {log_base}_correlate.log 2>&1 {CRON_TAG} env={env}"),
     ]
@@ -113,7 +113,7 @@ def _env_cron_lines(env: str) -> list[str]:
 
 def _auto_cron_line() -> str:
     base = f"{SCRIPT_DIR_STR}"
-    return (f"{AUTO_SCHEDULE} {PYTHON} {base}/onboard.py --auto "
+    return (f"{AUTO_SCHEDULE} cd {base} && {PYTHON} {base}/onboard.py --auto "
             f">> /tmp/bab_onboard_auto.log 2>&1 {CRON_TAG} env=__auto__")
 
 
@@ -122,10 +122,10 @@ def _daily_relearn_cron_lines(env: str) -> list[str]:
     base = f"{SCRIPT_DIR_STR}"
     log_base = f"/tmp/bab_{env.replace('-', '_')}"
     return [
-        (f"0 2 * * * {PYTHON} {base}/trace_fingerprint.py "
+        (f"0 2 * * * cd {base} && {PYTHON} {base}/trace_fingerprint.py "
          f"--environment {env} learn --window-minutes 120 "
          f">> {log_base}_relearn.log 2>&1 {CRON_TAG} env={env}"),
-        (f"0 2 * * * {PYTHON} {base}/error_fingerprint.py "
+        (f"0 2 * * * cd {base} && {PYTHON} {base}/error_fingerprint.py "
          f"--environment {env} learn --window-minutes 120 "
          f">> {log_base}_relearn.log 2>&1 {CRON_TAG} env={env}"),
     ]
