@@ -15,13 +15,12 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 
 | Tier | Script | What it detects | How |
 |------|--------|----------------|-----|
-| 1a | `provision_detectors.py` | New caller of a database node | SignalFlow detector on `spans.count` grouped by `sf_initiating_service` |
-| 1b | `provision_detectors.py` | Call volume spike on ingress services | SignalFlow: 5m window > 10× same 5m window 1 week ago (`timeshift('1w')`) |
-| 1c | `provision_detectors.py` | Known DB caller goes silent | SignalFlow: 30m mean == 0 after non-zero 6h mean |
-| 2  | `trace_fingerprint.py`  | New or changed execution paths | SHA-256 of ordered parent→child span edge sequence |
+| 1b | `provision_detectors.py` | Request rate spike on ingress services | APM AutoDetectCustomization (no MetricSets required) |
+| 2  | `trace_fingerprint.py`  | New/changed execution paths, missing services | SHA-256 of ordered parent→child span edge sequence |
 | 3  | `error_fingerprint.py`  | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
-| 4  | `provision_detectors.py` | p99 latency drift | SignalFlow: 15m window > 2× same 15m window 1 week ago (`timeshift('1w')`) |
-| C  | `correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 1/2/3 custom events by service within a time window |
+| 3  | `provision_detectors.py` | Error rate spike per service | APM AutoDetectCustomization (no MetricSets required) |
+| 4  | `provision_detectors.py` | p99 latency drift per service | APM AutoDetectCustomization (no MetricSets required) |
+| C  | `correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 2/3 custom events by service within a time window |
 
 **Tiers 1, 4** run as persistent Splunk detectors (always-on SignalFlow).
 **Tiers 2, 3, and C** run as scheduled scripts on cron.
@@ -426,6 +425,6 @@ baseline.<env>.json                    error_baseline.<env>.json
 
 ## Limitations
 
-- **MetricSets required for Tiers 1/4**: SignalFlow detectors read `spans.count` and `service.request.duration.ns.p99` which are derived metrics. Enable APM MetricSets in Splunk Observability settings for your services.
 - **Auto-promotion lag**: New patterns after a deployment will alert for up to `AUTO_PROMOTE_THRESHOLD × cron_interval` minutes before being silenced. Use `promote` immediately after a known deployment to skip the wait, or run `learn` for large-scale topology changes.
-- **Seasonality requires 1 week of history**: Tiers 1b and 4 use `timeshift('1w')` for seasonality-aware comparison. The first week after provisioning will fall back to a flat baseline (no prior week data exists yet). This is expected behavior.
+- **AutoDetect parent detectors must exist**: Tiers 1b, 3, and 4 create `AutoDetectCustomization` children scoped to specific services. The org-wide AutoDetect parent detectors (`GmlOPziA4AA`, `GmlOMziA4AA`, `GmlOLziA4AA`) must exist in your organization — they are created automatically by Splunk Observability and are present in all orgs with APM enabled. No MetricSets configuration required.
+- **First 5 minutes after provisioning**: AutoDetect-based detectors (Tiers 1b, 3, 4) may take a few minutes to begin evaluating after creation as Splunk initializes the customization.
