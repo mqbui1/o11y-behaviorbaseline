@@ -345,11 +345,11 @@ k "kubectl scale deployment petclinic-db --replicas=1"
 
 ## Demo 6: Auto-Onboarding a New Environment
 
-**What fires:** `onboard.py --auto` discovers and fully provisions new env
+**What fires:** `onboard.py --auto` discovers new environments and shows what it would provision
 
 **Story:** *"A new team deploys hipster-shop with OTel instrumentation.
 Nobody touches this framework. Within 30 minutes it discovers the new
-environment, provisions 11 detectors, builds a baseline, creates a dashboard,
+environment, provisions detectors, builds a baseline, creates a dashboard,
 and registers cron jobs. Zero human intervention."*
 
 ### Step 1 — Show current state
@@ -357,35 +357,50 @@ and registers cron jobs. Zero human intervention."*
 python3 onboard.py --show-state
 # Only petclinicmbtest
 crontab -l | grep behavioral
-# Only petclinicmbtest cron jobs
+# Only petclinicmbtest + global --auto job
 ```
 
-### Step 2 — Run auto-discovery
+### Step 2 — Run auto-discovery dry-run
 ```bash
-# If hipstershop-mbtest is deployed:
-python3 onboard.py --auto
-
-# If not, show what it would do:
 python3 onboard.py --auto --dry-run
 ```
 
-**Expected output (if new env present):**
+**Expected output:**
 ```
 [onboard] Discovering all active environments...
-  petclinicmbtest:    5 services
-  hipstershop-mbtest: 9 services  ← NEW
+  hipstershop-mbtest: 7 services — [checkoutservice, currencyservice,
+                                     emailservice, frontend, paymentservice,
+                                     productcatalogservice, recommendationservice]
+  petclinicmbtest:    5 services — [api-gateway, customers-service, ...]
 
-[onboard] Acting on changes...
+[onboard] Diff results:
+  New environments: ['hipstershop-mbtest']
+
+[onboard] [DRY RUN] Acting on changes...
+
   [new] hipstershop-mbtest
-    Provisioned 11 / 11 detector(s)
-    Dashboard created: <id>
-    Added 5 cron job(s) for 'hipstershop-mbtest'
+    $ provision_detectors.py --environment hipstershop-mbtest
+      [dry-run] skipped
+    $ trace_fingerprint.py --environment hipstershop-mbtest learn --window-minutes=120
+      [dry-run] skipped
+    Provisioning dashboard for environment 'hipstershop-mbtest'...
+      [dry-run] Would create dashboard: Behavioral Baseline — hipstershop-mbtest
+    $ error_fingerprint.py --environment hipstershop-mbtest learn --window-minutes=120
+      [dry-run] skipped
+    [dry-run] Would add 5 cron job(s) for 'hipstershop-mbtest'
+
+[onboard] Dry run complete — no changes written.
 ```
 
-### Step 3 — Show the result
+**Key talking points:**
+- The framework discovered `hipstershop-mbtest` purely from live APM topology — no config file, no manifest
+- In production (without `--dry-run`), this runs every 30 minutes via cron — new environments are onboarded automatically within half an hour of their first trace
+- The 5 cron jobs added per environment are: trace watch, error watch, correlate (every 5 min) + trace learn, error learn (daily at 2am)
+
+### Step 3 — Show what a real onboard produces (reference petclinicmbtest)
 ```bash
-python3 onboard.py --show-state      # new env in state with services list
-crontab -l | grep behavioral         # new cron jobs registered
+python3 onboard.py --show-state      # services list, provisioned_at, dashboard_id
+crontab -l | grep behavioral         # 5 per-env jobs + 1 global auto job
 ```
 
 ---
