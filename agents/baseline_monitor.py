@@ -69,7 +69,7 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -86,9 +86,10 @@ if not ACCESS_TOKEN:
 
 STREAM_URL = f"https://stream.{REALM}.signalfx.com"
 
-# Baseline files are env-scoped: baseline.<env>.json
-BASELINE_GLOB      = "./baseline.*.json"
-ERR_BASELINE_GLOB  = "./error_baseline.*.json"
+# Baseline files are env-scoped: baseline.<env>.json (stored in data/)
+_DATA_DIR          = Path(__file__).parent.parent / "data"
+BASELINE_GLOB      = "baseline.*.json"
+ERR_BASELINE_GLOB  = "error_baseline.*.json"
 
 # Health thresholds
 MIN_OCCURRENCES        = 2     # below this = LOW_CONFIDENCE
@@ -260,11 +261,10 @@ def load_baseline_files(target_env: str | None) -> list[dict]:
     Load all trace and error baseline files.
     Returns list of {env, type, path, data, fingerprints_or_sigs}.
     """
-    script_dir = Path(__file__).parent
     files = []
 
     for pattern, btype in [(BASELINE_GLOB, "trace"), (ERR_BASELINE_GLOB, "error")]:
-        for fp in sorted(script_dir.glob(pattern.lstrip("./"))):
+        for fp in sorted(_DATA_DIR.glob(pattern)):
             env = _extract_env(fp.name)
             if target_env and env != target_env:
                 continue
@@ -624,7 +624,6 @@ def auto_fix(all_issues: dict[str, list[dict]], dry_run: bool = True) -> None:
     Other issues require human review and are left for manual action.
     """
     import subprocess
-    script_dir = Path(__file__).parent
 
     for env, issues in all_issues.items():
         for issue in issues:
@@ -637,7 +636,7 @@ def auto_fix(all_issues: dict[str, list[dict]], dry_run: bool = True) -> None:
             # Find the baseline file for this env
             for btype, glob in [("trace", f"baseline.{env}.json"),
                                  ("error", f"error_baseline.{env}.json")]:
-                fp = script_dir / glob
+                fp = _DATA_DIR / glob
                 if not fp.exists():
                     continue
                 try:

@@ -41,7 +41,7 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -70,7 +70,7 @@ DEFAULT_WINDOW_MINUTES = 10
 
 def _load_slo_targets(service: str) -> dict:
     """Load SLO targets from thresholds.json, fall back to defaults."""
-    p = Path(__file__).parent / "thresholds.json"
+    p = Path(__file__).parent.parent / "data" / "thresholds.json"
     if p.exists():
         try:
             svc = json.loads(p.read_text()).get("services", {}).get(service, {})
