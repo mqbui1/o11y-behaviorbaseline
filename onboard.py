@@ -95,7 +95,7 @@ def _write_crontab(lines: list[str]) -> None:
 
 
 def _env_cron_lines(env: str) -> list[str]:
-    """Return the 3 cron lines for a given environment."""
+    """Return the per-environment watch cron lines (every 5 minutes)."""
     base = f"{SCRIPT_DIR_STR}"
     log_base = f"/tmp/bab_{env.replace('-', '_')}"
     return [
@@ -108,6 +108,10 @@ def _env_cron_lines(env: str) -> list[str]:
         (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/correlate.py "
          f"--environment {env} --window-minutes 15 "
          f">> {log_base}_correlate.log 2>&1 {CRON_TAG} env={env}"),
+        # Dedup agent: suppress duplicate anomaly floods, emit incident lifecycle events
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/dedup_agent.py "
+         f"--environment {env} --window-minutes 5 "
+         f">> {log_base}_dedup.log 2>&1 {CRON_TAG} env={env}"),
     ]
 
 
@@ -118,7 +122,7 @@ def _auto_cron_line() -> str:
 
 
 def _daily_relearn_cron_lines(env: str) -> list[str]:
-    """Return daily re-learn cron lines for both trace and error baselines."""
+    """Return daily maintenance cron lines: re-learn + noise audit + healer check."""
     base = f"{SCRIPT_DIR_STR}"
     log_base = f"/tmp/bab_{env.replace('-', '_')}"
     return [
@@ -128,6 +132,24 @@ def _daily_relearn_cron_lines(env: str) -> list[str]:
         (f"0 2 * * * cd {base} && {PYTHON} {base}/error_fingerprint.py "
          f"--environment {env} learn --window-minutes 120 "
          f">> {log_base}_relearn.log 2>&1 {CRON_TAG} env={env}"),
+        # Noise learner: identify app-specific noise patterns after each re-learn
+        (f"30 2 * * * cd {base} && {PYTHON} {base}/noise_learner.py "
+         f"--environment {env} --apply "
+         f">> {log_base}_noise.log 2>&1 {CRON_TAG} env={env}"),
+        # Baseline healer: check if a post-incident autonomous re-learn is needed
+        (f"0 */6 * * * cd {base} && {PYTHON} {base}/baseline_healer.py "
+         f"--environment {env} "
+         f">> {log_base}_healer.log 2>&1 {CRON_TAG} env={env}"),
+    ]
+
+
+def _global_agent_cron_lines() -> list[str]:
+    """Return cron lines for agents that run across all environments (no env arg)."""
+    base = f"{SCRIPT_DIR_STR}"
+    return [
+        # Multi-env correlator: detect propagation across pipeline environments
+        (f"{AUTO_SCHEDULE} cd {base} && {PYTHON} {base}/multi_env_correlator.py "
+         f">> /tmp/bab_multi_env_correlator.log 2>&1 {CRON_TAG} env=__global__"),
     ]
 
 
@@ -175,17 +197,28 @@ def remove_env_cron(env: str, dry_run: bool = False) -> None:
 
 
 def ensure_auto_cron(dry_run: bool = False) -> None:
-    """Add the daily --auto onboard cron job if not already present."""
-    lines = _read_crontab()
-    marker = f"{CRON_TAG} env=__auto__"
-    if any(marker in l for l in lines):
-        return
+    """Add the auto-onboard and global agent cron jobs if not already present."""
+    lines    = _read_crontab()
+    existing = "\n".join(lines)
+    new_lines = []
+
     auto_line = _auto_cron_line()
-    if dry_run:
-        print(f"    [dry-run] Would add daily auto-onboard cron job")
+    if f"{CRON_TAG} env=__auto__" not in existing:
+        new_lines.append(auto_line)
+
+    for line in _global_agent_cron_lines():
+        # Deduplicate by script name + tag
+        script = line.split()[5] if len(line.split()) > 5 else ""
+        if f"{CRON_TAG} env=__global__" not in existing or script not in existing:
+            new_lines.append(line)
+
+    if not new_lines:
         return
-    _write_crontab(lines + [auto_line])
-    print(f"    Added daily auto-onboard cron job (6am)")
+    if dry_run:
+        print(f"    [dry-run] Would add {len(new_lines)} global cron job(s)")
+        return
+    _write_crontab(lines + new_lines)
+    print(f"    Added {len(new_lines)} global cron job(s)")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -691,6 +724,14 @@ def run(
 
         # Register cron jobs for this environment
         add_env_cron(env, dry_run=dry_run)
+
+        # Generate incident runbook for new environments (one-time)
+        if action == "new" and not dry_run:
+            try:
+                from runbook_generator import generate
+                generate(env)
+            except Exception as e:
+                print(f"    [warn] Runbook generator failed: {e}", file=sys.stderr)
 
         return {
             "env":               env,
