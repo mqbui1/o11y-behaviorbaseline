@@ -37,7 +37,7 @@ from pathlib import Path
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -103,7 +103,7 @@ def _load_error_baseline(environment: str | None) -> dict:
 
 
 def _load_thresholds(service: str) -> dict:
-    p = Path(__file__).parent / "thresholds.json"
+    p = Path(__file__).parent.parent / "data" / "thresholds.json"
     if p.exists():
         try:
             return json.loads(p.read_text()).get("services", {}).get(service, {})

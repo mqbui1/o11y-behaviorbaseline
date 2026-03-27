@@ -99,17 +99,17 @@ def _env_cron_lines(env: str) -> list[str]:
     base = f"{SCRIPT_DIR_STR}"
     log_base = f"/tmp/bab_{env.replace('-', '_')}"
     return [
-        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/trace_fingerprint.py "
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/core/trace_fingerprint.py "
          f"--environment {env} watch --window-minutes 5 "
          f">> {log_base}_trace.log 2>&1 {CRON_TAG} env={env}"),
-        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/error_fingerprint.py "
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/core/error_fingerprint.py "
          f"--environment {env} watch --window-minutes 5 "
          f">> {log_base}_error.log 2>&1 {CRON_TAG} env={env}"),
-        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/correlate.py "
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/core/correlate.py "
          f"--environment {env} --window-minutes 15 "
          f">> {log_base}_correlate.log 2>&1 {CRON_TAG} env={env}"),
         # Dedup agent: suppress duplicate anomaly floods, emit incident lifecycle events
-        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/dedup_agent.py "
+        (f"{WATCH_SCHEDULE} cd {base} && {PYTHON} {base}/agents/dedup_agent.py "
          f"--environment {env} --window-minutes 5 "
          f">> {log_base}_dedup.log 2>&1 {CRON_TAG} env={env}"),
     ]
@@ -126,18 +126,18 @@ def _daily_relearn_cron_lines(env: str) -> list[str]:
     base = f"{SCRIPT_DIR_STR}"
     log_base = f"/tmp/bab_{env.replace('-', '_')}"
     return [
-        (f"0 2 * * * cd {base} && {PYTHON} {base}/trace_fingerprint.py "
+        (f"0 2 * * * cd {base} && {PYTHON} {base}/core/trace_fingerprint.py "
          f"--environment {env} learn --window-minutes 120 "
          f">> {log_base}_relearn.log 2>&1 {CRON_TAG} env={env}"),
-        (f"0 2 * * * cd {base} && {PYTHON} {base}/error_fingerprint.py "
+        (f"0 2 * * * cd {base} && {PYTHON} {base}/core/error_fingerprint.py "
          f"--environment {env} learn --window-minutes 120 "
          f">> {log_base}_relearn.log 2>&1 {CRON_TAG} env={env}"),
         # Noise learner: identify app-specific noise patterns after each re-learn
-        (f"30 2 * * * cd {base} && {PYTHON} {base}/noise_learner.py "
+        (f"30 2 * * * cd {base} && {PYTHON} {base}/agents/noise_learner.py "
          f"--environment {env} --apply "
          f">> {log_base}_noise.log 2>&1 {CRON_TAG} env={env}"),
         # Baseline healer: check if a post-incident autonomous re-learn is needed
-        (f"0 */6 * * * cd {base} && {PYTHON} {base}/baseline_healer.py "
+        (f"0 */6 * * * cd {base} && {PYTHON} {base}/agents/baseline_healer.py "
          f"--environment {env} "
          f">> {log_base}_healer.log 2>&1 {CRON_TAG} env={env}"),
     ]
@@ -148,7 +148,7 @@ def _global_agent_cron_lines() -> list[str]:
     base = f"{SCRIPT_DIR_STR}"
     return [
         # Multi-env correlator: detect propagation across pipeline environments
-        (f"{AUTO_SCHEDULE} cd {base} && {PYTHON} {base}/multi_env_correlator.py "
+        (f"{AUTO_SCHEDULE} cd {base} && {PYTHON} {base}/agents/multi_env_correlator.py "
          f">> /tmp/bab_multi_env_correlator.log 2>&1 {CRON_TAG} env=__global__"),
     ]
 
@@ -421,7 +421,17 @@ def diff_environments(
 
 def _run(script: str, args: list[str], dry_run: bool = False) -> bool:
     """Run a sibling script as a subprocess. Returns True on success."""
-    cmd = [sys.executable, str(SCRIPT_DIR / script)] + args
+    # Scripts now live under core/ or agents/ subdirectories
+    script_subdirs = ["core", "agents", "."]
+    script_path = None
+    for subdir in script_subdirs:
+        candidate = SCRIPT_DIR / subdir / script
+        if candidate.exists():
+            script_path = candidate
+            break
+    if script_path is None:
+        script_path = SCRIPT_DIR / script  # fallback
+    cmd = [sys.executable, str(script_path)] + args
     env = {**os.environ}  # inherit SPLUNK_ACCESS_TOKEN, SPLUNK_REALM, etc.
 
     print(f"    $ {' '.join(cmd)}")
@@ -703,7 +713,7 @@ def run(
         # Run onboarding advisor for new environments to set per-env config
         if advise and action == "new":
             try:
-                from onboarding_advisor import advise as run_advisor
+                from agents.onboarding_advisor import advise as run_advisor
                 run_advisor(env, apply=not dry_run)
             except Exception as e:
                 print(f"    [warn] Onboarding advisor failed: {e}",
@@ -728,7 +738,7 @@ def run(
         # Generate incident runbook for new environments (one-time)
         if action == "new" and not dry_run:
             try:
-                from runbook_generator import generate
+                from agents.runbook_generator import generate
                 generate(env)
             except Exception as e:
                 print(f"    [warn] Runbook generator failed: {e}", file=sys.stderr)
@@ -767,7 +777,7 @@ def run(
             if not discovered_services:
                 # Single-env mode: re-query topology to capture real service set
                 try:
-                    from provision_detectors import discover_topology
+                    from core.provision_detectors import discover_topology
                     topo = discover_topology(r["env"])
                     discovered_services = topo.get("services", [])
                 except Exception:

@@ -58,7 +58,7 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -76,7 +76,7 @@ if not ACCESS_TOKEN:
 BASE_URL = f"https://api.{REALM}.signalfx.com"
 APP_URL  = f"https://app.{REALM}.signalfx.com"
 
-THRESHOLDS_PATH = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
+THRESHOLDS_PATH = Path(os.environ.get("THRESHOLDS_PATH", str(Path(__file__).parent.parent / "data" / "thresholds.json")))
 
 # Traffic tier thresholds (traces/min)
 TRAFFIC_LOW_MAX    = 2.0    # < 2/min  → LOW
