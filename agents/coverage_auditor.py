@@ -39,7 +39,7 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -60,10 +60,10 @@ DEFAULT_SAMPLE_LIMIT    = 200
 
 # ── Import from trace_fingerprint ─────────────────────────────────────────────
 
-_TF_DIR = Path(__file__).parent
-sys.path.insert(0, str(_TF_DIR))
+_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_ROOT))
 try:
-    from trace_fingerprint import (
+    from core.trace_fingerprint import (
         build_fingerprint,
         discover_topology,
         search_traces,
@@ -79,9 +79,9 @@ except ImportError as e:
 # ── Baseline loading ──────────────────────────────────────────────────────────
 
 def _load_baseline(environment: str | None) -> dict:
-    script_dir = Path(__file__).parent
+    data_dir = Path(__file__).parent.parent / "data"
     for pattern in [f"baseline.{environment}.json", "baseline.json"]:
-        fp = script_dir / pattern
+        fp = data_dir / pattern
         if fp.exists():
             try:
                 return json.loads(fp.read_text())

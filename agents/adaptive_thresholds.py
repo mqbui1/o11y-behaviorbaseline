@@ -62,7 +62,7 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -81,7 +81,7 @@ if not ACCESS_TOKEN:
 STREAM_URL = f"https://stream.{REALM}.signalfx.com"
 
 # Where per-service threshold overrides are stored
-THRESHOLDS_PATH = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
+THRESHOLDS_PATH = Path(os.environ.get("THRESHOLDS_PATH", str(Path(__file__).parent.parent / "data" / "thresholds.json")))
 
 # Observation window — how far back to look for anomaly signals
 OBSERVATION_DAYS = int(os.environ.get("THRESHOLD_OBSERVATION_DAYS", "7"))

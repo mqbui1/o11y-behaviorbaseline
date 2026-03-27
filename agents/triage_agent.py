@@ -50,7 +50,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from hypothesis_engine import analyze as hypothesis_analyze, format_for_prompt
+    import sys as _sys
+    _sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+    from agents.hypothesis_engine import analyze as hypothesis_analyze, format_for_prompt
     _HYPOTHESIS_AVAILABLE = True
 except ImportError:
     _HYPOTHESIS_AVAILABLE = False
@@ -63,7 +65,7 @@ except ImportError:
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
