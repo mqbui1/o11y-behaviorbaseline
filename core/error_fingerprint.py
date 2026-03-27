@@ -55,7 +55,7 @@ from typing import Any
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 # Load .env file from script directory if present (fallback for cron/non-shell contexts)
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -66,10 +66,11 @@ if _ENV_FILE.exists():
 ACCESS_TOKEN            = os.environ.get("SPLUNK_ACCESS_TOKEN")
 INGEST_TOKEN            = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
 REALM                   = os.environ.get("SPLUNK_REALM", "us0")
+_DATA_DIR               = Path(__file__).parent.parent / "data"
 BASELINE_PATH           = Path(os.environ.get("ERROR_BASELINE_PATH",
-                                              "./error_baseline.json"))
+                                              str(_DATA_DIR / "error_baseline.json")))
 TOPOLOGY_LOOKBACK_HOURS = int(os.environ.get("TOPOLOGY_LOOKBACK_HOURS", "48"))
-THRESHOLDS_PATH         = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
+THRESHOLDS_PATH         = Path(os.environ.get("THRESHOLDS_PATH", str(_DATA_DIR / "thresholds.json")))
 
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN environment variable is required.",

@@ -22,7 +22,9 @@ from typing import Any
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-_SCRIPT_DIR = Path(__file__).parent
+_SCRIPT_DIR  = Path(__file__).parent
+_CORE_DIR    = _SCRIPT_DIR / "core"
+_DATA_DIR    = _SCRIPT_DIR / "data"
 
 _INCIDENT_ERROR_TYPES = {
     "503", "502", "504", "java.net.ConnectException",
@@ -55,10 +57,10 @@ class BaselineStore:
 
     def _find_path(self, prefix: str) -> Path:
         if self.environment:
-            p = _SCRIPT_DIR / f"{prefix}.{self.environment}.json"
+            p = _DATA_DIR / f"{prefix}.{self.environment}.json"
             if p.exists():
                 return p
-        p = _SCRIPT_DIR / f"{prefix}.json"
+        p = _DATA_DIR / f"{prefix}.json"
         return p
 
     def _load(self) -> None:
@@ -188,7 +190,7 @@ class BaselineStore:
         import subprocess
         import sys
         cmd = [
-            sys.executable, str(_SCRIPT_DIR / "trace_fingerprint.py"),
+            sys.executable, str(_CORE_DIR / "trace_fingerprint.py"),
             "learn", f"--window-minutes={window_minutes}",
         ]
         if self.environment:
@@ -213,7 +215,7 @@ class BaselineStore:
         """
         import subprocess
         import sys
-        cmd = [sys.executable, str(_SCRIPT_DIR / "trace_fingerprint.py"), "promote"]
+        cmd = [sys.executable, str(_CORE_DIR / "trace_fingerprint.py"), "promote"]
         if self.environment:
             cmd += ["--environment", self.environment]
         if hashes:
