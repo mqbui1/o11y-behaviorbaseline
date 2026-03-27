@@ -299,6 +299,18 @@ def send_custom_event(event_type: str, dimensions: dict,
     }], base_url=INGEST_URL)
 
 
+def send_metric(metric_name: str, value: int, dimensions: dict) -> None:
+    """Emit a gauge metric — immediately queryable via SignalFlow data()."""
+    _request("POST", "/v2/datapoint", {
+        "gauge": [{
+            "metric":     metric_name,
+            "value":      value,
+            "dimensions": dimensions,
+            "timestamp":  int(time.time() * 1000),
+        }],
+    }, base_url=INGEST_URL)
+
+
 # ── Signature extraction ───────────────────────────────────────────────────────
 
 def _span_tags(span: dict) -> dict[str, str]:
@@ -742,15 +754,16 @@ def cmd_watch(window_minutes: int = 10,
                 print(f"    Detail:  {anomaly['detail']}")
                 print(f"    TraceID: {trace_id}")
                 try:
+                    dims = {
+                        "anomaly_type":  anomaly["type"],
+                        "service":       sig["service"],
+                        "error_type":    sig["error_type"],
+                        "sig_hash":      sig["hash"],
+                        "sf_environment": environment or "all",
+                    }
                     send_custom_event(
                         event_type="error.signature.drift",
-                        dimensions={
-                            "anomaly_type": anomaly["type"],
-                            "service":      sig["service"],
-                            "error_type":   sig["error_type"],
-                            "sig_hash":     sig["hash"],
-                            "sf_environment":  environment or "all",
-                        },
+                        dimensions=dims,
                         properties={
                             "message":       anomaly["message"],
                             "detail":        anomaly["detail"],
@@ -759,11 +772,12 @@ def cmd_watch(window_minutes: int = 10,
                             "call_path":     sig["call_path"],
                             "http_status":   sig["http_status"],
                             "db_system":     sig["db_system"],
-                            "sf_environment":   environment or "all",
+                            "sf_environment": environment or "all",
                             "detector_tier": "tier3",
                             "detector_name": "error-signature-fingerprint",
                         },
                     )
+                    send_metric("behavioral_baseline.anomaly.count", 1, dims)
                     print(f"    Event sent (error.signature.drift)")
                 except Exception as e:
                     print(f"    Failed to send event: {e}", file=sys.stderr)
@@ -781,25 +795,27 @@ def cmd_watch(window_minutes: int = 10,
         print(f"    Message: {anomaly['message']}")
         print(f"    Detail:  {anomaly['detail']}")
         try:
+            dims = {
+                "anomaly_type":  anomaly["type"],
+                "service":       sig["service"],
+                "error_type":    sig["error_type"],
+                "sig_hash":      sig["hash"],
+                "sf_environment": environment or "all",
+            }
             send_custom_event(
                 event_type="error.signature.drift",
-                dimensions={
-                    "anomaly_type": anomaly["type"],
-                    "service":      sig["service"],
-                    "error_type":   sig["error_type"],
-                    "sig_hash":     sig["hash"],
-                    "sf_environment":  environment or "all",
-                },
+                dimensions=dims,
                 properties={
                     "message":       anomaly["message"],
                     "detail":        anomaly["detail"],
                     "operation":     sig["operation"],
                     "call_path":     sig.get("call_path", ""),
-                    "sf_environment":   environment or "all",
+                    "sf_environment": environment or "all",
                     "detector_tier": "tier3",
                     "detector_name": "error-signature-fingerprint",
                 },
             )
+            send_metric("behavioral_baseline.anomaly.count", 1, dims)
             print(f"    Event sent (error.signature.drift)")
         except Exception as e:
             print(f"    Failed to send event: {e}", file=sys.stderr)
