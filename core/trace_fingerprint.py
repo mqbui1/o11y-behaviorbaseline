@@ -380,6 +380,18 @@ def send_custom_event(event_type: str, dimensions: dict, properties: dict) -> No
     }], base_url=INGEST_URL)
 
 
+def send_metric(metric_name: str, value: int, dimensions: dict) -> None:
+    """Emit a gauge metric — immediately queryable via SignalFlow data()."""
+    _request("POST", "/v2/datapoint", {
+        "gauge": [{
+            "metric":     metric_name,
+            "value":      value,
+            "dimensions": dimensions,
+            "timestamp":  int(time.time() * 1000),
+        }],
+    }, base_url=INGEST_URL)
+
+
 # ── Noise filtering ────────────────────────────────────────────────────────────
 
 def _is_noise_trace(root_operation: str) -> bool:
@@ -894,14 +906,16 @@ def cmd_watch(window_minutes: int = 10,
             print(f"    Detail:  {anomaly['detail']}")
             print(f"    TraceID: {trace_id}")
             try:
+                dims = {
+                    "anomaly_type":   anomaly["type"],
+                    "root_operation": fp["root_op"],
+                    "fp_hash":        fp["hash"],
+                    "sf_environment": environment or "all",
+                    "service":        fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"],
+                }
                 send_custom_event(
                     event_type="trace.path.drift",
-                    dimensions={
-                        "anomaly_type":   anomaly["type"],
-                        "root_operation": fp["root_op"],
-                        "fp_hash":        fp["hash"],
-                        "sf_environment":    environment or "all",
-                    },
+                    dimensions=dims,
                     properties={
                         "message":       anomaly["message"],
                         "detail":        anomaly["detail"],
@@ -909,11 +923,12 @@ def cmd_watch(window_minutes: int = 10,
                         "path":          fp["path"],
                         "services":      ",".join(fp["services"]),
                         "span_count":    fp["span_count"],
-                        "sf_environment":   environment or "all",
+                        "sf_environment": environment or "all",
                         "detector_tier": "tier2",
                         "detector_name": "trace-path-drift",
                     },
                 )
+                send_metric("behavioral_baseline.anomaly.count", 1, dims)
                 print(f"    Event sent (trace.path.drift)")
             except Exception as e:
                 print(f"    Failed to send event: {e}", file=sys.stderr)

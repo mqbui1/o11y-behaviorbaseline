@@ -371,6 +371,18 @@ def correlate(events: list[dict],
     return correlations
 
 
+def send_metric(metric_name: str, value: int, dimensions: dict) -> None:
+    """Emit a gauge metric — immediately queryable via SignalFlow data()."""
+    _request("POST", "/v2/datapoint", {
+        "gauge": [{
+            "metric":     metric_name,
+            "value":      value,
+            "dimensions": dimensions,
+            "timestamp":  int(time.time() * 1000),
+        }],
+    }, base_url=INGEST_URL)
+
+
 def send_correlated_event(corr: dict) -> None:
     deploy = corr.get("deployment")
     deploy_note = (
@@ -401,19 +413,21 @@ def send_correlated_event(corr: dict) -> None:
         props["deployment_ts_ms"]    = str(deploy.get("timestamp", ""))
         props["deployment_correlated"] = "true"
 
+    dims = {
+        "service":        corr["service"],
+        "corr_type":      corr["corr_type"],
+        "severity":       corr["severity"],
+        "sf_environment": corr.get("sf_environment", corr.get("environment", "all")),
+        "tiers":          ",".join(corr["tiers"]),
+    }
     _request("POST", "/v2/event", [{
         "eventType":  "behavioral_baseline.correlated_anomaly",
         "category":   "ALERT",
-        "dimensions": {
-            "service":     corr["service"],
-            "corr_type":   corr["corr_type"],
-            "severity":    corr["severity"],
-            "environment": corr["environment"],
-            "tiers":       ",".join(corr["tiers"]),
-        },
+        "dimensions": dims,
         "properties": props,
         "timestamp":  int(time.time() * 1000),
     }], base_url=INGEST_URL)
+    send_metric("behavioral_baseline.correlated_anomaly.count", 1, dims)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

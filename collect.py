@@ -426,12 +426,28 @@ def summarize_history(history: list[dict]) -> dict:
     }
 
 
-# ── Event emission ────────────────────────────────────────────────────────────
+# ── Event + metric emission ───────────────────────────────────────────────────
+
+def emit_metric(metric_name: str, value: int, dimensions: dict) -> None:
+    """Emit a gauge metric — immediately queryable via SignalFlow data()."""
+    try:
+        _request("POST", "/v2/datapoint", {
+            "gauge": [{
+                "metric":     metric_name,
+                "value":      value,
+                "dimensions": dimensions,
+                "timestamp":  int(time.time() * 1000),
+            }],
+        }, base_url=INGEST_URL)
+    except Exception as e:
+        import sys
+        print(f"  [warn] emit_metric {metric_name}: {e}", file=sys.stderr)
+
 
 def emit_event(event_type: str, properties: dict,
                dimensions: dict | None = None) -> None:
-    """Emit a custom event to Splunk ingest."""
-    dims = {"environment": properties.get("environment", "all")}
+    """Emit a custom event to Splunk ingest, plus a metric for dashboard visibility."""
+    dims = {"sf_environment": properties.get("environment", "all")}
     if dimensions:
         dims.update(dimensions)
     if "service" in properties:
@@ -449,3 +465,21 @@ def emit_event(event_type: str, properties: dict,
     except Exception as e:
         import sys
         print(f"  [warn] emit_event {event_type}: {e}", file=sys.stderr)
+
+    # Also emit a queryable metric for each agent action/page event
+    action = properties.get("action") or properties.get("severity")
+    if event_type == "behavioral_baseline.agent.action" and action:
+        metric_dims = {
+            "sf_environment": dims.get("sf_environment", "all"),
+            "service":        dims.get("service", "all"),
+            "action":         properties.get("action", ""),
+            "severity":       properties.get("severity", ""),
+        }
+        emit_metric("behavioral_baseline.agent.action.count", 1, metric_dims)
+    elif event_type == "behavioral_baseline.oncall.page":
+        emit_metric("behavioral_baseline.agent.action.count", 1, {
+            "sf_environment": dims.get("sf_environment", "all"),
+            "service":        dims.get("service", "all"),
+            "action":         "PAGE_ONCALL",
+            "severity":       properties.get("severity", "INCIDENT"),
+        })
