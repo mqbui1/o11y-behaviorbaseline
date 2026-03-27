@@ -50,6 +50,12 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from hypothesis_engine import analyze as hypothesis_analyze, format_for_prompt
+    _HYPOTHESIS_AVAILABLE = True
+except ImportError:
+    _HYPOTHESIS_AVAILABLE = False
+
+try:
     import boto3
     _BOTO3_AVAILABLE = True
 except ImportError:
@@ -421,7 +427,9 @@ Be concise. Structure your response as:
 If a deployment is correlated, consider it the most likely cause and say so explicitly."""
 
 
-def triage_anomaly(corr: dict, traces: list[dict], dry_run: bool = False) -> str:
+def triage_anomaly(corr: dict, traces: list[dict], dry_run: bool = False,
+                   environment: str | None = None,
+                   window_minutes: int = 30) -> str:
     """
     Call Claude with the full correlated anomaly context + trace data.
     Returns the triage summary text.
@@ -496,6 +504,16 @@ def triage_anomaly(corr: dict, traces: list[dict], dry_run: bool = False) -> str
             f"No recent traces could be retrieved for this service.",
             f"(Service may be completely down or traces not yet indexed)",
         ]
+
+    # ── Hypothesis engine: graph-aware root cause analysis ────────────────────
+    if _HYPOTHESIS_AVAILABLE and not dry_run:
+        try:
+            analysis = hypothesis_analyze(
+                corr["service"], corr, environment, window_minutes
+            )
+            context_parts += ["", format_for_prompt(analysis)]
+        except Exception as e:
+            print(f"  [warn] Hypothesis engine: {e}", file=sys.stderr)
 
     user_message = "\n".join(context_parts)
 
@@ -612,7 +630,9 @@ def run_triage(window_minutes: int, environment: str | None,
         # Call Claude
         print(f"  Calling Claude ({CLAUDE_MODEL}) for triage analysis...")
         try:
-            summary = triage_anomaly(corr, traces, dry_run=dry_run)
+            summary = triage_anomaly(corr, traces, dry_run=dry_run,
+                                     environment=environment,
+                                     window_minutes=window_minutes)
         except Exception as e:
             print(f"  [error] Claude triage failed: {e}", file=sys.stderr)
             continue
