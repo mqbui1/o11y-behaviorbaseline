@@ -80,6 +80,7 @@ INGEST_TOKEN            = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
 REALM                   = os.environ.get("SPLUNK_REALM", "us0")
 BASELINE_PATH           = Path(os.environ.get("BASELINE_PATH", "./baseline.json"))
 TOPOLOGY_LOOKBACK_HOURS = int(os.environ.get("TOPOLOGY_LOOKBACK_HOURS", "48"))
+THRESHOLDS_PATH         = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
 
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN environment variable is required.", file=sys.stderr)
@@ -118,6 +119,25 @@ AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
 
 # Number of parallel threads for fetching trace details.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
+
+# ── Per-service threshold overrides (from adaptive_thresholds.py) ─────────────
+
+def _load_service_thresholds() -> dict:
+    """Load per-service threshold overrides from thresholds.json if present."""
+    if THRESHOLDS_PATH.exists():
+        try:
+            return json.loads(THRESHOLDS_PATH.read_text()).get("services", {})
+        except Exception:
+            pass
+    return {}
+
+_SERVICE_THRESHOLDS: dict = _load_service_thresholds()
+
+
+def _svc_threshold(service: str, key: str, default: float) -> float:
+    """Return per-service threshold if set, else the global default."""
+    return float(_SERVICE_THRESHOLDS.get(service, {}).get(key, default))
+
 
 # ── Noise patterns ─────────────────────────────────────────────────────────────
 # Matched case-insensitively as substrings of a trace's root operation name.
@@ -473,9 +493,14 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
             for info in baseline_for_root.values():
                 for svc in info.get("services", []):
                     service_counts[svc] += 1
+            root_svc = root_op.split(":")[0] if ":" in root_op else root_op
+            dom_threshold = _svc_threshold(
+                root_svc, "missing_service_dominance_threshold",
+                MISSING_SERVICE_DOMINANCE_THRESHOLD
+            )
             dominant_services = {
                 s for s, c in service_counts.items()
-                if c / total_patterns >= MISSING_SERVICE_DOMINANCE_THRESHOLD
+                if c / total_patterns >= dom_threshold
             }
             missing = dominant_services - set(fp["services"])
             if missing:
@@ -511,7 +536,11 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         (info.get("span_count", 0) for info in baseline_for_root.values()),
         default=0,
     )
-    if baseline_max > 0 and fp["span_count"] > baseline_max * SPAN_COUNT_SPIKE_MULTIPLIER:
+    root_svc = root_op.split(":")[0] if ":" in root_op else root_op
+    span_multiplier = _svc_threshold(
+        root_svc, "span_count_spike_multiplier", SPAN_COUNT_SPIKE_MULTIPLIER
+    )
+    if baseline_max > 0 and fp["span_count"] > baseline_max * span_multiplier:
         return {
             "type":    "SPAN_COUNT_SPIKE",
             "message": (f"Span count spike for '{root_op}': "
@@ -531,9 +560,13 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         for info in baseline_for_root.values():
             for svc in info.get("services", []):
                 service_counts[svc] += 1
+        dom_threshold2 = _svc_threshold(
+            root_svc, "missing_service_dominance_threshold",
+            MISSING_SERVICE_DOMINANCE_THRESHOLD
+        )
         dominant_services = {
             s for s, c in service_counts.items()
-            if c / total_patterns >= MISSING_SERVICE_DOMINANCE_THRESHOLD
+            if c / total_patterns >= dom_threshold2
         }
         missing = dominant_services - set(fp["services"])
         if missing:
