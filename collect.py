@@ -43,6 +43,10 @@ STREAM_URL = f"https://stream.{REALM}.signalfx.com"
 
 INCIDENT_STATE_PATH = Path(os.environ.get("INCIDENT_STATE_PATH", "./incident_state.{env}.json"))
 THRESHOLDS_PATH     = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
+HISTORY_PATH        = Path(os.environ.get("AGENT_HISTORY_PATH", "./data/agent_history.{env}.json"))
+
+# Max cycles to retain in history
+HISTORY_MAX_ENTRIES = int(os.environ.get("AGENT_HISTORY_MAX", "50"))
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -331,6 +335,94 @@ def update_threshold(service: str, updates: dict) -> None:
     t = load_thresholds()
     t.setdefault("services", {}).setdefault(service, {}).update(updates)
     save_thresholds(t)
+
+
+# ── Event emission ────────────────────────────────────────────────────────────
+
+# ── Agent history (feedback loop) ────────────────────────────────────────────
+
+def _history_path(environment: str | None) -> Path:
+    env = environment or "all"
+    return Path(str(HISTORY_PATH).replace("{env}", env))
+
+
+def load_history(environment: str | None, max_entries: int = 20) -> list[dict]:
+    """
+    Load the most recent N agent cycles from history.
+    Each entry: {timestamp, severity, assessment, root_cause, actions, outcomes}
+    """
+    p = _history_path(environment)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text())
+        entries = data.get("cycles", [])
+        return entries[-max_entries:]
+    except Exception:
+        return []
+
+
+def append_history(environment: str | None, cycle: dict) -> None:
+    """
+    Append one completed agent cycle to history.
+    Trims to HISTORY_MAX_ENTRIES automatically.
+    """
+    p = _history_path(environment)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(p.read_text()) if p.exists() else {"cycles": []}
+    except Exception:
+        data = {"cycles": []}
+
+    data["cycles"].append(cycle)
+    # Keep only the most recent N entries
+    if len(data["cycles"]) > HISTORY_MAX_ENTRIES:
+        data["cycles"] = data["cycles"][-HISTORY_MAX_ENTRIES:]
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    p.write_text(json.dumps(data, indent=2))
+
+
+def summarize_history(history: list[dict]) -> dict:
+    """
+    Compress history into a Claude-friendly summary.
+    Returns counts + recent patterns — not the full raw list.
+    """
+    if not history:
+        return {"cycles": 0}
+
+    severity_counts: dict[str, int] = defaultdict(int)
+    suppressed_patterns: dict[str, int] = defaultdict(int)  # service → suppress count
+    paged_patterns: dict[str, int]      = defaultdict(int)  # service → page count
+    relearn_count = 0
+
+    for cycle in history:
+        severity_counts[cycle.get("severity", "OK")] += 1
+        for action in cycle.get("actions", []):
+            atype   = action.get("type", "")
+            service = action.get("service") or "all"
+            if atype == "SUPPRESS_ANOMALY":
+                suppressed_patterns[service] += 1
+            elif atype == "PAGE_ONCALL":
+                paged_patterns[service] += 1
+            elif atype == "RELEARN_BASELINE":
+                relearn_count += 1
+
+    # Most recent 3 assessments for context
+    recent = [
+        {"timestamp": c.get("timestamp"), "severity": c.get("severity"),
+         "assessment": c.get("assessment"), "root_cause": c.get("root_cause")}
+        for c in history[-3:]
+    ]
+
+    return {
+        "cycles":              len(history),
+        "severity_counts":     dict(severity_counts),
+        "frequent_suppressions": {k: v for k, v in suppressed_patterns.items() if v >= 2},
+        "paged_services":      dict(paged_patterns),
+        "baseline_relearns":   relearn_count,
+        "recent_cycles":       recent,
+    }
 
 
 # ── Event emission ────────────────────────────────────────────────────────────
