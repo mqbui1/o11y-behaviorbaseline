@@ -234,9 +234,10 @@ if os.path.exists(_env_file):
 ACCESS_TOKEN         = os.environ.get("SPLUNK_ACCESS_TOKEN")
 INGEST_TOKEN         = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
 REALM                = os.environ.get("SPLUNK_REALM", "us0")
+_DATA_DIR            = Path(__file__).parent / "data"
 STATE_PATH           = Path(os.environ.get("ONBOARDING_STATE_PATH",
-                                           "./onboarding_state.json"))
-BASELINE_PATH        = Path(os.environ.get("BASELINE_PATH", "./baseline.json"))
+                                           str(_DATA_DIR / "onboarding_state.json")))
+BASELINE_PATH        = Path(os.environ.get("BASELINE_PATH", str(_DATA_DIR / "baseline.json")))
 TOPOLOGY_LOOKBACK_HOURS = int(os.environ.get("TOPOLOGY_LOOKBACK_HOURS", "48"))
 
 # How many services must change in an environment before we treat it as
