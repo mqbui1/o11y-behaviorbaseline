@@ -607,6 +607,7 @@ def run(
     auto: bool = False,
     teardown_removed: bool = TEARDOWN_REMOVED_ENVS,
     learn_window: int = 120,
+    advise: bool = False,
 ) -> None:
     """
     Main onboarding loop.
@@ -665,6 +666,15 @@ def run(
         label  = env or "(no environment tag)"
         action = "new" if env in new_envs else "updated"
         print(f"\n  [{action}] {label}")
+
+        # Run onboarding advisor for new environments to set per-env config
+        if advise and action == "new":
+            try:
+                from onboarding_advisor import advise as run_advisor
+                run_advisor(env, apply=not dry_run)
+            except Exception as e:
+                print(f"    [warn] Onboarding advisor failed: {e}",
+                      file=sys.stderr)
 
         # Provision detectors first (prerequisite), then run both baselines
         # and create the dashboard concurrently.
@@ -798,6 +808,10 @@ def main() -> None:
         help="Minutes of trace history to use when building baseline (default: 120).",
     )
     parser.add_argument(
+        "--advise", action="store_true",
+        help="Run the onboarding advisor for new environments before provisioning.",
+    )
+    parser.add_argument(
         "--show-state", action="store_true",
         help="Print the current onboarding state and exit.",
     )
@@ -825,6 +839,7 @@ def main() -> None:
         auto=args.auto,
         teardown_removed=args.teardown_removed,
         learn_window=args.learn_window,
+        advise=args.advise,
     )
 
 
