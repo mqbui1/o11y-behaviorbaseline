@@ -41,9 +41,10 @@ APP_URL    = f"https://app.{REALM}.signalfx.com"
 INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 STREAM_URL = f"https://stream.{REALM}.signalfx.com"
 
-INCIDENT_STATE_PATH = Path(os.environ.get("INCIDENT_STATE_PATH", "./incident_state.{env}.json"))
-THRESHOLDS_PATH     = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
-HISTORY_PATH        = Path(os.environ.get("AGENT_HISTORY_PATH", "./data/agent_history.{env}.json"))
+_DATA_DIR           = Path(__file__).parent / "data"
+INCIDENT_STATE_PATH = Path(os.environ.get("INCIDENT_STATE_PATH", str(_DATA_DIR / "incident_state.{env}.json")))
+THRESHOLDS_PATH     = Path(os.environ.get("THRESHOLDS_PATH", str(_DATA_DIR / "thresholds.json")))
+HISTORY_PATH        = Path(os.environ.get("AGENT_HISTORY_PATH", str(_DATA_DIR / "agent_history.{env}.json")))
 
 # Max cycles to retain in history
 HISTORY_MAX_ENTRIES = int(os.environ.get("AGENT_HISTORY_MAX", "50"))
