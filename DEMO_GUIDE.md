@@ -405,6 +405,80 @@ crontab -l | grep behavioral         # 5 per-env jobs + 1 global auto job
 
 ---
 
+## Demo 7: AI-Powered Anomaly Triage (Bonus)
+
+**What fires:** `triage_agent.py` fetches a correlated anomaly, retrieves actual traces, and calls Claude to produce a plain-English incident summary
+
+**Story:** *"When a correlated alert fires, instead of paging someone at 3am with a dashboard link, the agent fetches the traces, reads the spans, cross-references the deployment, and tells you exactly what happened and what to do."*
+
+**Prerequisite:** Set `ANTHROPIC_API_KEY` in your environment (or `.env` file)
+
+### Step 1 — Setup
+```bash
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+```
+
+### Step 2 — Run with a recent correlated anomaly (use wider window to find historical events)
+```bash
+python3 triage_agent.py --environment petclinicmbtest --window-minutes 60
+```
+
+### Step 3 — Show poll mode (for production use)
+```bash
+python3 triage_agent.py --environment petclinicmbtest --mode poll --poll-interval 60
+# Ctrl+C to stop
+```
+
+**Expected output for a TIER2_TIER3 correlated anomaly:**
+```
+[triage] Scanning 60m window for correlated anomalies (petclinicmbtest)...
+  Found 1 event(s), 1 new to triage.
+
+[Major] TIER2_TIER3 — api-gateway @ 15:25:02 UTC
+  Tiers: tier2, tier3
+  Anomaly types: NEW_FINGERPRINT, MISSING_SERVICE
+  Fetching traces for api-gateway...
+  Retrieved 3 trace ID(s)
+  Calling Claude (claude-opus-4-6) for triage analysis...
+
+======================================================================
+TRIAGE SUMMARY — api-gateway (Major)
+======================================================================
+## Incident Summary
+The api-gateway service is experiencing anomalous behavior with unrecognized
+trace paths and missing downstream dependencies, consistent with a partial
+service outage affecting vets-service.
+
+## Root Cause Hypothesis
+vets-service appears to be unavailable. Traces show api-gateway attempting
+to reach vets-service but receiving no response, resulting in collapsed
+single-span traces (MISSING_SERVICE) and fallback code paths (NEW_FINGERPRINT).
+
+## Affected Services
+- **api-gateway**: Executing unexpected code paths, likely fallback/error handlers
+- **vets-service**: Not appearing in traces — likely down or unreachable
+
+## Evidence
+- 4 NEW_FINGERPRINT events on api-gateway within 3 minutes
+- MISSING_SERVICE: vets-service absent from traces where it normally appears in 85% of variants
+- Trace spans show api-gateway:GET vets-service completing in <5ms (connection refused, not timeout)
+
+## Recommended Actions
+1. Check vets-service pod status: `kubectl get pods -l app=vets-service`
+2. Check vets-service logs for crash/OOM: `kubectl logs -l app=vets-service --tail=50`
+3. If down, scale back: `kubectl scale deployment vets-service --replicas=1`
+4. Monitor for SIGNATURE_VANISHED on vets-service errors once restored
+======================================================================
+```
+
+**Key talking points:**
+- No dashboard diving — the agent reads the actual spans and produces actionable steps
+- If a deployment is correlated (Demo 5 scenario), the summary explicitly names the deploy as likely cause
+- Poll mode can route to Slack via `--webhook-url https://hooks.slack.com/...`
+- The agent deduplicates — won't triage the same event twice in a session
+
+---
+
 ## Demo Quick Reference Card
 
 | # | Demo | Setup | Disrupt | Detect | Signal |
