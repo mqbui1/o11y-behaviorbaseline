@@ -69,6 +69,7 @@ REALM                   = os.environ.get("SPLUNK_REALM", "us0")
 BASELINE_PATH           = Path(os.environ.get("ERROR_BASELINE_PATH",
                                               "./error_baseline.json"))
 TOPOLOGY_LOOKBACK_HOURS = int(os.environ.get("TOPOLOGY_LOOKBACK_HOURS", "48"))
+THRESHOLDS_PATH         = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
 
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN environment variable is required.",
@@ -103,6 +104,22 @@ DOMINANCE_THRESHOLD = 0.2  # 20% of errors in its service
 
 # Top N span operation names to include in the signature path
 SIGNATURE_TOP_FRAMES = 5
+
+# ── Per-service threshold overrides (from adaptive_thresholds.py) ─────────────
+
+def _load_service_thresholds() -> dict:
+    if THRESHOLDS_PATH.exists():
+        try:
+            return json.loads(THRESHOLDS_PATH.read_text()).get("services", {})
+        except Exception:
+            pass
+    return {}
+
+_SERVICE_THRESHOLDS: dict = _load_service_thresholds()
+
+
+def _svc_threshold(service: str, key: str, default: float) -> float:
+    return float(_SERVICE_THRESHOLDS.get(service, {}).get(key, default))
 
 # New signatures consistently seen across N watch runs are auto-promoted
 # to the baseline (stops alerting on them). Set to 0 to disable.
@@ -430,7 +447,10 @@ def classify_signature(sig: dict, baseline: dict,
     if baseline_occurrences >= SPIKE_MIN_BASELINE_OCCURRENCES:
         baseline_rate = baseline_occurrences / learn_runs
         watch_rate    = watch_counts.get(sig_hash, 0)
-        if watch_rate > baseline_rate * SPIKE_MULTIPLIER:
+        spike_mult = _svc_threshold(
+            sig.get("service", ""), "error_spike_multiplier", SPIKE_MULTIPLIER
+        )
+        if watch_rate > baseline_rate * spike_mult:
             return {
                 "type":    "SIGNATURE_SPIKE",
                 "message": (f"Error spike in {sig['service']}: "
