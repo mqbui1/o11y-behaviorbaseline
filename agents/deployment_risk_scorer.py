@@ -58,7 +58,7 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -77,7 +77,7 @@ BASE_URL   = f"https://api.{REALM}.signalfx.com"
 APP_URL    = f"https://app.{REALM}.signalfx.com"
 STREAM_URL = f"https://stream.{REALM}.signalfx.com"
 
-THRESHOLDS_PATH = Path(os.environ.get("THRESHOLDS_PATH", "./thresholds.json"))
+THRESHOLDS_PATH = Path(os.environ.get("THRESHOLDS_PATH", str(Path(__file__).parent.parent / "data" / "thresholds.json")))
 BLOCK_THRESHOLD = int(os.environ.get("RISK_BLOCK_THRESHOLD", "75"))
 
 # Lookback for recent anomaly rate
@@ -154,7 +154,7 @@ def _signalflow_events(event_type: str, start_ms: int, end_ms: int,
 # ── Data collection ────────────────────────────────────────────────────────────
 
 def load_trace_baseline(service: str, environment: str | None) -> dict | None:
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).parent.parent / "data"
     for pattern in [f"baseline.{environment}.json", "baseline.json"]:
         fp = script_dir / pattern
         if fp.exists():

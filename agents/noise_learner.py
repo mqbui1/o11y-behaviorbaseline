@@ -41,7 +41,7 @@ from pathlib import Path
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).parent / ".env"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -58,15 +58,15 @@ MIN_WATCH_HITS = 3
 MIN_PATTERN_SUPPORT = 1
 
 NOISE_PATTERNS_PATH = Path(os.environ.get("NOISE_PATTERNS_PATH", "./noise_patterns.json"))
-TF_PATH             = Path(__file__).parent / "trace_fingerprint.py"
+TF_PATH             = Path(__file__).parent.parent / "core" / "trace_fingerprint.py"
 
 
 # ── Baseline loading ──────────────────────────────────────────────────────────
 
 def _load_baseline(environment: str | None) -> dict:
-    script_dir = Path(__file__).parent
+    data_dir = Path(__file__).parent.parent / "data"
     for pattern in [f"baseline.{environment}.json", "baseline.json"]:
-        fp = script_dir / pattern
+        fp = data_dir / pattern
         if fp.exists():
             try:
                 return json.loads(fp.read_text())
@@ -88,9 +88,9 @@ def _load_existing_noise_patterns() -> list[str]:
 
 def _load_builtin_noise_patterns() -> list[str]:
     """Read the hardcoded NOISE_PATTERNS from trace_fingerprint.py."""
-    sys.path.insert(0, str(Path(__file__).parent))
+    sys.path.insert(0, str(Path(__file__).parent.parent))
     try:
-        from trace_fingerprint import NOISE_PATTERNS
+        from core.trace_fingerprint import NOISE_PATTERNS
         return list(NOISE_PATTERNS)
     except ImportError:
         return []
