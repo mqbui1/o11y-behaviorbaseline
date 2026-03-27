@@ -396,7 +396,7 @@ def load_baseline(environment: str | None = None) -> dict:
         with open(path) as f:
             return json.load(f)
     return {"signatures": {}, "learn_runs": 0, "created_at": None,
-            "updated_at": None, "environment": environment}
+            "updated_at": None, "sf_environment": environment}
 
 
 def save_baseline(baseline: dict, environment: str | None = None) -> None:
@@ -749,7 +749,7 @@ def cmd_watch(window_minutes: int = 10,
                             "service":      sig["service"],
                             "error_type":   sig["error_type"],
                             "sig_hash":     sig["hash"],
-                            "environment":  environment or "all",
+                            "sf_environment":  environment or "all",
                         },
                         properties={
                             "message":       anomaly["message"],
@@ -759,7 +759,7 @@ def cmd_watch(window_minutes: int = 10,
                             "call_path":     sig["call_path"],
                             "http_status":   sig["http_status"],
                             "db_system":     sig["db_system"],
-                            "environment":   environment or "all",
+                            "sf_environment":   environment or "all",
                             "detector_tier": "tier3",
                             "detector_name": "error-signature-fingerprint",
                         },
@@ -788,14 +788,14 @@ def cmd_watch(window_minutes: int = 10,
                     "service":      sig["service"],
                     "error_type":   sig["error_type"],
                     "sig_hash":     sig["hash"],
-                    "environment":  environment or "all",
+                    "sf_environment":  environment or "all",
                 },
                 properties={
                     "message":       anomaly["message"],
                     "detail":        anomaly["detail"],
                     "operation":     sig["operation"],
                     "call_path":     sig.get("call_path", ""),
-                    "environment":   environment or "all",
+                    "sf_environment":   environment or "all",
                     "detector_tier": "tier3",
                     "detector_name": "error-signature-fingerprint",
                 },
