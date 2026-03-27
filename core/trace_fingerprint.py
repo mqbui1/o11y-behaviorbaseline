@@ -247,7 +247,7 @@ def discover_topology(lookback_hours: int = TOPOLOGY_LOOKBACK_HOURS,
         "edges":         edges,
         "ingress_nodes": ingress_nodes,
         "discovered_at": datetime.now(timezone.utc).isoformat(),
-        "environment":   environment,
+        "sf_environment":   environment,
     }
 
 
@@ -606,7 +606,7 @@ def load_baseline(environment: str | None = None) -> dict:
             return json.load(f)
     return {"fingerprints": {}, "topology": None,
             "created_at": None, "updated_at": None,
-            "environment": environment}
+            "sf_environment": environment}
 
 
 def save_baseline(baseline: dict, environment: str | None = None) -> None:
@@ -811,10 +811,10 @@ def cmd_watch(window_minutes: int = 10,
                 send_custom_event(
                     event_type="topology.new_service",
                     dimensions={"new_service": svc,
-                                "environment": environment or "all"},
+                                "sf_environment": environment or "all"},
                     properties={
                         "message":       f"New service '{svc}' appeared in APM topology",
-                        "environment":   environment or "all",
+                        "sf_environment":   environment or "all",
                         "detector_tier": "tier1",
                         "detector_name": "topology-new-service",
                     },
@@ -900,7 +900,7 @@ def cmd_watch(window_minutes: int = 10,
                         "anomaly_type":   anomaly["type"],
                         "root_operation": fp["root_op"],
                         "fp_hash":        fp["hash"],
-                        "environment":    environment or "all",
+                        "sf_environment":    environment or "all",
                     },
                     properties={
                         "message":       anomaly["message"],
@@ -909,7 +909,7 @@ def cmd_watch(window_minutes: int = 10,
                         "path":          fp["path"],
                         "services":      ",".join(fp["services"]),
                         "span_count":    fp["span_count"],
-                        "environment":   environment or "all",
+                        "sf_environment":   environment or "all",
                         "detector_tier": "tier2",
                         "detector_name": "trace-path-drift",
                     },
