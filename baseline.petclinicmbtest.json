@@ -1,765 +1,8 @@
 {
-  "fingerprints": {
-    "68664c9584c9030c": {
-      "hash": "68664c9584c9030c",
-      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> customers-service:GET /owners/{ownerId} -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> visits-service:GET /pets/visits -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
-      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
-      "services": [
-        "api-gateway",
-        "customers-service",
-        "visits-service"
-      ],
-      "span_count": 12,
-      "edge_count": 11,
-      "occurrences": 23,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-21T05:21:18.621037+00:00"
-    },
-    "c2f029952cdb14ba": {
-      "hash": "c2f029952cdb14ba",
-      "path": "admin-server:GET -> discovery-server:GET /{version}/apps/delta",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 4,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:21:26.990262+00:00"
-    },
-    "b9afb45b1b438c28": {
-      "hash": "b9afb45b1b438c28",
-      "path": "visits-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
-      "root_op": "visits-service:PUT",
-      "services": [
-        "discovery-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 7,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:21:36.090051+00:00"
-    },
-    "274259c13efab1d4": {
-      "hash": "274259c13efab1d4",
-      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /petTypes -> customers-service:GET /petTypes -> customers-service:PetRepository.findPetTypes -> customers-service:PetRepository.findPetTypes -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types",
-      "root_op": "api-gateway:GET customers-service",
-      "services": [
-        "api-gateway",
-        "customers-service"
-      ],
-      "span_count": 6,
-      "edge_count": 5,
-      "occurrences": 16,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-21T05:21:39.067628+00:00"
-    },
-    "d9a41484866d1587": {
-      "hash": "d9a41484866d1587",
-      "path": "admin-server:GET -> vets-service:GET /actuator/health",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "vets-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 9,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:21:48.490994+00:00"
-    },
-    "53479a40e442b4d2": {
-      "hash": "53479a40e442b4d2",
-      "path": "vets-service:GET -> discovery-server:GET /{version}/apps/delta",
-      "root_op": "vets-service:GET",
-      "services": [
-        "discovery-server",
-        "vets-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 4,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:22:06.320502+00:00"
-    },
-    "31ddc9717bc4e16a": {
-      "hash": "31ddc9717bc4e16a",
-      "path": "api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /vets -> vets-service:GET /vets -> vets-service:VetRepository.findAll -> vets-service:VetRepository.findAll -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT petclinic.vets -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT petclinic -> vets-service:VetRepository.findAll -> vets-service:Transaction.commit",
-      "root_op": "api-gateway:GET vets-service",
-      "services": [
-        "api-gateway",
-        "vets-service"
-      ],
-      "span_count": 8,
-      "edge_count": 7,
-      "occurrences": 12,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-21T05:22:09.725908+00:00"
-    },
-    "3ebf4d14913b6aa5": {
-      "hash": "3ebf4d14913b6aa5",
-      "path": "api-gateway:PUT customers-service -> api-gateway:PUT -> api-gateway:PUT -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.findById -> customers-service:PetRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.findById -> customers-service:Transaction.commit -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.findPetTypeById -> customers-service:PetRepository.findPetTypeById -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.save -> customers-service:PetRepository.save -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.save -> customers-service:Transaction.commit",
-      "root_op": "api-gateway:PUT customers-service",
-      "services": [
-        "api-gateway",
-        "customers-service"
-      ],
-      "span_count": 16,
-      "edge_count": 15,
-      "occurrences": 11,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-21T05:22:11.498662+00:00"
-    },
-    "81dc7e816594ec49": {
-      "hash": "81dc7e816594ec49",
-      "path": "admin-server:GET -> api-gateway:GET /actuator/health",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "api-gateway"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 8,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:22:13.319018+00:00"
-    },
-    "2b56da2c75201db7": {
-      "hash": "2b56da2c75201db7",
-      "path": "admin-server:GET -> visits-service:GET /actuator/health",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 10,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:22:28.914641+00:00"
-    },
-    "fec58438476b84c3": {
-      "hash": "fec58438476b84c3",
-      "path": "discovery-server:POST -> discovery-server:POST /{version}/peerreplication/batch",
-      "root_op": "discovery-server:POST",
-      "services": [
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 15,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:22:57.600986+00:00"
-    },
-    "6a1bfdfd56412abe": {
-      "hash": "6a1bfdfd56412abe",
-      "path": "api-gateway:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
-      "root_op": "api-gateway:PUT",
-      "services": [
-        "api-gateway",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 7,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:23:14.154256+00:00"
-    },
-    "f3b9960369c3735a": {
-      "hash": "f3b9960369c3735a",
-      "path": "vets-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
-      "root_op": "vets-service:PUT",
-      "services": [
-        "discovery-server",
-        "vets-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 5,
-      "watch_hits": 0,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:25:08.595071+00:00"
-    },
-    "5c9790ab7205061f": {
-      "hash": "5c9790ab7205061f",
-      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners -> customers-service:GET /owners -> customers-service:OwnerRepository.findAll -> customers-service:OwnerRepository.findAll -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic.owners -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findAll -> customers-service:Transaction.commit",
-      "root_op": "api-gateway:GET customers-service",
-      "services": [
-        "api-gateway",
-        "customers-service"
-      ],
-      "span_count": 8,
-      "edge_count": 7,
-      "occurrences": 13,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-21T05:25:23.295804+00:00"
-    },
-    "b304cb2af8556d5b": {
-      "hash": "b304cb2af8556d5b",
-      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/*/pets/{petId} -> customers-service:GET /owners/*/pets/{petId} -> customers-service:PetRepository.findById -> customers-service:PetRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.findById -> customers-service:Transaction.commit",
-      "root_op": "api-gateway:GET customers-service",
-      "services": [
-        "api-gateway",
-        "customers-service"
-      ],
-      "span_count": 8,
-      "edge_count": 7,
-      "occurrences": 9,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-21T05:28:08.122535+00:00"
-    },
-    "73fdbe1ea5853313": {
-      "hash": "73fdbe1ea5853313",
-      "path": "customers-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
-      "root_op": "customers-service:PUT",
-      "services": [
-        "customers-service",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 6,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:28:40.207505+00:00"
-    },
-    "ca038370769c1351": {
-      "hash": "ca038370769c1351",
-      "path": "admin-server:GET -> customers-service:GET /actuator/health",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "customers-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 7,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:29:26.341379+00:00"
-    },
-    "0801202ac1bb60e3": {
-      "hash": "0801202ac1bb60e3",
-      "path": "visits-service:GET -> discovery-server:GET /{version}/apps/delta",
-      "root_op": "visits-service:GET",
-      "services": [
-        "discovery-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 4,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:30:51.638008+00:00"
-    },
-    "da41c8d4dbea5aef": {
-      "hash": "da41c8d4dbea5aef",
-      "path": "api-gateway:GET -> discovery-server:GET /{version}/apps/delta",
-      "root_op": "api-gateway:GET",
-      "services": [
-        "api-gateway",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 6,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:41:49.451014+00:00"
-    },
-    "40845ddcd911de64": {
-      "hash": "40845ddcd911de64",
-      "path": "customers-service:GET -> discovery-server:GET /{version}/apps/delta",
-      "root_op": "customers-service:GET",
-      "services": [
-        "customers-service",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 5,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:42:57.403326+00:00"
-    },
-    "bfc9a1f13d9cea3c": {
-      "hash": "bfc9a1f13d9cea3c",
-      "path": "admin-server:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
-      "root_op": "admin-server:PUT",
-      "services": [
-        "admin-server",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 4,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:50:33.498071+00:00"
-    },
-    "e3ff96013645305b": {
-      "hash": "e3ff96013645305b",
-      "path": "admin-server:GET -> customers-service:GET /actuator/info",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "customers-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 4,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-21T05:56:01.698476+00:00"
-    },
-    "de057764f8bb4e97": {
-      "hash": "de057764f8bb4e97",
-      "path": "admin-server:GET -> visits-service:GET /actuator/info",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 2,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-22T05:05:59.205887+00:00"
-    },
-    "f86d2bf72dd41a63": {
-      "hash": "f86d2bf72dd41a63",
-      "path": "admin-server:GET -> vets-service:GET /actuator/info",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "vets-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 3,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-22T05:05:59.995395+00:00"
-    },
-    "2f4a9c2f671f931f": {
-      "hash": "2f4a9c2f671f931f",
-      "path": "admin-server:GET -> api-gateway:GET /actuator/info",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "api-gateway"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 3,
-      "watch_hits": 1,
-      "auto_promoted": true,
-      "promoted_at": "2026-03-22T05:27:00.692127+00:00",
-      "first_seen": "2026-03-22T05:06:00.259116+00:00"
-    },
-    "c3c5e8992fe33213": {
-      "hash": "c3c5e8992fe33213",
-      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> customers-service:GET /owners/{ownerId} -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit",
-      "root_op": "api-gateway:GET customers-service",
-      "services": [
-        "api-gateway",
-        "customers-service"
-      ],
-      "span_count": 7,
-      "edge_count": 6,
-      "occurrences": 1,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-22T05:25:14.859337+00:00"
-    },
-    "e9ce1220352fd0d7": {
-      "hash": "e9ce1220352fd0d7",
-      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> customers-service:GET /owners/{ownerId} -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> api-gateway:GET -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
-      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
-      "services": [
-        "api-gateway",
-        "customers-service",
-        "visits-service"
-      ],
-      "span_count": 12,
-      "edge_count": 11,
-      "occurrences": 2,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-22T05:27:20.442832+00:00"
-    },
-    "1113ce60cff54373": {
-      "hash": "1113ce60cff54373",
-      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /petTypes -> api-gateway:GET -> customers-service:PetRepository.findPetTypes -> customers-service:PetRepository.findPetTypes -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types",
-      "root_op": "api-gateway:GET customers-service",
-      "services": [
-        "api-gateway",
-        "customers-service"
-      ],
-      "span_count": 6,
-      "edge_count": 5,
-      "occurrences": 1,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-23T06:19:52.849168+00:00"
-    },
-    "cc33d3a4140c2b3c": {
-      "hash": "cc33d3a4140c2b3c",
-      "path": "api-gateway:POST visits-service -> api-gateway:POST -> api-gateway:POST -> visits-service:POST /owners/*/pets/{petId}/visits -> visits-service:POST /owners/*/pets/{petId}/visits -> visits-service:VisitRepository.save -> visits-service:VisitRepository.save -> visits-service:Session.persist org.springframework.samples.petclinic.visits.model.Visit -> visits-service:Session.persist org.springframework.samples.petclinic.visits.model.Visit -> visits-service:INSERT petclinic.visits",
-      "root_op": "api-gateway:POST visits-service",
-      "services": [
-        "api-gateway",
-        "visits-service"
-      ],
-      "span_count": 6,
-      "edge_count": 5,
-      "occurrences": 1,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-23T06:40:34.228491+00:00"
-    },
-    "2a7c1f11c6393f2a": {
-      "hash": "2a7c1f11c6393f2a",
-      "path": "api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /** -> vets-service:GET /** -> vets-service:ResponseFacade.sendError",
-      "root_op": "api-gateway:GET vets-service",
-      "services": [
-        "api-gateway",
-        "vets-service"
-      ],
-      "span_count": 4,
-      "edge_count": 3,
-      "occurrences": 1,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-23T18:30:15.225659+00:00"
-    },
-    "6357ae5d76ac75b0": {
-      "hash": "6357ae5d76ac75b0",
-      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> api-gateway:GET -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> customers-service:GET /owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> visits-service:GET /pets/visits -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
-      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
-      "services": [
-        "api-gateway",
-        "customers-service",
-        "visits-service"
-      ],
-      "span_count": 12,
-      "edge_count": 11,
-      "occurrences": 1,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-23T18:35:12.273604+00:00"
-    },
-    "0effb31ff5250e78": {
-      "hash": "0effb31ff5250e78",
-      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners -> api-gateway:GET -> customers-service:OwnerRepository.findAll -> customers-service:OwnerRepository.findAll -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic.owners -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findAll -> customers-service:Transaction.commit",
-      "root_op": "api-gateway:GET customers-service",
-      "services": [
-        "api-gateway",
-        "customers-service"
-      ],
-      "span_count": 8,
-      "edge_count": 7,
-      "occurrences": 1,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-24T05:49:44.350661+00:00"
-    },
-    "13ad5609cf0d1bc3": {
-      "hash": "13ad5609cf0d1bc3",
-      "path": "api-gateway:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
-      "root_op": "api-gateway:GET",
-      "services": [
-        "api-gateway",
-        "config-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 3,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:20:07.744800+00:00"
-    },
-    "fb9b51ee9edce84a": {
-      "hash": "fb9b51ee9edce84a",
-      "path": "customers-service:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
-      "root_op": "customers-service:GET",
-      "services": [
-        "config-server",
-        "customers-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 3,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:20:07.908465+00:00"
-    },
-    "fab59062b4161e58": {
-      "hash": "fab59062b4161e58",
-      "path": "api-gateway:GET -> discovery-server:GET /{version}/apps",
-      "root_op": "api-gateway:GET",
-      "services": [
-        "api-gateway",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 3,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:20:08.077958+00:00"
-    },
-    "7e33d2dcbcd33f37": {
-      "hash": "7e33d2dcbcd33f37",
-      "path": "visits-service:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
-      "root_op": "visits-service:GET",
-      "services": [
-        "config-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 3,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:20:08.227642+00:00"
-    },
-    "ac1dcc9db922df75": {
-      "hash": "ac1dcc9db922df75",
-      "path": "vets-service:GET -> config-server:GET /{name}/{profiles:(?!.*\\b\\.(?:ya?ml|properties|json)\\b).*}",
-      "root_op": "vets-service:GET",
-      "services": [
-        "config-server",
-        "vets-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 3,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:20:08.370959+00:00"
-    },
-    "ec481211719aac9c": {
-      "hash": "ec481211719aac9c",
-      "path": "customers-service:GET -> discovery-server:GET /{version}/apps",
-      "root_op": "customers-service:GET",
-      "services": [
-        "customers-service",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 2,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:23:58.632370+00:00"
-    },
-    "ee018af484afd8ce": {
-      "hash": "ee018af484afd8ce",
-      "path": "visits-service:GET -> discovery-server:GET /{version}/apps",
-      "root_op": "visits-service:GET",
-      "services": [
-        "discovery-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 2,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:23:59.060730+00:00"
-    },
-    "3d191cfa8627be5c": {
-      "hash": "3d191cfa8627be5c",
-      "path": "visits-service:POST -> discovery-server:POST /{version}/apps/{appId}",
-      "root_op": "visits-service:POST",
-      "services": [
-        "discovery-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 1,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:24:01.914544+00:00"
-    },
-    "1eb414deb7cae6b8": {
-      "hash": "1eb414deb7cae6b8",
-      "path": "admin-server:GET -> visits-service:GET /actuator",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "visits-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 1,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:24:03.667412+00:00"
-    },
-    "7fcac01ef5380f02": {
-      "hash": "7fcac01ef5380f02",
-      "path": "admin-server:GET -> api-gateway:GET /actuator",
-      "root_op": "admin-server:GET",
-      "services": [
-        "admin-server",
-        "api-gateway"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 1,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:24:06.975768+00:00"
-    },
-    "9ead899d8de08543": {
-      "hash": "9ead899d8de08543",
-      "path": "vets-service:GET -> discovery-server:GET /{version}/apps",
-      "root_op": "vets-service:GET",
-      "services": [
-        "discovery-server",
-        "vets-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 2,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:24:09.283281+00:00"
-    },
-    "b478c7a19dd651a9": {
-      "hash": "b478c7a19dd651a9",
-      "path": "api-gateway:POST -> discovery-server:POST /{version}/apps/{appId}",
-      "root_op": "api-gateway:POST",
-      "services": [
-        "api-gateway",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 1,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:24:11.039275+00:00"
-    },
-    "2170e61884fdaad5": {
-      "hash": "2170e61884fdaad5",
-      "path": "vets-service:POST -> discovery-server:POST /{version}/apps/{appId}",
-      "root_op": "vets-service:POST",
-      "services": [
-        "discovery-server",
-        "vets-service"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 1,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:24:17.263698+00:00"
-    },
-    "ff778a436a4a4dd1": {
-      "hash": "ff778a436a4a4dd1",
-      "path": "customers-service:POST -> discovery-server:POST /{version}/apps/{appId}",
-      "root_op": "customers-service:POST",
-      "services": [
-        "customers-service",
-        "discovery-server"
-      ],
-      "span_count": 2,
-      "edge_count": 1,
-      "occurrences": 1,
-      "watch_hits": 0,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T15:24:18.116098+00:00"
-    },
-    "cf69736038d1042e": {
-      "hash": "cf69736038d1042e",
-      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> api-gateway:GET -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> visits-service:GET /pets/visits -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
-      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
-      "services": [
-        "api-gateway",
-        "customers-service",
-        "visits-service"
-      ],
-      "span_count": 12,
-      "edge_count": 11,
-      "occurrences": 1,
-      "watch_hits": 1,
-      "auto_promoted": false,
-      "promoted_at": null,
-      "first_seen": "2026-03-25T16:30:18.718201+00:00"
-    }
-  },
+  "created_at": "2026-03-26T21:18:40.159954+00:00",
   "topology": {
     "services": [
       "api-gateway",
-      "discovery-server",
       "customers-service",
       "visits-service",
       "vets-service"
@@ -779,10 +22,6 @@
       ],
       [
         "api-gateway",
-        "discovery-server"
-      ],
-      [
-        "api-gateway",
         "localhost:8888"
       ],
       [
@@ -795,10 +34,6 @@
       ],
       [
         "customers-service",
-        "discovery-server"
-      ],
-      [
-        "customers-service",
         "localhost:8888"
       ],
       [
@@ -807,19 +42,11 @@
       ],
       [
         "vets-service",
-        "discovery-server"
-      ],
-      [
-        "vets-service",
         "localhost:8888"
       ],
       [
         "vets-service",
         "mysql:petclinic"
-      ],
-      [
-        "visits-service",
-        "discovery-server"
       ],
       [
         "visits-service",
@@ -833,10 +60,332 @@
     "ingress_nodes": [
       "api-gateway"
     ],
-    "discovered_at": "2026-03-25T16:34:58.318420+00:00",
+    "discovered_at": "2026-03-27T04:00:35.897561+00:00",
     "environment": "petclinicmbtest"
   },
-  "created_at": "2026-03-21T05:21:16.869881+00:00",
-  "updated_at": "2026-03-25T16:35:38.128996+00:00",
+  "fingerprints": {
+    "274259c13efab1d4": {
+      "hash": "274259c13efab1d4",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /petTypes -> customers-service:GET /petTypes -> customers-service:PetRepository.findPetTypes -> customers-service:PetRepository.findPetTypes -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 6,
+      "edge_count": 5,
+      "occurrences": 7,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:18:47.563929+00:00"
+    },
+    "5c9790ab7205061f": {
+      "hash": "5c9790ab7205061f",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners -> customers-service:GET /owners -> customers-service:OwnerRepository.findAll -> customers-service:OwnerRepository.findAll -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic.owners -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findAll -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 8,
+      "edge_count": 7,
+      "occurrences": 7,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:18:47.594236+00:00"
+    },
+    "b304cb2af8556d5b": {
+      "hash": "b304cb2af8556d5b",
+      "path": "api-gateway:GET customers-service -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/*/pets/{petId} -> customers-service:GET /owners/*/pets/{petId} -> customers-service:PetRepository.findById -> customers-service:PetRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.findById -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:GET customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 8,
+      "edge_count": 7,
+      "occurrences": 7,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:18:48.003514+00:00"
+    },
+    "31ddc9717bc4e16a": {
+      "hash": "31ddc9717bc4e16a",
+      "path": "api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /vets -> vets-service:GET /vets -> vets-service:VetRepository.findAll -> vets-service:VetRepository.findAll -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT petclinic.vets -> vets-service:SELECT org.springframework.samples.petclinic.vets.model.Vet -> vets-service:SELECT petclinic -> vets-service:VetRepository.findAll -> vets-service:Transaction.commit",
+      "root_op": "api-gateway:GET vets-service",
+      "services": [
+        "api-gateway",
+        "vets-service"
+      ],
+      "span_count": 8,
+      "edge_count": 7,
+      "occurrences": 9,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:19:01.103724+00:00"
+    },
+    "3ebf4d14913b6aa5": {
+      "hash": "3ebf4d14913b6aa5",
+      "path": "api-gateway:PUT customers-service -> api-gateway:PUT -> api-gateway:PUT -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.findById -> customers-service:PetRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.findById -> customers-service:Transaction.commit -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.findPetTypeById -> customers-service:PetRepository.findPetTypeById -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT org.springframework.samples.petclinic.customers.model.PetType -> customers-service:SELECT petclinic.types -> customers-service:PUT /owners/*/pets/{petId} -> customers-service:PetRepository.save -> customers-service:PetRepository.save -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:Session.merge org.springframework.samples.petclinic.customers.model.Pet -> customers-service:SELECT petclinic -> customers-service:PetRepository.save -> customers-service:Transaction.commit",
+      "root_op": "api-gateway:PUT customers-service",
+      "services": [
+        "api-gateway",
+        "customers-service"
+      ],
+      "span_count": 16,
+      "edge_count": 15,
+      "occurrences": 7,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:18:47.809430+00:00"
+    },
+    "68664c9584c9030c": {
+      "hash": "68664c9584c9030c",
+      "path": "api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> customers-service:GET /owners/{ownerId} -> customers-service:GET /owners/{ownerId} -> customers-service:OwnerRepository.findById -> customers-service:OwnerRepository.findById -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:Session.find org.springframework.samples.petclinic.customers.model.Owner -> customers-service:SELECT petclinic -> customers-service:OwnerRepository.findById -> customers-service:Transaction.commit -> api-gateway:GET /api/gateway/owners/{ownerId} -> api-gateway:GET -> api-gateway:GET -> visits-service:GET /pets/visits -> visits-service:GET /pets/visits -> visits-service:VisitRepository.findByPetIdIn -> visits-service:VisitRepository.findByPetIdIn -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT org.springframework.samples.petclinic.visits.model.Visit -> visits-service:SELECT petclinic.visits",
+      "root_op": "api-gateway:GET /api/gateway/owners/{ownerId}",
+      "services": [
+        "api-gateway",
+        "customers-service",
+        "visits-service"
+      ],
+      "span_count": 12,
+      "edge_count": 11,
+      "occurrences": 8,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:19:15.947831+00:00"
+    },
+    "da41c8d4dbea5aef": {
+      "hash": "da41c8d4dbea5aef",
+      "path": "api-gateway:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "api-gateway:GET",
+      "services": [
+        "api-gateway",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 3,
+      "watch_hits": 0,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:19:16.087554+00:00"
+    },
+    "53479a40e442b4d2": {
+      "hash": "53479a40e442b4d2",
+      "path": "vets-service:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "vets-service:GET",
+      "services": [
+        "discovery-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 4,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:26:04.768969+00:00"
+    },
+    "40845ddcd911de64": {
+      "hash": "40845ddcd911de64",
+      "path": "customers-service:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "customers-service:GET",
+      "services": [
+        "customers-service",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 3,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-26T21:26:05.148908+00:00"
+    },
+    "b9afb45b1b438c28": {
+      "hash": "b9afb45b1b438c28",
+      "path": "visits-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "visits-service:PUT",
+      "services": [
+        "discovery-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 5,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-27T03:55:25.015219+00:00",
+      "first_seen": "2026-03-27T02:42:20.846618+00:00"
+    },
+    "6a1bfdfd56412abe": {
+      "hash": "6a1bfdfd56412abe",
+      "path": "api-gateway:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "api-gateway:PUT",
+      "services": [
+        "api-gateway",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 5,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-27T03:45:24.414630+00:00",
+      "first_seen": "2026-03-27T03:05:17.668584+00:00"
+    },
+    "f3b9960369c3735a": {
+      "hash": "f3b9960369c3735a",
+      "path": "vets-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "vets-service:PUT",
+      "services": [
+        "discovery-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T03:05:17.966234+00:00"
+    },
+    "73fdbe1ea5853313": {
+      "hash": "73fdbe1ea5853313",
+      "path": "customers-service:PUT -> discovery-server:PUT /{version}/apps/{appId}/{id}",
+      "root_op": "customers-service:PUT",
+      "services": [
+        "customers-service",
+        "discovery-server"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 2,
+      "watch_hits": 3,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T03:20:21.908887+00:00"
+    },
+    "de057764f8bb4e97": {
+      "hash": "de057764f8bb4e97",
+      "path": "admin-server:GET -> visits-service:GET /actuator/info",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 2,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T04:15:30.981173+00:00"
+    },
+    "81dc7e816594ec49": {
+      "hash": "81dc7e816594ec49",
+      "path": "admin-server:GET -> api-gateway:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "api-gateway"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 5,
+      "auto_promoted": true,
+      "promoted_at": "2026-03-27T04:55:39.486274+00:00",
+      "first_seen": "2026-03-27T04:25:37.104645+00:00"
+    },
+    "0801202ac1bb60e3": {
+      "hash": "0801202ac1bb60e3",
+      "path": "visits-service:GET -> discovery-server:GET /{version}/apps/delta",
+      "root_op": "visits-service:GET",
+      "services": [
+        "discovery-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 2,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T04:40:39.142612+00:00"
+    },
+    "d9a41484866d1587": {
+      "hash": "d9a41484866d1587",
+      "path": "admin-server:GET -> vets-service:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "vets-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 2,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T05:00:35.265480+00:00"
+    },
+    "ca038370769c1351": {
+      "hash": "ca038370769c1351",
+      "path": "admin-server:GET -> customers-service:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "customers-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 2,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T05:00:35.555498+00:00"
+    },
+    "2b56da2c75201db7": {
+      "hash": "2b56da2c75201db7",
+      "path": "admin-server:GET -> visits-service:GET /actuator/health",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "visits-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 2,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T05:10:24.834830+00:00"
+    },
+    "e3ff96013645305b": {
+      "hash": "e3ff96013645305b",
+      "path": "admin-server:GET -> customers-service:GET /actuator/info",
+      "root_op": "admin-server:GET",
+      "services": [
+        "admin-server",
+        "customers-service"
+      ],
+      "span_count": 2,
+      "edge_count": 1,
+      "occurrences": 1,
+      "watch_hits": 1,
+      "auto_promoted": false,
+      "promoted_at": null,
+      "first_seen": "2026-03-27T05:15:22.768186+00:00"
+    }
+  },
+  "updated_at": "2026-03-27T05:20:24.316601+00:00",
   "environment": "petclinicmbtest"
 }
