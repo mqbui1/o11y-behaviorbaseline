@@ -724,14 +724,23 @@ def run(
         # and create the dashboard concurrently.
         ok_provision = provision_environment(env, dry_run=dry_run)
 
+        # Only create dashboard if one doesn't already exist for this env
+        existing_dashboard_id = (state.get("environments", {})
+                                 .get(env or "__none__", {})
+                                 .get("dashboard_id"))
+
         with ThreadPoolExecutor(max_workers=3) as pool:
             bl_future   = pool.submit(build_baseline, env, learn_window, dry_run)
             ebl_future  = pool.submit(build_error_baseline, env, learn_window,
                                       dry_run)
-            dash_future = pool.submit(provision_dashboard, env, dry_run)
+            if existing_dashboard_id:
+                print(f"    Dashboard already exists ({existing_dashboard_id}) — skipping")
+                dash_future = None
+            else:
+                dash_future = pool.submit(provision_dashboard, env, dry_run)
             ok_baseline       = bl_future.result()
             ok_error_baseline = ebl_future.result()
-            dashboard_id      = dash_future.result()
+            dashboard_id      = dash_future.result() if dash_future else existing_dashboard_id
 
         # Register cron jobs for this environment
         add_env_cron(env, dry_run=dry_run)
