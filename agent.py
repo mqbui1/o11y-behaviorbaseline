@@ -106,6 +106,9 @@ Guidelines:
 - If the same anomaly has been open for >30 minutes with no new signal, it may be noise — SUPPRESS.
 - Only PAGE_ONCALL when severity=INCIDENT and confidence=HIGH.
 - Keep actions to the minimum needed. Don't relearn everything if only one service is affected.
+- Use the history.frequent_suppressions field: if a service has been suppressed many times before,
+  that pattern is likely chronic noise — consider UPDATE_THRESHOLD instead of another suppression.
+- Use history.recent_cycles to avoid repeating the same action that didn't resolve the situation.
 """
 
 
@@ -147,22 +150,24 @@ def perceive(env: str, window_minutes: int) -> dict:
     baseline_summary = bs.summarize()
     baseline_health  = bs.health()
     coverage         = collect.fetch_coverage_summary(env, bs.trace_fingerprints)
+    history          = collect.summarize_history(collect.load_history(env))
 
     return {
-        "environment":       env,
-        "window_minutes":    window_minutes,
-        "timestamp":         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "active_anomalies":  anomalies,
-        "open_incidents":    open_incs,
+        "environment":        env,
+        "window_minutes":     window_minutes,
+        "timestamp":          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "active_anomalies":   anomalies,
+        "open_incidents":     open_incs,
         "recent_deployments": deployments,
-        "topology":          {
+        "topology":           {
             "services":   topology["services"],
             "callers_of": topology["callers_of"],
         },
-        "slo_status":        slo,
-        "baseline":          baseline_summary,
-        "baseline_health":   baseline_health,
-        "coverage":          coverage,
+        "slo_status":         slo,
+        "baseline":           baseline_summary,
+        "baseline_health":    baseline_health,
+        "coverage":           coverage,
+        "history":            history,
     }
 
 
@@ -345,6 +350,22 @@ def run_once(env: str, window_minutes: int, dry_run: bool = False,
         print(json.dumps(plan, indent=2))
     else:
         act(plan, env, dry_run=dry_run)
+
+    # Record this cycle to history for future feedback
+    if not dry_run:
+        import collect as _collect
+        _collect.append_history(env, {
+            "timestamp":        world_state["timestamp"],
+            "severity":         plan.get("severity", "OK"),
+            "assessment":       plan.get("assessment", ""),
+            "root_cause":       plan.get("root_cause"),
+            "confidence":       plan.get("confidence", ""),
+            "affected_services": plan.get("affected_services", []),
+            "actions":          [
+                {"type": a.get("type"), "service": a.get("service")}
+                for a in plan.get("actions", [])
+            ],
+        })
 
     return plan
 
