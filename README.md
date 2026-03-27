@@ -255,6 +255,8 @@ Tiers 2 and 3 emit **Splunk custom events** queryable via `search_events`:
 | `MISSING_SERVICE_DOMINANCE_THRESHOLD` | `0.6` | Fraction of baseline patterns a service must appear in to trigger `MISSING_SERVICE` |
 | `WATCH_SAMPLE_LIMIT` | `50` | Max traces fetched per watch run |
 | `MAX_WORKERS` | `20` | Parallel threads for trace detail fetching |
+| `AGENT_WINDOW_MINUTES` | `30` | Anomaly lookback window for `agent.py` |
+| `INCIDENT_STATE_PATH` | `./incident_state.{env}.json` | Open incident state file for `agent.py` dedup |
 
 ---
 
@@ -274,6 +276,51 @@ Splunk Observability
 ├── SignalFlow detector API    ← detector CRUD (provision_detectors.py)
 └── Custom events API          ← anomaly alerting + deployment events
 ```
+
+### Unified Agent (simplified model)
+
+The 14 single-purpose AI agents above can be replaced by three files that implement a single perception-action loop:
+
+```
+collect.py    ← all data fetching (topology, anomalies, SLO, deployments, incidents)
+baseline.py   ← baseline data layer (load, summarize, health, learn, promote)
+agent.py      ← THE agent: perceive → reason (one Claude call) → act
+```
+
+`agent.py` runs every N minutes. It calls Claude once with the full world state — anomalies, topology, deployments, baseline health, open incidents, SLO status — and Claude returns a structured JSON action plan:
+
+```json
+{
+  "assessment": "vets-service is missing from traces after the 14:03 deploy",
+  "severity": "INCIDENT",
+  "root_cause": "Deployment of vets-service v2.1 introduced a startup crash",
+  "affected_services": ["vets-service", "api-gateway"],
+  "confidence": "HIGH",
+  "actions": [
+    { "type": "PAGE_ONCALL", "service": "vets-service", "reason": "service missing from all traces" },
+    { "type": "SUPPRESS_ANOMALY", "service": "api-gateway", "reason": "downstream effect of vets-service failure" }
+  ],
+  "narrative": "vets-service stopped appearing in traces at 14:03, immediately after a deployment..."
+}
+```
+
+Action types: `NO_ACTION`, `SUPPRESS_ANOMALY`, `RELEARN_BASELINE`, `EMIT_EVENT`, `PAGE_ONCALL`, `UPDATE_THRESHOLD`.
+
+```bash
+# Single cycle
+python agent.py --environment petclinicmbtest
+
+# Continuous polling every 5 minutes
+python agent.py --environment petclinicmbtest --poll 5
+
+# Dry-run: perceive + reason, print plan, no actions executed
+python agent.py --environment petclinicmbtest --dry-run
+
+# Output Claude's raw JSON plan
+python agent.py --environment petclinicmbtest --json
+```
+
+The existing 14 agents remain available for standalone use or when you need targeted, per-concern observability. The unified agent is the right choice when you want a single thing to operate and debug.
 
 ---
 
@@ -667,6 +714,8 @@ Runs automatically at 2:30am daily after the nightly re-learn.
 | `behavioral_baseline.drift.explained` | `drift_explainer.py` | Claude explanation of an edge-level path change |
 | `behavioral_baseline.propagation.detected` | `multi_env_correlator.py` | Same anomaly spreading across pipeline environments |
 | `baseline.healed` | `baseline_healer.py` | Autonomous post-incident re-learn completed |
+| `behavioral_baseline.agent.action` | `agent.py` | Action taken by the unified agent (relearn, suppress, etc.) |
+| `behavioral_baseline.oncall.page` | `agent.py` | Unified agent determined human intervention is needed |
 
 
 ---
