@@ -423,6 +423,254 @@ baseline.<env>.json                    error_baseline.<env>.json
 
 ---
 
+## AI Agents
+
+A layer of autonomous agents built on top of the detection framework. Each agent addresses a specific operational gap — from suppressing noise floods to generating incident runbooks. All agents are integrated into `onboard.py` and run automatically via cron.
+
+### Cron schedule (managed automatically by `onboard.py`)
+
+```
+# Per-environment (every 5 min)
+*/5 * * * *   dedup_agent.py --environment <env>
+
+# Per-environment (daily maintenance)
+0   2 * * *   trace_fingerprint.py learn  (re-baseline)
+0   2 * * *   error_fingerprint.py learn  (re-baseline)
+30  2 * * *   noise_learner.py --apply    (after re-learn)
+0 */6 * * *   baseline_healer.py          (post-incident check)
+
+# Global (every 30 min)
+*/30 * * * *  multi_env_correlator.py
+
+# On new environment onboarded (one-time)
+              runbook_generator.py        → RUNBOOK.<env>.md
+```
+
+---
+
+### #1 — Self-Healing Baseline (`baseline_healer.py`)
+
+**Problem:** After an incident, the baseline is contaminated with incident-era error signatures and degraded trace paths. The next re-learn will encode the bad state as "normal."
+
+**What it does:** Monitors the anomaly event rate for an environment. When a spike is detected and then subsides (incident resolved), it automatically selects the best pre-incident window, scores it for quality (low error rate + high path diversity), and re-runs `trace_fingerprint learn` and `error_fingerprint learn` on that clean window — without human intervention.
+
+```bash
+python baseline_healer.py --environment petclinicmbtest
+python baseline_healer.py --environment petclinicmbtest --dry-run
+```
+
+Emits `baseline.healed` to Splunk when a re-learn fires.
+
+---
+
+### #2 — Anomaly Triage Agent (`triage_agent.py`)
+
+**Problem:** Correlated anomaly events tell you *what* fired, not *why* or *what to do*.
+
+**What it does:** Fetches recent correlated anomaly events, retrieves representative traces from Splunk APM, and calls Claude (via AWS Bedrock) to produce a plain-English incident summary with a severity assessment and suggested next steps. Optionally polls continuously and routes critical summaries to a webhook (PagerDuty, Slack, etc.).
+
+```bash
+python triage_agent.py --environment petclinicmbtest --window-minutes 60
+python triage_agent.py --environment petclinicmbtest --mode poll
+python triage_agent.py --environment petclinicmbtest --dry-run  # no API call
+```
+
+Requires ambient AWS credentials (same IAM role as your deployment environment).
+
+---
+
+### #3 — Adaptive Thresholds (`adaptive_thresholds.py`)
+
+**Problem:** Detection thresholds are static defaults. High-churn services generate false positives; quiet services miss real incidents.
+
+**What it does:** Observes anomaly events over a rolling window and classifies each as a True Positive (TP) or False Positive (FP) based on whether a correlated anomaly followed within 10 minutes. Adjusts per-service thresholds in `thresholds.json`: tightens when FP rate is high, loosens when TP rate is low. Changes are picked up by `trace_fingerprint.py` and `error_fingerprint.py` on the next run with no restart required.
+
+```bash
+python adaptive_thresholds.py --environment petclinicmbtest
+python adaptive_thresholds.py --environment petclinicmbtest --observation-days 7
+```
+
+---
+
+### #4 — Root Cause Hypothesis Engine (`hypothesis_engine.py`)
+
+**Problem:** The triage agent has anomaly data but no topology context — it cannot reason about which dependency is the most likely root cause.
+
+**What it does:** Walks the APM dependency graph (BFS in both directions) from the affected service, gathers per-node anomaly signals, and generates ranked hypotheses before the Claude call. Injected directly into the triage agent's prompt so Claude reasons about the actual dependency graph.
+
+Hypothesis types: `SHARED_DEPENDENCY`, `DOWNSTREAM_FAILURE`, `UPSTREAM_CHANGE`, `SELF_CHANGE`, `CASCADING_FAILURE`.
+
+---
+
+### #5 — Onboarding Advisor (`onboarding_advisor.py`)
+
+**Problem:** Default thresholds work for average environments. High-traffic environments need tighter config; quiet environments get flooded with false positives.
+
+**What it does:** When `onboard.py --advise` onboards a new environment, the advisor samples live traffic and topology to classify the environment (traffic tier, error tier, complexity), then generates concrete config recommendations: watch interval, learn window, which anomaly types to enable, and per-service threshold overrides. Writes recommendations to `thresholds.json`.
+
+```bash
+python onboarding_advisor.py --environment petclinicmbtest --apply
+python onboard.py --environment petclinicmbtest --advise  # runs automatically on new envs
+```
+
+---
+
+### #6 — Baseline Quality Monitor (`baseline_monitor.py`)
+
+**Problem:** A stale or contaminated baseline silently degrades detection quality. You do not know the baseline is bad until incidents are missed or false alarms flood.
+
+**What it does:** Runs health checks against baseline files: detects empty baselines, stale entries, low-confidence fingerprints, incident artifacts in error signatures, near-duplicate fingerprints (Jaccard similarity > 0.85), and persistent noise patterns. Correlates findings against detected incident windows. Exits with code 1 if any CRITICAL issues are found — usable as a CI/CD gate.
+
+```bash
+python baseline_monitor.py --environment petclinicmbtest
+python baseline_monitor.py --environment petclinicmbtest --fix  # auto-remove LOW_CONFIDENCE entries
+```
+
+---
+
+### #7 — Anomaly Deduplication Agent (`dedup_agent.py`)
+
+**Problem:** A single incident generates dozens of identical events per watch cycle. After 30 minutes: 30+ duplicates. `correlate.py` fires every cycle. The dashboard is unreadable.
+
+**What it does:** Groups anomaly events by `(service, anomaly_type, fingerprint_key)`, forwards only the first occurrence, suppresses duplicates, detects escalations (new anomaly type for same service), and emits `incident.resolved` when a group goes quiet for 15 minutes.
+
+```bash
+python dedup_agent.py --environment petclinicmbtest --window-minutes 5
+python dedup_agent.py --environment petclinicmbtest --show  # inspect incident state
+```
+
+In testing: 2577 raw events → 51 unique incidents (84% noise reduction).
+
+Emits: `behavioral_baseline.incident.opened`, `.escalated`, `.resolved`.
+
+---
+
+### #8 — Deployment Risk Scorer (`deployment_risk_scorer.py`)
+
+**Problem:** You deploy without knowing whether the behavioral baseline is in a state that will cause immediate false alarms.
+
+**What it does:** Computes a 0–100 risk score across four dimensions: baseline stability, error baseline health, blast radius, and recent anomaly rate. Exits with code 1 if score ≥ `BLOCK_THRESHOLD` (default 75) for CI/CD gating.
+
+```bash
+python deployment_risk_scorer.py --service api-gateway --environment petclinicmbtest
+python deployment_risk_scorer.py --service $SERVICE --environment $ENV || exit 1  # CI/CD gate
+```
+
+Grades: `LOW` (0–34) / `MEDIUM` (35–54) / `HIGH` (55–74) / `CRITICAL` (75+).
+
+---
+
+### #9 — Drift Explainer (`drift_explainer.py`)
+
+**Problem:** `trace_fingerprint.py` tells you *that* a path changed, but not *what edge changed or why*.
+
+**What it does:** Diffs baseline fingerprints against live traces edge-by-edge, classifies changes (drifted / new / vanished), and calls Claude (Bedrock) to generate plain-English explanations with root cause hypotheses. Emits `behavioral_baseline.drift.explained` to Splunk.
+
+```bash
+python drift_explainer.py --service api-gateway --environment petclinicmbtest
+python drift_explainer.py --service api-gateway --environment petclinicmbtest --diff-only
+python drift_explainer.py --environment petclinicmbtest  # explain all drifted services
+```
+
+Example output:
+> *"api-gateway:GET now routes through discovery-server before reaching vets-service. This edge did not exist in baseline. Likely a Eureka re-registration triggered by a restart."*
+
+---
+
+### #10 — Multi-Environment Propagation Detector (`multi_env_correlator.py`)
+
+**Problem:** The same bad change propagating dev → staging → prod is invisible until it hits production.
+
+**What it does:** Watches for the same anomaly pattern appearing across environments in pipeline order within a configurable window (default: 60 min). Pipeline order is auto-detected from environment name conventions (`dev < test/staging < preprod < prod`). Fires `behavioral_baseline.propagation.detected` before production is fully impacted.
+
+```bash
+python multi_env_correlator.py
+python multi_env_correlator.py --pipeline dev staging prod --lookback-hours 4
+```
+
+---
+
+### #11 — Baseline Coverage Auditor (`coverage_auditor.py`)
+
+**Problem:** You do not know if your baseline actually covers normal traffic patterns.
+
+**What it does:** Samples live traces, fingerprints them, and computes per-root-op coverage. Reports which services need a longer learn window.
+
+```bash
+python coverage_auditor.py --environment petclinicmbtest
+python coverage_auditor.py --environment petclinicmbtest --window-minutes 60 --threshold 70
+```
+
+Example output:
+```
+api-gateway
+  ✅ GET /api/gateway/owners/{ownerId}    100%  (51/51 traces)
+  ⚠️  PUT customers-service               31%   → re-run learn --window-minutes 240
+```
+
+---
+
+### #12 — SLO Impact Estimator (`slo_impact_estimator.py`)
+
+**Problem:** During an incident, you know there is elevated error rate — but not how long until your SLO burns out.
+
+**What it does:** Queries error rate and p99 latency from Splunk APM metrics, computes error budget burn rate against configurable SLO targets, and estimates time to exhaustion. Injected into the triage agent summary.
+
+```bash
+python slo_impact_estimator.py --service api-gateway --environment petclinicmbtest
+```
+
+SLO targets can be set per-service in `thresholds.json`:
+```json
+{ "services": { "api-gateway": { "availability_slo": 0.999, "p99_latency_ms": 500 } } }
+```
+
+---
+
+### #13 — Runbook Generator (`runbook_generator.py`)
+
+**Problem:** Every new environment needs a hand-written incident runbook. Nobody writes them.
+
+**What it does:** Reads the APM topology, baseline fingerprints, error signatures, and per-service thresholds, then calls Claude (Bedrock) to write a tailored Markdown runbook: service map, triage checklist ordered by blast radius, per-service reference, copy-paste commands, and a quick-reference card. Generated automatically for every new environment onboarded.
+
+```bash
+python runbook_generator.py --environment petclinicmbtest
+python runbook_generator.py --environment petclinicmbtest --force  # regenerate
+```
+
+Output: `RUNBOOK.<env>.md` alongside the baseline files.
+
+---
+
+### #14 — Noise Pattern Learner (`noise_learner.py`)
+
+**Problem:** `NOISE_PATTERNS` is a hardcoded list of universal patterns. Application-specific noise (custom health endpoints, internal heartbeats) slips through and pollutes the baseline.
+
+**What it does:** Analyzes the baseline for auto-promoted fingerprints and high-`watch_hits` entries, extracts candidate noise pattern substrings, and suggests additions to the noise filter. With `--apply`, writes patterns to `noise_patterns.json`. With `--patch`, injects them into `trace_fingerprint.py`.
+
+```bash
+python noise_learner.py --environment petclinicmbtest
+python noise_learner.py --environment petclinicmbtest --apply --patch
+```
+
+Runs automatically at 2:30am daily after the nightly re-learn.
+
+---
+
+### Agent events reference
+
+| Event type | Emitted by | Description |
+|------------|-----------|-------------|
+| `behavioral_baseline.incident.opened` | `dedup_agent.py` | First occurrence of a unique incident group |
+| `behavioral_baseline.incident.escalated` | `dedup_agent.py` | Incident gained a new anomaly type |
+| `behavioral_baseline.incident.resolved` | `dedup_agent.py` | Incident silent for 15+ minutes |
+| `behavioral_baseline.drift.explained` | `drift_explainer.py` | Claude explanation of an edge-level path change |
+| `behavioral_baseline.propagation.detected` | `multi_env_correlator.py` | Same anomaly spreading across pipeline environments |
+| `baseline.healed` | `baseline_healer.py` | Autonomous post-incident re-learn completed |
+
+
+---
+
 ## Limitations
 
 - **Auto-promotion lag**: New patterns after a deployment will alert for up to `AUTO_PROMOTE_THRESHOLD × cron_interval` minutes before being silenced. Use `promote` immediately after a known deployment to skip the wait, or run `learn` for large-scale topology changes.
