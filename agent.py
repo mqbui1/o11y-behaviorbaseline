@@ -325,35 +325,52 @@ def act(plan: dict, env: str, dry_run: bool = False,
                 collect.update_threshold(service, params)
                 print(f"      Updated thresholds for {service}: {params}")
 
-    # ── Always emit a triage summary so full Bedrock reasoning is visible
-    #    in the Splunk dashboard regardless of severity or actions taken.
+    # ── Always write triage summary to alerts.log and emit to Splunk ──────────
     if not dry_run:
         actions_taken = [
             a.get("type") for a in actions if a.get("type") != "NO_ACTION"
         ]
-        # Pull out MISSING_SERVICE anomalies for explicit visibility
+        # Deduplicate: show unique (root_op → missing services) pairs only
+        _seen_missing: dict[str, set] = {}
+        for a in plan.get("_anomalies", []):
+            if a.get("anomaly_type") != "MISSING_SERVICE":
+                continue
+            msg = a.get("message", "")
+            # Extract root_op from message like "Expected ... from 'X': [Y]"
+            import re as _re
+            m = _re.search(r"'([^']+)'.*\[([^\]]+)\]", msg)
+            if m:
+                root_op_key = m.group(1)
+                _seen_missing.setdefault(root_op_key, set()).update(
+                    s.strip().strip("'\"") for s in m.group(2).split(",")
+                )
         missing_svc_details = "; ".join(
-            a.get("message", "") for a in plan.get("_anomalies", [])
-            if a.get("anomaly_type") == "MISSING_SERVICE"
+            f"{op} → missing: {', '.join(sorted(svcs))}"
+            for op, svcs in sorted(_seen_missing.items())
         )
+        triage_fields = {
+            "severity":          plan.get("severity", "OK"),
+            "confidence":        plan.get("confidence", ""),
+            "environment":       env,
+            "affected_services": ", ".join(plan.get("affected_services", [])) or "none",
+            "assessment":        plan.get("assessment", ""),
+            "root_cause":        plan.get("root_cause", "") or "",
+            "missing_services":  missing_svc_details or "",
+            "actions_taken":     ", ".join(actions_taken) or "none",
+            "narrative":         plan.get("narrative", ""),
+        }
+        # Write to log file — always reliable
+        collect.log_alert("TRIAGE", triage_fields)
+        print(f"\n    [TRIAGE SUMMARY] written to alerts.log")
+
+        # Also emit to Splunk (best-effort — failure does not block the log)
         try:
-            collect.emit_event("behavioral_baseline.triage.summary", {
-                "environment":        env,
-                "severity":           plan.get("severity", "OK"),
-                "confidence":         plan.get("confidence", ""),
-                "assessment":         plan.get("assessment", ""),
-                "root_cause":         plan.get("root_cause", "") or "",
-                "narrative":          plan.get("narrative", ""),
-                "affected_services":  ", ".join(plan.get("affected_services", [])) or "none",
-                "actions_taken":      ", ".join(actions_taken) or "none",
-                "missing_services":   missing_svc_details or "none",
-            }, dimensions={
-                "sf_environment": env,
-                "severity":       plan.get("severity", "OK"),
-            })
-            print(f"\n    [TRIAGE SUMMARY] emitted behavioral_baseline.triage.summary")
+            collect.emit_event("behavioral_baseline.triage.summary",
+                               {**triage_fields},
+                               dimensions={"sf_environment": env,
+                                           "severity": plan.get("severity", "OK")})
         except Exception as e:
-            print(f"    [warn] triage summary emit failed: {e}", file=sys.stderr)
+            print(f"    [warn] Splunk emit failed: {e}", file=sys.stderr)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
