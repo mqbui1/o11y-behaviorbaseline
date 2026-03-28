@@ -4,499 +4,174 @@
 
 ### Terminal setup (run once before demo)
 ```bash
-export SPLUNK_ACCESS_TOKEN=DxSpXOuecLJ-QNbcv1xz5w
-export SPLUNK_INGEST_TOKEN=1gMZutcDJFLpeLF_Ku3Nqw
-export SPLUNK_REALM=us1
 cd /Users/mbui/Documents/o11y-behaviorbaseline
+source .env
+
+# AWS credentials for Bedrock (Claude reasoning)
+source /tmp/aws_exports.sh
 
 # SSH alias for cluster commands
-alias k='sshpass -p "<EC2_PASSWORD>" ssh -p 2222 -o StrictHostKeyChecking=no splunk@18.207.160.194'
+alias k='sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no splunk@18.208.249.178'
 ```
 
-### Splunk O11y URLs to have open
+### Splunk O11y URLs
 - **APM Service Map**: https://app.us1.signalfx.com/#/apm?environments=petclinicmbtest
 - **Behavioral Baseline Dashboard**: https://app.us1.signalfx.com/#/dashboard/HERM9jxA1po
-- **Detectors**: https://app.us1.signalfx.com/#/alerts/detectors
 
-### Verify cluster is healthy before starting
+### Verify cluster is healthy
 ```bash
 k "kubectl get pods --no-headers | awk '{print \$1, \$3}'"
 # All pods should show Running
 ```
 
-### Run watch in a dedicated terminal during demo
+### Verify baseline is clean (0 anomalies)
 ```bash
-# Keep this running — shows detections in real time
-tail -f /tmp/bab_petclinicmbtest_trace.log \
-        /tmp/bab_petclinicmbtest_error.log \
-        /tmp/bab_petclinicmbtest_correlate.log
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 2
+# Expected: "All trace paths match baseline"
+```
+
+### Open the alert log in a separate terminal
+```bash
+tail -f data/alerts.log
 ```
 
 ---
 
-## Demo 0: Context Setting — Show the Framework in Steady State
+## The Demo: Missing Service Detection + AI Triage
 
-**Talking point:** *"This is what the framework looks like before we break anything.
-Every component is autonomous — no manual alerting rules, no hardcoded thresholds."*
+**Story:** *"vets-service goes down. The framework detects the structural absence
+from traces and calls Claude (via AWS Bedrock) to reason about it — producing an
+INCIDENT verdict with root cause and recommended action, written to a log file in
+under 2 minutes."*
 
+### Step 1 — Clear the alert log
 ```bash
-# What's been provisioned
-python3 onboard.py --show-state
-
-# 47 known call patterns learned from real traffic
-python3 trace_fingerprint.py --environment petclinicmbtest show
-
-# 5 known error signatures
-python3 error_fingerprint.py --environment petclinicmbtest show
-
-# Cron jobs managing everything — no manual scheduling
-crontab -l | grep behavioral
+cat /dev/null > data/alerts.log
 ```
 
-Open the Behavioral Baseline Dashboard — 4 panels live, empty = healthy.
-
----
-
-## Demo 1: New Error Signatures — DB Goes Down ⭐ Most Reliable
-
-**What fires:** `NEW_ERROR_SIGNATURE` + `SIGNATURE_VANISHED` → `error.signature.drift` events
-
-**Story:** *"The database goes down. Services start throwing transaction errors and
-health check 503s that have never appeared before. Simultaneously, the normal
-heartbeat errors that were always present disappear — because now everything is
-broken, not just intermittent. The framework catches both the new errors AND the
-shift in error pattern."*
-
-### Step 1 — Prep: confirm error baseline
+### Step 2 — Kill vets-service
 ```bash
-python3 error_fingerprint.py --environment petclinicmbtest show
-# Should show 4 java.net.ConnectException signatures, all seen >= 2
+k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 2 — Take down the DB
+### Step 3 — Wait 2 minutes
+The loadgen hits the vets endpoint every ~5 seconds. After 2 minutes the 2-minute
+watch window will contain only post-failure traces.
+
+### Step 4 — Run detection + triage (one command)
 ```bash
-kubectl scale deployment petclinic-db --replicas=0
-kubectl get pods | grep petclinic-db   # confirm gone
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 2 --json \
+  | python3 agent.py --environment petclinicmbtest
 ```
 
-### Step 3 — Generate traffic to create errors
-```bash
-for i in $(seq 1 5); do curl -s -o /dev/null --max-time 3 http://localhost:81/api/customer/owners; done
+**Expected terminal output:**
+```
+[watch] Discovering topology + searching traces in parallel (environment 'petclinicmbtest')...
+  Topology: 6 services | Traces: 200 candidates
+  Fetching 200 traces (20 parallel)...
+
+  ANOMALY DETECTED
+    Type:    MISSING_SERVICE
+    Message: Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
+    Detail:  Path: api-gateway:GET vets-service
+    TraceID: c2a7659d46d4d729fcb9bfae3bb967e0
+    Event sent (trace.path.drift)
+
+  Checked 29 traces, 171 skipped, 1 anomalies detected
+
+[agent] env=petclinicmbtest | 1 anomaly(s) from watch
+  Reasoning with Claude...
+
+[!!] INCIDENT — The vets-service is completely absent from traces that normally route
+    through api-gateway:GET vets-service, indicating it is down or unreachable.
+    Root cause: vets-service is likely crashed, unresponsive, or has lost network connectivity.
+    ...
+    Confidence: HIGH | Affected: vets-service, api-gateway
+    Recommended action: PAGE_ONCALL
+
+    [TRIAGE SUMMARY] written to alerts.log
 ```
 
-### Step 4 — Run detection (or wait for cron)
-```bash
-python3 error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+**Expected alerts.log (shown in the tail -f terminal):**
+```
+════════════════════════════════════════════════════════════════════════
+[2026-03-28 06:08:02 UTC]  DETECTION
+  anomaly type         : MISSING_SERVICE
+  environment          : petclinicmbtest
+  service              : api-gateway
+  root op              : api-gateway:GET vets-service
+  message              : Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
+  detail               : Path: api-gateway:GET vets-service
+  trace id             : c2a7659d46d4d729fcb9bfae3bb967e0
+  services in trace    : api-gateway
+────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════
+[2026-03-28 06:08:08 UTC]  TRIAGE
+  severity             : INCIDENT
+  confidence           : HIGH
+  environment          : petclinicmbtest
+  affected services    : vets-service, api-gateway
+  assessment           : The vets-service is completely absent from traces that
+                         normally route through api-gateway:GET vets-service, indicating the
+                         service is down or unreachable.
+  root cause           : vets-service is likely crashed, unresponsive, or has lost
+                         network connectivity, causing api-gateway to receive no downstream spans.
+  missing services     : api-gateway:GET vets-service → missing: api-gateway
+  action               : PAGE_ONCALL
+  narrative            : As of 06:08 UTC, vets-service has stopped appearing in traces
+                         for the 'api-gateway:GET vets-service' operation — only the api-gateway
+                         span is present, with no downstream call completing. On-call should
+                         immediately check the health and pod/process status of vets-service.
+────────────────────────────────────────────────────────────────────────
 ```
 
-**Expected output:**
-```
-ANOMALY DETECTED
-  Type:    NEW_ERROR_SIGNATURE
-  Message: New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on OwnerRepository.findAll
-  Detail:  call_path=api-gateway:GET customers-service -> api-gateway:GET
-
-ANOMALY DETECTED
-  Type:    NEW_ERROR_SIGNATURE
-  Message: New error signature in customers-service: 503 on GET /actuator/health
-  Detail:  call_path=admin-server:GET
-
-ANOMALY DETECTED
-  Type:    SIGNATURE_VANISHED
-  Message: Dominant error signature disappeared in customers-service: java.net.ConnectException on GET (was 43% of service errors)
-  Detail:  baseline_rate=0.75/run  service_share=43%
-
-  Checked N traces, 0 skipped, 8 anomalies detected
-```
-
-**Key talking point:** *"A full DB outage doesn't just spike existing errors — it changes
-the entire error signature profile. The framework detected brand new error types AND
-noticed that the previously dominant patterns vanished, replaced by something worse."*
-
-**Show:** **Error Signature Drift** panel in dashboard updates.
+**Key talking points:**
+- *"No alert rules. No thresholds. The framework learned the normal call graph from traffic — api-gateway always calls vets-service on this path — and detected when that stopped."*
+- *"The detection uses structural trace analysis: the span for vets-service is missing from a path where it always appeared."*
+- *"Claude reads exactly what was detected — one clean anomaly — and reasons about it: INCIDENT, HIGH confidence, PAGE_ONCALL."*
+- *"Total time from kill to triage: 2 minutes."*
 
 ### Step 5 — Restore
 ```bash
-kubectl scale deployment petclinic-db --replicas=1
-kubectl rollout status deployment/petclinic-db --timeout=60s
-```
-
-### Step 6 — Re-learn to clean baseline after demo
-```bash
-python3 error_fingerprint.py --environment petclinicmbtest learn --window-minutes 30
-```
-
----
-
-## Demo 2: Brand New Error — Never Seen Before ⭐ Most Reliable
-
-**What fires:** `NEW_ERROR_SIGNATURE` → `error.signature.drift` event
-
-**Story:** *"A bad deploy introduces a 500 error on a new code path that has
-never appeared before. The framework fires on first occurrence — no threshold,
-no tuning required."*
-
-### Step 1 — Generate a new error type
-```bash
-# Hit non-existent owner IDs — generates 404/500 with a new operation name
-k "for i in \$(seq 1 15); do
-  curl -s -o /dev/null http://localhost:81/api/customer/owners/99999
-  curl -s -o /dev/null http://localhost:81/api/vet/vets/99999
-done"
-```
-
-### Step 2 — Run detection
-```bash
-python3 error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-```
-
-**Expected output:**
-```
-ANOMALY DETECTED
-  Type:    NEW_ERROR_SIGNATURE
-  Message: New error signature in customers-service: 404 on GET /owners/{ownerId}
-  Detail:  call_path=api-gateway:GET -> customers-service:GET /owners/{ownerId}
-           http_status=404
-  Event sent (error.signature.drift)
-```
-
-**Key point:** *"First occurrence fires immediately. After 5 consecutive watch
-runs it auto-promotes to baseline and goes quiet — because it's now 'expected
-bad behavior'. No one has to manually tune anything."*
-
----
-
-## Demo 3: Missing Service — vets-service Disappears
-
-**What fires:** `MISSING_SERVICE` → `trace.path.drift` event
-
-**Story:** *"vets-service crashes. The trace for the vets endpoint no longer
-includes it — the framework detects the structural change in the call graph."*
-
-### Step 0 — Verify baseline includes vets-service
-```bash
-python3 trace_fingerprint.py --environment petclinicmbtest show | grep -A5 "vets-service"
-# Should show: api-gateway:GET vets-service pattern with services=[api-gateway, vets-service]
-```
-
-### Step 1 — Scale down vets-service
-```bash
-k "kubectl scale deployment vets-service --replicas=0"
-k "kubectl get pods | grep vets"   # confirm gone (Terminating → no output)
-```
-
-### Step 2 — Generate traffic to the vets endpoint
-```bash
-# Note: /api/vet/vets is the correct route (not /api/gateway/vets)
-k "for i in \$(seq 1 10); do curl -s -o /dev/null http://localhost:81/api/vet/vets; sleep 0.5; done"
-```
-
-### Step 3 — Run detection
-```bash
-sleep 10  # allow trace ingestion
-python3 trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-```
-
-**Expected output:**
-```
-ANOMALY DETECTED
-  Type:    MISSING_SERVICE
-  Message: Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-  Detail:  Path: api-gateway:GET vets-service
-  Event sent (trace.path.drift)
-```
-
-**Key talking point:** *"When vets-service disappears, the gateway trace collapses to a single
-span — no child spans, no downstream calls. The framework detects the structural absence:
-this root operation normally reaches vets-service, and now it doesn't."*
-
-**Show:** **Trace Path Drift** panel in dashboard.
-
-### Step 4 — Restore
-```bash
 k "kubectl scale deployment vets-service --replicas=1"
-k "kubectl rollout status deployment/vets-service --timeout=60s"
 ```
 
 ---
 
-## Demo 4: Correlated Anomaly — Two Tiers Hit at Once ⭐ Highest Impact
+## How it works (30-second explanation)
 
-**What fires:** `TIER2_TIER3` → `behavioral_baseline.correlated_anomaly`
+```
+LEARN  →  Sample 200 traces from live traffic
+          Build fingerprints: "api-gateway always calls vets-service on GET /vets"
 
-**Story:** *"Two independent signals — a missing service AND an error spike —
-both hit at the same time. Either alone might be a false positive. Together
-they're high-confidence. One consolidated alert instead of two noisy ones."*
+WATCH  →  Sample 200 traces from the last 2 minutes
+          If a known root_op has zero traces → MISSING_SERVICE anomaly
+          Output as JSON
 
-### Step 1 — Trigger both simultaneously
+TRIAGE →  Claude reads the JSON anomaly list
+          Reasons about severity, root cause, action
+          Writes DETECTION + TRIAGE to alerts.log
+```
+
+One command runs WATCH + TRIAGE:
 ```bash
-# Missing service (tier 2)
-k "kubectl scale deployment vets-service --replicas=0"
-
-# Error spike (tier 3)
-k "kubectl scale deployment petclinic-db --replicas=0"
-
-# Generate traffic
-k "for i in \$(seq 1 15); do
-  curl -s -o /dev/null --max-time 3 http://localhost:81/api/vet/vets
-  curl -s -o /dev/null --max-time 3 http://localhost:81/api/customer/owners
-  sleep 0.5
-done"
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 2 --json \
+  | python3 agent.py --environment petclinicmbtest
 ```
 
-### Step 2 — Run both watch cycles
+---
+
+## Restore / Reset
+
 ```bash
-sleep 10  # allow trace ingestion
-python3 trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-python3 error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-```
-
-### Step 3 — Correlate
-```bash
-python3 correlate.py --environment petclinicmbtest --window-minutes 15
-```
-
-**Expected output:**
-```
-Found 1 correlated anomaly group(s):
-
-[Major] TIER2_TIER3 — customers-service
-  Tiers:         tier2, tier3
-  Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
-  Events:        4 over 38s
-  - Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-  - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on ...
-
-Event sent (behavioral_baseline.correlated_anomaly)
-```
-
-**Show:** All three panels update: Trace Drift, Error Drift, Correlated Anomalies.
-
-### Step 4 — Restore
-```bash
+# Restore vets-service
 k "kubectl scale deployment vets-service --replicas=1"
-k "kubectl scale deployment petclinic-db --replicas=1"
-```
 
----
+# Relearn baseline after disruptions
+python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 30
+python3 core/trace_fingerprint.py --environment petclinicmbtest promote
 
-## Demo 5: Deploy-Correlated — Severity Downgraded ⭐ Most Differentiated
-
-**What fires:** Same as Demo 4, but annotated and downgraded Major → Minor
-
-**Story:** *"Same exact anomalies. But this time the team called
-notify_deployment.py before deploying. The correlator finds the deployment
-event, downgrades the severity, and tells you exactly which deploy caused it.
-On-call engineer sees: not an incident — it's the 2:34pm deploy by demo-user."*
-
-### Step 1 — Emit deployment event FIRST
-```bash
-python3 notify_deployment.py \
-  --service customers-service vets-service \
-  --environment petclinicmbtest \
-  --version v2.1.0 \
-  --deployer "demo-user" \
-  --commit "abc123def" \
-  --description "Refactor owner lookup — adds new caching layer"
-```
-
-**Show the output:**
-```
-[sent] deployment.started  service=customers-service  version=v2.1.0
-[sent] deployment.started  service=vets-service       version=v2.1.0
-[scheduled] baseline re-learn for 'petclinicmbtest' in 5m (background)
-```
-
-### Step 2 — Trigger the same disruptions
-```bash
-k "kubectl scale deployment vets-service --replicas=0"
-k "kubectl scale deployment petclinic-db --replicas=0"
-k "for i in \$(seq 1 15); do
-  curl -s -o /dev/null --max-time 3 http://localhost:81/api/vet/vets
-  curl -s -o /dev/null --max-time 3 http://localhost:81/api/customer/owners
-  sleep 0.5
-done"
-```
-
-### Step 3 — Run watch + correlate
-```bash
-python3 trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-python3 error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-python3 correlate.py --environment petclinicmbtest --window-minutes 15
-```
-
-**Expected output — compare with Demo 4:**
-```
-[Minor] TIER2_TIER3 — customers-service  [deployment-correlated]
-  Tiers:         tier2, tier3
-  Deployment:    version=v2.1.0  commit=abc123def  deployer=demo-user
-                 "Refactor owner lookup — adds new caching layer"
-```
-
-**Major → Minor. Context instead of confusion.**
-
-### Step 4 — Restore
-```bash
-k "kubectl scale deployment vets-service --replicas=1"
-k "kubectl scale deployment petclinic-db --replicas=1"
-```
-
----
-
-## Demo 6: Auto-Onboarding a New Environment
-
-**What fires:** `onboard.py --auto` discovers new environments and shows what it would provision
-
-**Story:** *"A new team deploys hipster-shop with OTel instrumentation.
-Nobody touches this framework. Within 30 minutes it discovers the new
-environment, provisions detectors, builds a baseline, creates a dashboard,
-and registers cron jobs. Zero human intervention."*
-
-### Step 1 — Show current state
-```bash
-python3 onboard.py --show-state
-# Only petclinicmbtest
-crontab -l | grep behavioral
-# Only petclinicmbtest + global --auto job
-```
-
-### Step 2 — Run auto-discovery dry-run
-```bash
-python3 onboard.py --auto --dry-run
-```
-
-**Expected output:**
-```
-[onboard] Discovering all active environments...
-  hipstershop-mbtest: 7 services — [checkoutservice, currencyservice,
-                                     emailservice, frontend, paymentservice,
-                                     productcatalogservice, recommendationservice]
-  petclinicmbtest:    5 services — [api-gateway, customers-service, ...]
-
-[onboard] Diff results:
-  New environments: ['hipstershop-mbtest']
-
-[onboard] [DRY RUN] Acting on changes...
-
-  [new] hipstershop-mbtest
-    $ provision_detectors.py --environment hipstershop-mbtest
-      [dry-run] skipped
-    $ trace_fingerprint.py --environment hipstershop-mbtest learn --window-minutes=120
-      [dry-run] skipped
-    Provisioning dashboard for environment 'hipstershop-mbtest'...
-      [dry-run] Would create dashboard: Behavioral Baseline — hipstershop-mbtest
-    $ error_fingerprint.py --environment hipstershop-mbtest learn --window-minutes=120
-      [dry-run] skipped
-    [dry-run] Would add 5 cron job(s) for 'hipstershop-mbtest'
-
-[onboard] Dry run complete — no changes written.
-```
-
-**Key talking points:**
-- The framework discovered `hipstershop-mbtest` purely from live APM topology — no config file, no manifest
-- In production (without `--dry-run`), this runs every 30 minutes via cron — new environments are onboarded automatically within half an hour of their first trace
-- The 5 cron jobs added per environment are: trace watch, error watch, correlate (every 5 min) + trace learn, error learn (daily at 2am)
-
-### Step 3 — Show what a real onboard produces (reference petclinicmbtest)
-```bash
-python3 onboard.py --show-state      # services list, provisioned_at, dashboard_id
-crontab -l | grep behavioral         # 5 per-env jobs + 1 global auto job
-```
-
----
-
-## Demo 7: AI-Powered Anomaly Triage (Bonus)
-
-**What fires:** `triage_agent.py` fetches a correlated anomaly, retrieves actual traces, and calls Claude to produce a plain-English incident summary
-
-**Story:** *"When a correlated alert fires, instead of paging someone at 3am with a dashboard link, the agent fetches the traces, reads the spans, cross-references the deployment, and tells you exactly what happened and what to do."*
-
-**Prerequisite:** Set `ANTHROPIC_API_KEY` in your environment (or `.env` file)
-
-### Step 1 — Setup
-```bash
-echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
-```
-
-### Step 2 — Run with a recent correlated anomaly (use wider window to find historical events)
-```bash
-python3 triage_agent.py --environment petclinicmbtest --window-minutes 60
-```
-
-### Step 3 — Show poll mode (for production use)
-```bash
-python3 triage_agent.py --environment petclinicmbtest --mode poll --poll-interval 60
-# Ctrl+C to stop
-```
-
-**Expected output for a TIER2_TIER3 correlated anomaly:**
-```
-[triage] Scanning 60m window for correlated anomalies (petclinicmbtest)...
-  Found 1 event(s), 1 new to triage.
-
-[Major] TIER2_TIER3 — api-gateway @ 15:25:02 UTC
-  Tiers: tier2, tier3
-  Anomaly types: NEW_FINGERPRINT, MISSING_SERVICE
-  Fetching traces for api-gateway...
-  Retrieved 3 trace ID(s)
-  Calling Claude (claude-opus-4-6) for triage analysis...
-
-======================================================================
-TRIAGE SUMMARY — api-gateway (Major)
-======================================================================
-## Incident Summary
-The api-gateway service is experiencing anomalous behavior with unrecognized
-trace paths and missing downstream dependencies, consistent with a partial
-service outage affecting vets-service.
-
-## Root Cause Hypothesis
-vets-service appears to be unavailable. Traces show api-gateway attempting
-to reach vets-service but receiving no response, resulting in collapsed
-single-span traces (MISSING_SERVICE) and fallback code paths (NEW_FINGERPRINT).
-
-## Affected Services
-- **api-gateway**: Executing unexpected code paths, likely fallback/error handlers
-- **vets-service**: Not appearing in traces — likely down or unreachable
-
-## Evidence
-- 4 NEW_FINGERPRINT events on api-gateway within 3 minutes
-- MISSING_SERVICE: vets-service absent from traces where it normally appears in 85% of variants
-- Trace spans show api-gateway:GET vets-service completing in <5ms (connection refused, not timeout)
-
-## Recommended Actions
-1. Check vets-service pod status: `kubectl get pods -l app=vets-service`
-2. Check vets-service logs for crash/OOM: `kubectl logs -l app=vets-service --tail=50`
-3. If down, scale back: `kubectl scale deployment vets-service --replicas=1`
-4. Monitor for SIGNATURE_VANISHED on vets-service errors once restored
-======================================================================
-```
-
-**Key talking points:**
-- No dashboard diving — the agent reads the actual spans and produces actionable steps
-- If a deployment is correlated (Demo 5 scenario), the summary explicitly names the deploy as likely cause
-- Poll mode can route to Slack via `--webhook-url https://hooks.slack.com/...`
-- The agent deduplicates — won't triage the same event twice in a session
-
----
-
-## Demo Quick Reference Card
-
-| # | Demo | Setup | Disrupt | Detect | Signal |
-|---|------|-------|---------|--------|--------|
-| 1 | Error spike | — | `scale petclinic-db --replicas=0` | `error watch` | `SIGNATURE_SPIKE` |
-| 2 | New error | — | `curl /owners/99999` ×15 | `error watch` | `NEW_ERROR_SIGNATURE` |
-| 3 | Missing service | re-learn baseline | `scale vets-service --replicas=0` | `trace watch` | `MISSING_SERVICE` |
-| 4 | Correlated | — | Demo 3 + Demo 1 together | both watches + correlate | `TIER2_TIER3` |
-| 5 | Deploy-correlated | — | `notify_deployment.py` then Demo 4 | both watches + correlate | `TIER2_TIER3` [downgraded] |
-| 6 | Auto-onboard | 2nd env deployed | `onboard.py --auto` | state + crontab | new env provisioned |
-
-## Recommended Demo Order
-
-**Short demo (15 min):** Demo 0 → Demo 1 → Demo 5
-**Full demo (30 min):** Demo 0 → Demo 1 → Demo 2 → Demo 4 → Demo 5 → Demo 6
-
-## Restore All (Emergency Reset)
-```bash
-k "kubectl scale deployment vets-service petclinic-db visits-service --replicas=1"
-k "kubectl rollout status deployment/vets-service deployment/petclinic-db --timeout=120s"
+# Clear alert log
+cat /dev/null > data/alerts.log
 ```
