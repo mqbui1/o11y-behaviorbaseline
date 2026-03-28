@@ -933,6 +933,80 @@ def cmd_watch(window_minutes: int = 10,
             except Exception as e:
                 print(f"    Failed to send event: {e}", file=sys.stderr)
 
+    # ── Silent root_op detection ───────────────────────────────────────────────
+    # If a baseline root_op has zero traces in the watch window it means the
+    # operation is completely absent — either the service is down and the caller
+    # is returning a circuit-breaker fallback (generating no downstream span),
+    # or traffic to that path has stopped entirely. Fire MISSING_SERVICE for
+    # every dominant service in each silent root_op.
+    seen_root_ops = {fp_obj["root_op"] for _, trace in fetched
+                     for fp_obj in [build_fingerprint(trace, known_root_ops=known_root_ops)]
+                     if fp_obj is not None}
+    fps_by_root: dict[str, list[dict]] = defaultdict(list)
+    for info in baseline.get("fingerprints", {}).values():
+        if info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES:
+            fps_by_root[info["root_op"]].append(info)
+
+    for root_op, bl_entries in fps_by_root.items():
+        if root_op in seen_root_ops:
+            continue
+        if _is_noise_trace(root_op.split(":", 1)[-1] if ":" in root_op else root_op):
+            continue
+        total_patterns = len(bl_entries)
+        service_counts: dict[str, int] = defaultdict(int)
+        for info in bl_entries:
+            for svc in info.get("services", []):
+                service_counts[svc] += 1
+        root_svc = root_op.split(":")[0] if ":" in root_op else root_op
+        dom_threshold = _svc_threshold(
+            root_svc, "missing_service_dominance_threshold",
+            MISSING_SERVICE_DOMINANCE_THRESHOLD
+        )
+        dominant_services = {
+            s for s, c in service_counts.items()
+            if c / total_patterns >= dom_threshold
+        }
+        if not dominant_services:
+            continue
+        silent_hash = hashlib.sha256(f"SILENT:{root_op}".encode()).hexdigest()[:16]
+        if silent_hash in alerted_hashes:
+            continue
+        alerted_hashes.add(silent_hash)
+        anomalies_found += 1
+        missing_svcs = sorted(dominant_services)
+        print(f"\n  ANOMALY DETECTED")
+        print(f"    Type:    MISSING_SERVICE")
+        print(f"    Message: No traces for '{root_op}' in window — "
+              f"expected service(s) absent: {missing_svcs}")
+        print(f"    Detail:  Root op silent (0 traces in {window_minutes}m window)")
+        try:
+            dims = {
+                "anomaly_type":   "MISSING_SERVICE",
+                "root_operation": root_op,
+                "fp_hash":        silent_hash,
+                "sf_environment": environment or "all",
+                "service":        root_svc,
+            }
+            send_custom_event(
+                event_type="trace.path.drift",
+                dimensions=dims,
+                properties={
+                    "message":       (f"No traces for '{root_op}' in window — "
+                                      f"expected service(s) absent: {missing_svcs}"),
+                    "detail":        f"Root op silent (0 traces in {window_minutes}m window)",
+                    "path":          root_op,
+                    "services":      ",".join(missing_svcs),
+                    "span_count":    0,
+                    "sf_environment": environment or "all",
+                    "detector_tier": "tier2",
+                    "detector_name": "trace-path-drift",
+                },
+            )
+            send_metric("behavioral_baseline.anomaly.count", 1, dims)
+            print(f"    Event sent (trace.path.drift)")
+        except Exception as e:
+            print(f"    Failed to send event: {e}", file=sys.stderr)
+
     # ── Auto-promotion ─────────────────────────────────────────────────────────
     promoted_count = 0
     if AUTO_PROMOTE_THRESHOLD > 0:
