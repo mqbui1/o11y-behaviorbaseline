@@ -369,6 +369,16 @@ def _infer_parent_id(spans: list[dict]) -> dict[str, str | None]:
     return parents
 
 
+def _log_alert(fields: dict) -> None:
+    """Write a DETECTION entry to the shared alerts.log via collect.log_alert."""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from collect import log_alert
+        log_alert("DETECTION", fields)
+    except Exception:
+        pass  # log failure is never fatal
+
+
 def send_custom_event(event_type: str, dimensions: dict, properties: dict) -> None:
     """Emit a custom event to Splunk Observability Cloud."""
     _request("POST", "/v2/event", [{
@@ -905,6 +915,16 @@ def cmd_watch(window_minutes: int = 10,
             print(f"    Message: {anomaly['message']}")
             print(f"    Detail:  {anomaly['detail']}")
             print(f"    TraceID: {trace_id}")
+            _log_alert({
+                "anomaly_type": anomaly["type"],
+                "environment":  environment or "all",
+                "service":      fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"],
+                "root_op":      fp["root_op"],
+                "message":      anomaly["message"],
+                "detail":       anomaly["detail"],
+                "trace_id":     trace_id,
+                "services_in_trace": ", ".join(fp["services"]),
+            })
             try:
                 dims = {
                     "anomaly_type":   anomaly["type"],
@@ -979,6 +999,15 @@ def cmd_watch(window_minutes: int = 10,
         print(f"    Message: No traces for '{root_op}' in window — "
               f"expected service(s) absent: {missing_svcs}")
         print(f"    Detail:  Root op silent (0 traces in {window_minutes}m window)")
+        _log_alert({
+            "anomaly_type":    "MISSING_SERVICE",
+            "environment":     environment or "all",
+            "service":         root_svc,
+            "root_op":         root_op,
+            "message":         f"No traces for '{root_op}' in window — expected service(s) absent: {missing_svcs}",
+            "detail":          f"Root op completely silent — 0 traces in {window_minutes}m window (circuit breaker likely engaged)",
+            "missing_services": ", ".join(missing_svcs),
+        })
         try:
             dims = {
                 "anomaly_type":   "MISSING_SERVICE",

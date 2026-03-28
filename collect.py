@@ -426,6 +426,55 @@ def summarize_history(history: list[dict]) -> dict:
     }
 
 
+# ── Alert log ─────────────────────────────────────────────────────────────────
+
+ALERT_LOG_PATH = Path(os.environ.get("ALERT_LOG_PATH",
+                                      str(_DATA_DIR / "alerts.log")))
+
+_SEP = "─" * 72
+
+
+def log_alert(kind: str, fields: dict) -> None:
+    """
+    Append a structured entry to data/alerts.log.
+
+    kind: "DETECTION" | "TRIAGE"
+    fields: arbitrary key-value pairs to display.
+
+    Format:
+    ══════════════════════════════════════════════════════════════════════════
+    [2026-03-28 04:12:33 UTC]  DETECTION
+      anomaly_type : MISSING_SERVICE
+      service      : vets-service
+      ...
+    ──────────────────────────────────────────────────────────────────────────
+    """
+    ALERT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines = [
+        "",
+        "═" * 72,
+        f"[{ts}]  {kind}",
+    ]
+    for k, v in fields.items():
+        if v is None or v == "" or v == "none":
+            continue
+        label = k.replace("_", " ").ljust(20)
+        # Wrap long values at 72 chars after the label
+        val_str = str(v)
+        if len(val_str) > 52:
+            lines.append(f"  {label} : {val_str[:52]}")
+            for chunk in [val_str[i:i+70] for i in range(52, len(val_str), 70)]:
+                lines.append(f"  {'':20}   {chunk}")
+        else:
+            lines.append(f"  {label} : {val_str}")
+    lines.append(_SEP)
+
+    entry = "\n".join(lines) + "\n"
+    with open(ALERT_LOG_PATH, "a") as f:
+        f.write(entry)
+
+
 # ── Event + metric emission ───────────────────────────────────────────────────
 
 def emit_metric(metric_name: str, value: int, dimensions: dict) -> None:
