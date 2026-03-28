@@ -994,9 +994,16 @@ def cmd_watch(window_minutes: int = 10,
     seen_root_ops = {fp_obj["root_op"] for _, trace in fetched
                      for fp_obj in [build_fingerprint(trace, known_root_ops=known_root_ops)]
                      if fp_obj is not None}
+    # For silent detection, sum occurrences across all patterns for a root_op
+    # and require a minimum total. This filters infrequent ops (e.g. user-triggered
+    # edits) that don't appear in every watch window and would cause false positives.
+    SILENT_MIN_OCCURRENCES = max(MIN_BASELINE_OCCURRENCES, 4)
+    root_op_occurrences: dict[str, int] = defaultdict(int)
+    for info in baseline.get("fingerprints", {}).values():
+        root_op_occurrences[info["root_op"]] += info.get("occurrences", 0)
     fps_by_root: dict[str, list[dict]] = defaultdict(list)
     for info in baseline.get("fingerprints", {}).values():
-        if info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES:
+        if root_op_occurrences[info["root_op"]] >= SILENT_MIN_OCCURRENCES:
             fps_by_root[info["root_op"]].append(info)
 
     for root_op, bl_entries in fps_by_root.items():
