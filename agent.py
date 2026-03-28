@@ -181,7 +181,7 @@ def reason(world_state: dict) -> dict:
     context = _trim_for_context(world_state)
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": json.dumps(context, indent=2)}],
     })
