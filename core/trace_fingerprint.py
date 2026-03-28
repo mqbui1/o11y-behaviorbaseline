@@ -370,8 +370,12 @@ def _infer_parent_id(spans: list[dict]) -> dict[str, str | None]:
     return parents
 
 
-def _log_alert(fields: dict) -> None:
-    """Write a DETECTION entry to the shared alerts.log via collect.log_alert."""
+def _log_alert(fields: dict, enabled: bool = True) -> None:
+    """Write a DETECTION entry to the shared alerts.log via collect.log_alert.
+    Only writes when enabled=True (i.e. running in --json / demo pipeline mode).
+    """
+    if not enabled:
+        return
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from collect import log_alert
@@ -952,7 +956,7 @@ def cmd_watch(window_minutes: int = 10,
                 "detail":       anomaly["detail"],
                 "trace_id":     trace_id,
                 "services_in_trace": ", ".join(fp["services"]),
-            })
+            }, enabled=json_output)
             try:
                 dims = {
                     "anomaly_type":   anomaly["type"],
@@ -1048,7 +1052,7 @@ def cmd_watch(window_minutes: int = 10,
             "message":         f"No traces for '{root_op}' in window — expected service(s) absent: {missing_svcs}",
             "detail":          f"Root op completely silent — 0 traces in {window_minutes}m window (circuit breaker likely engaged)",
             "missing_services": ", ".join(missing_svcs),
-        })
+        }, enabled=json_output)
         try:
             dims = {
                 "anomaly_type":   "MISSING_SERVICE",
