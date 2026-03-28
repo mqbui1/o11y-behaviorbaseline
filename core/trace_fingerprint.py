@@ -150,6 +150,7 @@ REGISTRY_PATTERNS: list[str] = [
     "/apps/delta",       # Eureka delta fetch
     "/apps/",            # Eureka app registration
     "/register",         # Generic registration
+    "/peerreplication",  # Eureka peer replication
     "/v1/agent/",        # Consul agent
     "/v1/health/",       # Consul health
     "/v1/catalog/",      # Consul catalog
@@ -159,7 +160,7 @@ REGISTRY_PATTERNS: list[str] = [
 ]
 
 HEALTHCHECK_PATTERNS: list[str] = [
-    "/actuator/health",  # Spring Boot
+    "/actuator",         # Spring Boot actuator (health, info, metrics, env, etc.)
     "/health",
     "/healthz",
     "/readyz",
@@ -457,6 +458,13 @@ def build_fingerprint(trace: dict, known_root_ops: set[str] | None = None) -> di
 
     root_op = f"{root_span['serviceName']}:{root_span['operationName']}"
 
+    # Filter out health/registry probes that are merely initiated by a non-noisy root
+    # (e.g. admin-server polling /actuator/health on other services)
+    if len(spans) <= 3:
+        all_ops = " ".join(s["operationName"] for s in spans).lower()
+        if any(p in all_ops for p in NOISE_PATTERNS):
+            return None
+
     edges = []
     for span in sorted_spans:
         parent_id = parent_map.get(span["spanID"])
@@ -534,6 +542,12 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
                     "detail":  f"Path: {fp['path']}",
                     "fp":      fp,
                 }
+        # Suppress NEW_FINGERPRINT if the trace path itself contains noise operations
+        # (e.g. startup config fetches, actuator probes from admin-server).
+        # This auto-handles any framework-specific startup/probe patterns without
+        # needing explicit configuration.
+        if _is_noise_trace(fp["path"]):
+            return None
         return {
             "type":    "NEW_FINGERPRINT",
             "message": f"Unknown execution path for '{root_op}'",
@@ -784,10 +798,13 @@ def cmd_learn(window_minutes: int = 120,
 
 
 def cmd_watch(window_minutes: int = 10,
-              environment: str | None = None) -> None:
+              environment: str | None = None,
+              json_output: bool = False) -> list[dict]:
     """
     Compare recent traces to baseline. Emits Splunk custom events on drift.
     Also detects entirely new services that have appeared since baseline was built.
+    Returns a list of anomaly dicts (also printed to stdout unless json_output=True,
+    in which case the anomaly list is written as JSON to stdout for piping to agent.py).
     """
     env_desc = f"environment '{environment}'" if environment else "all environments"
     print(f"[watch] Discovering topology + searching traces in parallel ({env_desc})...")
@@ -847,6 +864,7 @@ def cmd_watch(window_minutes: int = 10,
 
     anomalies_found = checked = skipped = 0
     alerted_hashes: set[str] = set()
+    anomaly_list: list[dict] = []
     # Track which new hashes were seen this run (for auto-promotion)
     new_hashes_seen: set[str] = set()
 
@@ -910,6 +928,16 @@ def cmd_watch(window_minutes: int = 10,
                         "first_seen":    datetime.now(timezone.utc).isoformat(),
                     }
             anomalies_found += 1
+            svc = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
+            anomaly_list.append({
+                "anomaly_type": anomaly["type"],
+                "service":      svc,
+                "root_op":      fp["root_op"],
+                "message":      anomaly["message"],
+                "detail":       anomaly["detail"],
+                "trace_id":     trace_id,
+                "services_in_trace": fp["services"],
+            })
             print(f"\n  ANOMALY DETECTED")
             print(f"    Type:    {anomaly['type']}")
             print(f"    Message: {anomaly['message']}")
@@ -918,7 +946,7 @@ def cmd_watch(window_minutes: int = 10,
             _log_alert({
                 "anomaly_type": anomaly["type"],
                 "environment":  environment or "all",
-                "service":      fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"],
+                "service":      svc,
                 "root_op":      fp["root_op"],
                 "message":      anomaly["message"],
                 "detail":       anomaly["detail"],
@@ -972,6 +1000,10 @@ def cmd_watch(window_minutes: int = 10,
             continue
         if _is_noise_trace(root_op.split(":", 1)[-1] if ":" in root_op else root_op):
             continue
+        # Also skip if any span path in the baseline entries is a noise operation
+        # (e.g. Eureka registration PUTs rooted at a service span like customers-service:PUT)
+        if any(_is_noise_trace(info.get("path", "")) for info in bl_entries):
+            continue
         total_patterns = len(bl_entries)
         service_counts: dict[str, int] = defaultdict(int)
         for info in bl_entries:
@@ -994,6 +1026,15 @@ def cmd_watch(window_minutes: int = 10,
         alerted_hashes.add(silent_hash)
         anomalies_found += 1
         missing_svcs = sorted(dominant_services)
+        root_svc_key = root_op.split(":")[0] if ":" in root_op else root_op
+        anomaly_list.append({
+            "anomaly_type":     "MISSING_SERVICE",
+            "service":          root_svc_key,
+            "root_op":          root_op,
+            "message":          f"No traces for '{root_op}' in window — expected service(s) absent: {missing_svcs}",
+            "detail":           f"Root op silent (0 traces in {window_minutes}m window)",
+            "missing_services": missing_svcs,
+        })
         print(f"\n  ANOMALY DETECTED")
         print(f"    Type:    MISSING_SERVICE")
         print(f"    Message: No traces for '{root_op}' in window — "
@@ -1062,6 +1103,19 @@ def cmd_watch(window_minutes: int = 10,
           + (f", {promoted_count} auto-promoted" if promoted_count else ""))
     if anomalies_found == 0:
         print("  All trace paths match baseline")
+
+    if json_output:
+        import sys as _sys
+        result = {
+            "environment":    environment or "all",
+            "timestamp":      datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "window_minutes": window_minutes,
+            "checked":        checked,
+            "anomalies":      anomaly_list,
+        }
+        _sys.stdout.write(json.dumps(result) + "\n")
+
+    return anomaly_list
 
 
 def cmd_promote(hashes: list[str] | None, environment: str | None = None) -> None:
@@ -1158,6 +1212,8 @@ def main() -> None:
                          help="Wipe the existing baseline before learning (start fresh)")
     p_watch = sub.add_parser("watch", help="Compare recent traces to baseline")
     p_watch.add_argument("--window-minutes", type=int, default=10)
+    p_watch.add_argument("--json", action="store_true",
+                         help="Output anomalies as JSON to stdout (for piping to agent.py)")
     sub.add_parser("show", help="Print current baseline")
     p_promote = sub.add_parser(
         "promote",
@@ -1176,7 +1232,7 @@ def main() -> None:
     elif args.command == "learn":
         cmd_learn(args.window_minutes, args.window_offset_minutes, args.reset, environment=env)
     elif args.command == "watch":
-        cmd_watch(args.window_minutes, environment=env)
+        cmd_watch(args.window_minutes, environment=env, json_output=args.json)
     elif args.command == "show":
         cmd_show(environment=env)
     elif args.command == "promote":
