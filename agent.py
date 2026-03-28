@@ -226,10 +226,14 @@ def _trim_for_context(world_state: dict) -> dict:
 
 # ── 3. ACT ────────────────────────────────────────────────────────────────────
 
-def act(plan: dict, env: str, dry_run: bool = False) -> None:
+def act(plan: dict, env: str, dry_run: bool = False,
+        world_state: dict | None = None) -> None:
     """Execute each action in Claude's plan."""
     import collect
     from baseline import BaselineStore
+    # Attach raw anomalies to plan so triage summary can reference them
+    if world_state:
+        plan["_anomalies"] = world_state.get("active_anomalies", [])
 
     severity_icon = {"OK": "✓", "DEGRADED": "!", "INCIDENT": "!!"}
     icon = severity_icon.get(plan.get("severity", "OK"), "?")
@@ -321,6 +325,36 @@ def act(plan: dict, env: str, dry_run: bool = False) -> None:
                 collect.update_threshold(service, params)
                 print(f"      Updated thresholds for {service}: {params}")
 
+    # ── Always emit a triage summary so full Bedrock reasoning is visible
+    #    in the Splunk dashboard regardless of severity or actions taken.
+    if not dry_run:
+        actions_taken = [
+            a.get("type") for a in actions if a.get("type") != "NO_ACTION"
+        ]
+        # Pull out MISSING_SERVICE anomalies for explicit visibility
+        missing_svc_details = "; ".join(
+            a.get("message", "") for a in plan.get("_anomalies", [])
+            if a.get("anomaly_type") == "MISSING_SERVICE"
+        )
+        try:
+            collect.emit_event("behavioral_baseline.triage.summary", {
+                "environment":        env,
+                "severity":           plan.get("severity", "OK"),
+                "confidence":         plan.get("confidence", ""),
+                "assessment":         plan.get("assessment", ""),
+                "root_cause":         plan.get("root_cause", "") or "",
+                "narrative":          plan.get("narrative", ""),
+                "affected_services":  ", ".join(plan.get("affected_services", [])) or "none",
+                "actions_taken":      ", ".join(actions_taken) or "none",
+                "missing_services":   missing_svc_details or "none",
+            }, dimensions={
+                "sf_environment": env,
+                "severity":       plan.get("severity", "OK"),
+            })
+            print(f"\n    [TRIAGE SUMMARY] emitted behavioral_baseline.triage.summary")
+        except Exception as e:
+            print(f"    [warn] triage summary emit failed: {e}", file=sys.stderr)
+
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
@@ -349,7 +383,7 @@ def run_once(env: str, window_minutes: int, dry_run: bool = False,
     if json_output:
         print(json.dumps(plan, indent=2))
     else:
-        act(plan, env, dry_run=dry_run)
+        act(plan, env, dry_run=dry_run, world_state=world_state)
 
     # Record this cycle to history for future feedback
     if not dry_run:
