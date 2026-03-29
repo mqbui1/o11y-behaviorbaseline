@@ -181,22 +181,27 @@ k "kubectl scale deployment visits-service --replicas=0"
 The loadgen hits owner detail pages every ~5 seconds, which calls visits-service for pet visit history. After 3 minutes the watch window will contain the new connection errors.
 
 ### Step 3 — Run detection + triage (one command)
+
+Both the trace tier and error tier are piped together — Claude sees the full picture from both signals simultaneously.
+
 ```bash
-python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
   | python3 agent.py --environment petclinicmbtest
 ```
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 2 anomaly(s) from watch
+[agent] env=petclinicmbtest | 1 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — Two services (api-gateway and visits-service) are throwing new
-    connection-level errors, indicating a downstream dependency is unreachable.
-    Root cause: visits-service is down, causing WebClientRequestException in
-    api-gateway and java.net.ConnectException in visits-service on GET.
-    ...
-    Confidence: HIGH | Affected: api-gateway, visits-service
+[!!] INCIDENT — The visits-service is completely absent from traces that normally
+    include it when fetching owner details via the api-gateway.
+    Root cause: visits-service is down or unreachable, causing it to be skipped
+    entirely in the GET /api/gateway/owners/{ownerId} call chain.
+    ...customers-service is completing successfully, so the issue is isolated to
+    visits-service...
+    Confidence: HIGH | Affected: visits-service, api-gateway
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
@@ -205,36 +210,32 @@ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-m
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 05:54:54 UTC]  DETECTION
-  anomaly type         : NEW_ERROR_SIGNATURE
+[2026-03-29 06:17:53 UTC]  DETECTION
+  anomaly type         : MISSING_SERVICE
   service              : api-gateway
-  message              : New error signature in api-gateway: org.springframework.web.reactive.function.client.WebClientRequestException on GET
-  error type           : org.springframework.web.reactive.function.client.WebClientRequestException
-  call path            : api-gateway:GET /api/gateway/owners/{ownerId}
+  root op              : api-gateway:GET /api/gateway/owners/{ownerId}
+  message              : Expected service(s) absent from 'api-gateway:GET /api/gateway/owners/{ownerId}': ['visits-service']
+  missing services     : visits-service
+  services in trace    : api-gateway, customers-service
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 05:54:54 UTC]  DETECTION
-  anomaly type         : NEW_ERROR_SIGNATURE
-  service              : visits-service
-  message              : New error signature in visits-service: java.net.ConnectException on GET
-  error type           : java.net.ConnectException
-────────────────────────────────────────────────────────────────────────
-
-════════════════════════════════════════════════════════════════════════
-[2026-03-29 05:54:54 UTC]  TRIAGE
+[2026-03-29 06:17:53 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
-  affected services    : api-gateway, visits-service
+  affected services    : visits-service, api-gateway
+  missing services     : api-gateway:GET /api/gateway/owners/{ownerId} → missing: visits-service
   action               : PAGE_ONCALL
-  narrative            : ...visits-service is down, causing connection errors...
+  narrative            : ...visits-service has stopped appearing in traces...
+                         customers-service is completing successfully, so the issue
+                         is isolated to visits-service...
 ────────────────────────────────────────────────────────────────────────
 ```
 
 **Key talking points:**
 - *"No threshold. The baseline had zero error signatures for this service — so the first occurrence fires immediately."*
-- *"This is exactly what a bad deploy looks like: the pod starts, accepts a connection, then throws on its first real operation."*
-- *"Claude sees two independent services hitting new connection errors simultaneously and correctly infers a shared downstream failure."*
+- *"Running both tiers together gives Claude the full picture: trace tier sees visits-service missing from the call graph, error tier sees the connection exception. Together they unambiguously point to visits-service."*
+- *"Notice the triage correctly notes customers-service is healthy — Claude can reason about what's working as well as what's broken."*
 
 ### Step 4 — Restore
 ```bash
@@ -362,15 +363,16 @@ TRIAGE →  Claude reads the JSON anomaly list
           Writes DETECTION + TRIAGE to alerts.log
 ```
 
-Trace detection + triage:
+Single tier (trace or error):
 ```bash
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
 ```
 
-Error detection + triage:
+Both tiers combined (recommended — gives Claude the full picture):
 ```bash
-python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
   | python3 agent.py --environment petclinicmbtest
 ```
 
