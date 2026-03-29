@@ -37,7 +37,47 @@ tail -f data/alerts.log
 
 ---
 
-## The Demo: Missing Service Detection + AI Triage
+## Demo 0: Context Setting — Framework in Steady State
+
+**Story:** *"This is what the framework looks like before we break anything. Every component is autonomous — no manual alerting rules, no hardcoded thresholds."*
+
+```bash
+# What environments are provisioned and their health
+python3 onboard.py --show-state
+
+# 6 known call patterns learned from real traffic
+python3 core/trace_fingerprint.py --environment petclinicmbtest show
+
+# Known error signatures
+python3 core/error_fingerprint.py --environment petclinicmbtest show
+
+# Cron jobs managing everything autonomously
+crontab -l | grep behavioral
+
+# Confirm 0 anomalies right now
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+```
+
+**Expected output (trace show):**
+```
+Baseline (environment 'petclinicmbtest'): 6 fingerprints
+  Services: [api-gateway, customers-service, discovery-server, vets-service, visits-service, ...]
+
+  api-gateway:GET /api/gateway/owners/{ownerId}  (1 pattern)
+  api-gateway:GET customers-service              (3 patterns)
+  api-gateway:GET vets-service                   (1 pattern)
+  api-gateway:PUT customers-service              (1 pattern)
+```
+
+**Key talking points:**
+- *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
+- *"6 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"8 cron jobs per environment run autonomously — trace watch, error watch, correlate, dedup every 5 minutes; relearn daily."*
+- *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
+
+---
+
+## Demo 3: Missing Service Detection + AI Triage
 
 **Story:** *"vets-service goes down. The framework detects the structural absence
 from traces and calls Claude (via AWS Bedrock) to reason about it — producing an
