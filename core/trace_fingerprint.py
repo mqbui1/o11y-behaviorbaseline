@@ -961,14 +961,25 @@ def cmd_watch(window_minutes: int = 10,
                     }
             anomalies_found += 1
             svc = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
+            # Extract missing services from the message for MISSING_SERVICE anomalies
+            _missing = []
+            if anomaly["type"] == "MISSING_SERVICE":
+                import re as _re
+                _m = _re.search(r"absent from '[^']+': (\[.*?\])", anomaly["message"])
+                if _m:
+                    try:
+                        _missing = json.loads(_m.group(1).replace("'", '"'))
+                    except Exception:
+                        pass
             anomaly_list.append({
-                "anomaly_type": anomaly["type"],
-                "service":      svc,
-                "root_op":      fp["root_op"],
-                "message":      anomaly["message"],
-                "detail":       anomaly["detail"],
-                "trace_id":     trace_id,
+                "anomaly_type":      anomaly["type"],
+                "service":           svc,
+                "root_op":           fp["root_op"],
+                "message":           anomaly["message"],
+                "detail":            anomaly["detail"],
+                "trace_id":          trace_id,
                 "services_in_trace": fp["services"],
+                "missing_services":  _missing,
             })
             print(f"\n  ANOMALY DETECTED")
             print(f"    Type:    {anomaly['type']}")
@@ -984,7 +995,7 @@ def cmd_watch(window_minutes: int = 10,
                 "detail":       anomaly["detail"],
                 "trace_id":     trace_id,
                 "services_in_trace": ", ".join(fp["services"]),
-            }, enabled=json_output)
+            }, enabled=False)
             try:
                 dims = {
                     "anomaly_type":   anomaly["type"],
@@ -1087,7 +1098,7 @@ def cmd_watch(window_minutes: int = 10,
             "message":         f"No traces for '{root_op}' in window — expected service(s) absent: {missing_svcs}",
             "detail":          f"Root op completely silent — 0 traces in {window_minutes}m window (circuit breaker likely engaged)",
             "missing_services": ", ".join(missing_svcs),
-        }, enabled=json_output)
+        }, enabled=False)
         try:
             dims = {
                 "anomaly_type":   "MISSING_SERVICE",
