@@ -106,18 +106,44 @@ Only recommend RELEARN_BASELINE if the anomaly pattern suggests a deployment or 
 # ── 1. READ WATCH OUTPUT ──────────────────────────────────────────────────────
 
 def read_watch_output() -> dict:
-    """Read JSON produced by: trace_fingerprint.py watch --json"""
+    """Read JSON produced by one or more watch --json commands piped to stdin.
+
+    Each watch command emits one JSON line. Multiple watch outputs (e.g. trace
+    + error piped together) are merged into a single result with a combined
+    anomaly list, giving Claude the full picture across both detection tiers.
+    """
     raw = sys.stdin.read().strip()
     if not raw:
         print("Error: no input on stdin. Pipe watch --json output to agent.py.", file=sys.stderr)
         sys.exit(1)
-    # The watch command prints human-readable lines then a JSON line last.
-    # Find the JSON line (starts with '{').
-    for line in reversed(raw.splitlines()):
+
+    # Collect all JSON lines (one per watch invocation)
+    results = []
+    for line in raw.splitlines():
         line = line.strip()
         if line.startswith("{"):
-            return json.loads(line)
-    raise ValueError("No JSON found in stdin")
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+    if not results:
+        raise ValueError("No JSON found in stdin")
+
+    if len(results) == 1:
+        return results[0]
+
+    # Merge multiple watch outputs — combine anomaly lists, keep first metadata
+    merged = {
+        "environment":    results[0].get("environment", "all"),
+        "timestamp":      results[0].get("timestamp", ""),
+        "window_minutes": results[0].get("window_minutes", 0),
+        "checked":        sum(r.get("checked", 0) for r in results),
+        "anomalies":      [],
+    }
+    for r in results:
+        merged["anomalies"].extend(r.get("anomalies", []))
+    return merged
 
 
 # ── 2. REASON ─────────────────────────────────────────────────────────────────
@@ -182,8 +208,10 @@ def act(plan: dict, watch_result: dict, env: str, dry_run: bool = False) -> None
             fields["trace id"] = a["trace_id"]
         if atype == "MISSING_SERVICE":
             fields["root op"] = a.get("root_op", "")
-            svcs = a.get("missing_services") or a.get("services_in_trace", [])
-            fields["services in trace"] = ", ".join(svcs) if isinstance(svcs, list) else svcs
+            missing = a.get("missing_services") or []
+            present = a.get("services_in_trace", [])
+            fields["missing services"] = ", ".join(missing) if isinstance(missing, list) else missing
+            fields["services in trace"] = ", ".join(present) if isinstance(present, list) else present
         elif atype in ("NEW_ERROR_SIGNATURE", "SIGNATURE_VANISHED", "SIGNATURE_SPIKE"):
             fields["error type"] = a.get("error_type", "")
             fields["operation"]  = a.get("operation", "")
