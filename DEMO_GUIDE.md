@@ -159,6 +159,93 @@ python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --
 
 ---
 
+## Demo 2: Bad Deploy — New Error Signature on First Occurrence
+
+**Story:** *"A new deploy of visits-service introduces a regression — the pod crashes immediately on startup. The very first request after the deploy hits the dead service and fires a brand new error signature on a code path that was previously clean. No threshold crossed. No baseline rate exceeded. First occurrence fires."*
+
+### Prerequisites
+```bash
+# Clear alert log and ensure clean error baseline
+cat /dev/null > data/alerts.log
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
+python3 core/error_fingerprint.py --environment petclinicmbtest show
+# Expected: 0 signatures (system is healthy)
+```
+
+### Step 1 — Simulate bad deploy (visits-service crashes)
+```bash
+k "kubectl scale deployment visits-service --replicas=0"
+```
+
+### Step 2 — Wait 3 minutes
+The loadgen hits owner detail pages every ~5 seconds, which calls visits-service for pet visit history. After 3 minutes the watch window will contain the new connection errors.
+
+### Step 3 — Run detection + triage (one command)
+```bash
+python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
+  | python3 agent.py --environment petclinicmbtest
+```
+
+**Expected terminal output:**
+```
+[agent] env=petclinicmbtest | 2 anomaly(s) from watch
+  Reasoning with Claude...
+
+[!!] INCIDENT — Two services (api-gateway and visits-service) are throwing new
+    connection-level errors, indicating a downstream dependency is unreachable.
+    Root cause: visits-service is down, causing WebClientRequestException in
+    api-gateway and java.net.ConnectException in visits-service on GET.
+    ...
+    Confidence: HIGH | Affected: api-gateway, visits-service
+    Recommended action: PAGE_ONCALL
+
+    [TRIAGE SUMMARY] written to alerts.log
+```
+
+**Expected alerts.log:**
+```
+════════════════════════════════════════════════════════════════════════
+[2026-03-29 05:54:54 UTC]  DETECTION
+  anomaly type         : NEW_ERROR_SIGNATURE
+  service              : api-gateway
+  message              : New error signature in api-gateway: org.springframework.web.reactive.function.client.WebClientRequestException on GET
+  error type           : org.springframework.web.reactive.function.client.WebClientRequestException
+  call path            : api-gateway:GET /api/gateway/owners/{ownerId}
+────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════
+[2026-03-29 05:54:54 UTC]  DETECTION
+  anomaly type         : NEW_ERROR_SIGNATURE
+  service              : visits-service
+  message              : New error signature in visits-service: java.net.ConnectException on GET
+  error type           : java.net.ConnectException
+────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════
+[2026-03-29 05:54:54 UTC]  TRIAGE
+  severity             : INCIDENT
+  confidence           : HIGH
+  affected services    : api-gateway, visits-service
+  action               : PAGE_ONCALL
+  narrative            : ...visits-service is down, causing connection errors...
+────────────────────────────────────────────────────────────────────────
+```
+
+**Key talking points:**
+- *"No threshold. The baseline had zero error signatures for this service — so the first occurrence fires immediately."*
+- *"This is exactly what a bad deploy looks like: the pod starts, accepts a connection, then throws on its first real operation."*
+- *"Claude sees two independent services hitting new connection errors simultaneously and correctly infers a shared downstream failure."*
+
+### Step 4 — Restore
+```bash
+k "kubectl scale deployment visits-service --replicas=1"
+
+# Re-learn clean baseline after demo
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
+```
+
+---
+
 ## Demo 3: Missing Service — Structural Trace Absence + AI Triage
 
 **Story:** *"vets-service goes down. The framework detects the structural absence from traces and calls Claude (via AWS Bedrock) to reason about it — producing an INCIDENT verdict with root cause and recommended action, written to a log file in under 3 minutes."*
