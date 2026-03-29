@@ -709,9 +709,35 @@ def cmd_learn(window_minutes: int = 120,
     now_ms   = int(time.time() * 1000) - window_offset_minutes * 60 * 1000
     start_ms = now_ms - window_minutes * 60 * 1000
 
-    traces = search_traces(topo["services"], start_ms, now_ms,
-                           environment=environment)
-    print(f"  Found {len(traces)} candidate traces")
+    # Search per-service in parallel so each service gets its own 200-trace quota.
+    # A single cross-service query dilutes rare services (e.g. vets-service) to
+    # 1-2 slots out of 200, preventing them from reaching MIN_BASELINE_OCCURRENCES.
+    services_to_search = topo["services"] or []
+    if services_to_search:
+        print(f"  Searching {len(services_to_search)} services in parallel...")
+        all_trace_map: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=len(services_to_search)) as _pool:
+            _futures = {
+                _pool.submit(search_traces, [svc], start_ms, now_ms,
+                             environment=environment): svc
+                for svc in services_to_search
+            }
+            for _fut in as_completed(_futures):
+                svc_name = _futures[_fut]
+                try:
+                    svc_traces = _fut.result()
+                    before = len(all_trace_map)
+                    for t in svc_traces:
+                        all_trace_map[t["traceId"]] = t
+                    print(f"    {svc_name}: {len(svc_traces)} traces "
+                          f"(+{len(all_trace_map) - before} new)")
+                except Exception as e:
+                    print(f"  [warn] search failed for {svc_name}: {e}",
+                          file=sys.stderr)
+        traces = list(all_trace_map.values())
+    else:
+        traces = search_traces([], start_ms, now_ms, environment=environment)
+    print(f"  Found {len(traces)} candidate traces (deduplicated)")
 
     baseline = load_baseline(environment)
     if reset:
