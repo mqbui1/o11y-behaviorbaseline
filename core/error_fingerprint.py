@@ -649,7 +649,8 @@ def cmd_learn(window_minutes: int = 120,
 
 
 def cmd_watch(window_minutes: int = 10,
-              environment: str | None = None) -> None:
+              environment: str | None = None,
+              json_output: bool = False) -> None:
     env_desc = f"environment '{environment}'" if environment else "all environments"
     print(f"[watch] Discovering services + searching error traces in parallel ({env_desc})...")
 
@@ -686,6 +687,7 @@ def cmd_watch(window_minutes: int = 10,
 
     anomalies_found = checked = skipped = 0
     alerted_hashes: set[str] = set()
+    anomaly_list: list[dict] = []
     # Count how many times each signature hash appears in this watch window
     watch_counts: dict[str, int] = defaultdict(int)
     # Track which services appeared in this window (for vanished check)
@@ -748,6 +750,16 @@ def cmd_watch(window_minutes: int = 10,
                             "first_seen":    datetime.now(timezone.utc).isoformat(),
                         }
                 anomalies_found += 1
+                anomaly_list.append({
+                    "anomaly_type": anomaly["type"],
+                    "service":      sig["service"],
+                    "message":      anomaly["message"],
+                    "detail":       anomaly["detail"],
+                    "trace_id":     trace_id,
+                    "error_type":   sig["error_type"],
+                    "operation":    sig["operation"],
+                    "call_path":    sig["call_path"],
+                })
                 print(f"\n  ANOMALY DETECTED")
                 print(f"    Type:    {anomaly['type']}")
                 print(f"    Message: {anomaly['message']}")
@@ -790,6 +802,15 @@ def cmd_watch(window_minutes: int = 10,
     for anomaly in vanished:
         sig = anomaly["sig"]
         anomalies_found += 1
+        anomaly_list.append({
+            "anomaly_type": anomaly["type"],
+            "service":      sig["service"],
+            "message":      anomaly["message"],
+            "detail":       anomaly["detail"],
+            "error_type":   sig["error_type"],
+            "operation":    sig["operation"],
+            "call_path":    sig.get("call_path", ""),
+        })
         print(f"\n  ANOMALY DETECTED")
         print(f"    Type:    {anomaly['type']}")
         print(f"    Message: {anomaly['message']}")
@@ -846,6 +867,17 @@ def cmd_watch(window_minutes: int = 10,
           + (f", {promoted_count} auto-promoted" if promoted_count else ""))
     if anomalies_found == 0:
         print("  All error signatures match baseline")
+
+    if json_output:
+        result = {
+            "environment":    environment or "all",
+            "timestamp":      datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "window_minutes": window_minutes,
+            "checked":        checked,
+            "anomalies":      anomaly_list,
+        }
+        import sys as _sys
+        _sys.stdout.write(json.dumps(result) + "\n")
 
 
 def cmd_promote(hashes: list[str] | None, environment: str | None = None) -> None:
@@ -934,6 +966,8 @@ def main() -> None:
                          help="Wipe the existing baseline before learning (start fresh)")
     p_watch = sub.add_parser("watch", help="Watch for new error signatures")
     p_watch.add_argument("--window-minutes", type=int, default=10)
+    p_watch.add_argument("--json", action="store_true", dest="json_output",
+                         help="Emit anomalies as JSON to stdout and write to alerts.log")
     sub.add_parser("show", help="Print current error baseline")
     p_promote = sub.add_parser(
         "promote",
@@ -952,7 +986,8 @@ def main() -> None:
     elif args.command == "learn":
         cmd_learn(args.window_minutes, args.window_offset_minutes, args.reset, environment=env)
     elif args.command == "watch":
-        cmd_watch(args.window_minutes, environment=env)
+        cmd_watch(args.window_minutes, environment=env,
+                  json_output=getattr(args, "json_output", False))
     elif args.command == "show":
         cmd_show(environment=env)
     elif args.command == "promote":
