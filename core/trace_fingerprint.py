@@ -94,8 +94,10 @@ INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 # Minimum span count for a trace to be fingerprint-worthy.
 MIN_SPANS = 2
 
-# Traces to sample per learn run (for broad baseline coverage)
-TRACES_SAMPLE_LIMIT = 200
+# Traces to sample per service per learn run. 50 is plenty — each service
+# only needs MIN_BASELINE_OCCURRENCES hits and most root_ops repeat every few
+# seconds. Keeping this low makes learn ~4x faster than using 200.
+LEARN_SAMPLE_LIMIT = int(os.environ.get("LEARN_SAMPLE_LIMIT", "50"))
 
 # Traces to sample per watch run — lower is faster; new patterns are detected
 # after the first occurrence so high volume adds little signal.
@@ -255,7 +257,7 @@ def discover_topology(lookback_hours: int = TOPOLOGY_LOOKBACK_HOURS,
 # ── Splunk APM helpers ─────────────────────────────────────────────────────────
 
 def search_traces(services: list[str], start_ms: int, end_ms: int,
-                  limit: int = TRACES_SAMPLE_LIMIT,
+                  limit: int = 200,
                   environment: str | None = None) -> list[dict]:
     """Search for traces involving any of the given services, optionally scoped
     to a specific deployment.environment value."""
@@ -719,7 +721,7 @@ def cmd_learn(window_minutes: int = 120,
         with ThreadPoolExecutor(max_workers=len(services_to_search)) as _pool:
             _futures = {
                 _pool.submit(search_traces, [svc], start_ms, now_ms,
-                             environment=environment): svc
+                             LEARN_SAMPLE_LIMIT, environment): svc
                 for svc in services_to_search
             }
             for _fut in as_completed(_futures):
