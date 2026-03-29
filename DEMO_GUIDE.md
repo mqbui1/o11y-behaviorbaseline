@@ -11,7 +11,7 @@ source .env
 source /tmp/aws_exports.sh
 
 # SSH alias for cluster commands
-alias k='sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no splunk@18.208.249.178'
+alias k='sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@18.208.249.178'
 ```
 
 ### Splunk O11y URLs
@@ -83,8 +83,9 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
 
 ### Prerequisites
 ```bash
-# Ensure clean error baseline (no prior errors)
-python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 10
+# Clear alert log and ensure clean error baseline
+cat /dev/null > data/alerts.log
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: 0 signatures (system is healthy)
 ```
@@ -158,28 +159,27 @@ python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --
 
 ---
 
-## Demo 3: Missing Service Detection + AI Triage
+## Demo 3: Missing Service — Structural Trace Absence + AI Triage
 
-**Story:** *"vets-service goes down. The framework detects the structural absence
-from traces and calls Claude (via AWS Bedrock) to reason about it — producing an
-INCIDENT verdict with root cause and recommended action, written to a log file in
-under 3 minutes."*
+**Story:** *"vets-service goes down. The framework detects the structural absence from traces and calls Claude (via AWS Bedrock) to reason about it — producing an INCIDENT verdict with root cause and recommended action, written to a log file in under 3 minutes."*
 
-### Step 1 — Clear the alert log
+### Prerequisites
 ```bash
+# Clear alert log and verify 0 trace anomalies
 cat /dev/null > data/alerts.log
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+# Expected: "All trace paths match baseline"
 ```
 
-### Step 2 — Kill vets-service
+### Step 1 — Kill vets-service
 ```bash
 k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 3 — Wait 3 minutes
-The loadgen hits the vets endpoint every ~5 seconds. After 3 minutes the 3-minute
-watch window will contain only post-failure traces.
+### Step 2 — Wait 3 minutes
+The loadgen hits the vets endpoint every ~5 seconds. After 3 minutes the watch window will contain only post-failure traces.
 
-### Step 4 — Run detection + triage (one command)
+### Step 3 — Run detection + triage (one command)
 ```bash
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
@@ -195,7 +195,7 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
     Type:    MISSING_SERVICE
     Message: Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
     Detail:  Path: api-gateway:GET vets-service
-    TraceID: c2a7659d46d4d729fcb9bfae3bb967e0
+    TraceID: 50c692ed3df2d5b6179dc9c3c249bad0
     Event sent (trace.path.drift)
 
   Checked 29 traces, 171 skipped, 1 anomalies detected
@@ -211,39 +211,37 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
+    [PAGE_ONCALL] event emitted to Splunk
 ```
 
-**Expected alerts.log (shown in the tail -f terminal):**
+**Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-28 06:08:02 UTC]  DETECTION
+[2026-03-29 04:27:01 UTC]  DETECTION
   anomaly type         : MISSING_SERVICE
   environment          : petclinicmbtest
   service              : api-gateway
   root op              : api-gateway:GET vets-service
   message              : Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-  detail               : Path: api-gateway:GET vets-service
-  trace id             : c2a7659d46d4d729fcb9bfae3bb967e0
+  trace id             : 50c692ed3df2d5b6179dc9c3c249bad0
   services in trace    : api-gateway
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-28 06:08:08 UTC]  TRIAGE
+[2026-03-29 04:27:07 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
   environment          : petclinicmbtest
   affected services    : vets-service, api-gateway
   assessment           : The vets-service is completely absent from traces that
-                         normally route through api-gateway:GET vets-service, indicating the
-                         service is down or unreachable.
-  root cause           : vets-service is likely crashed, unresponsive, or has lost
-                         network connectivity, causing api-gateway to receive no downstream spans.
+                         normally flow through api-gateway:GET vets-service.
+  root cause           : vets-service is not responding or has crashed, causing
+                         api-gateway to receive no downstream spans.
   missing services     : api-gateway:GET vets-service → missing: api-gateway
   action               : PAGE_ONCALL
-  narrative            : As of 06:08 UTC, vets-service has stopped appearing in traces
-                         for the 'api-gateway:GET vets-service' operation — only the api-gateway
-                         span is present, with no downstream call completing. On-call should
-                         immediately check the health and pod/process status of vets-service.
+  narrative            : In the last 3 minutes, traces for 'api-gateway:GET vets-service'
+                         show only the api-gateway span — vets-service has completely vanished
+                         from the call path...
 ────────────────────────────────────────────────────────────────────────
 ```
 
@@ -253,7 +251,7 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 - *"Claude reads exactly what was detected — one clean anomaly — and reasons about it: INCIDENT, HIGH confidence, PAGE_ONCALL."*
 - *"Total time from kill to triage: 3 minutes."*
 
-### Step 5 — Restore
+### Step 4 — Restore
 ```bash
 k "kubectl scale deployment vets-service --replicas=1"
 ```
@@ -263,11 +261,13 @@ k "kubectl scale deployment vets-service --replicas=1"
 ## How it works (30-second explanation)
 
 ```
-LEARN  →  Sample 200 traces from live traffic
+LEARN  →  Search each service independently (50 traces each, parallel)
           Build fingerprints: "api-gateway always calls vets-service on GET /vets"
+          Build error signatures: "customers-service has no DB errors in healthy state"
 
-WATCH  →  Sample 200 traces from the last 3 minutes
-          If a known root_op has zero traces → MISSING_SERVICE anomaly
+WATCH  →  Sample traces / error traces from the last 3 minutes
+          Trace tier:  known root_op has zero traces → MISSING_SERVICE anomaly
+          Error tier:  new error type seen → NEW_ERROR_SIGNATURE anomaly
           Output as JSON
 
 TRIAGE →  Claude reads the JSON anomaly list
@@ -275,9 +275,15 @@ TRIAGE →  Claude reads the JSON anomaly list
           Writes DETECTION + TRIAGE to alerts.log
 ```
 
-One command runs WATCH + TRIAGE:
+Trace detection + triage:
 ```bash
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
+  | python3 agent.py --environment petclinicmbtest
+```
+
+Error detection + triage:
+```bash
+python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -286,12 +292,15 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 ## Restore / Reset
 
 ```bash
-# Restore vets-service
-k "kubectl scale deployment vets-service --replicas=1"
+# Restore all services
+k "kubectl scale deployment vets-service petclinic-db --replicas=1"
 
-# Relearn baseline after disruptions
-python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 30
+# Relearn trace baseline after disruptions
+python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 15
 python3 core/trace_fingerprint.py --environment petclinicmbtest promote
+
+# Relearn error baseline after disruptions (wait for clean window first)
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
 
 # Clear alert log
 cat /dev/null > data/alerts.log
