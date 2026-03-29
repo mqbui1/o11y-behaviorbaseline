@@ -77,6 +77,68 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
 
 ---
 
+## Demo 1: DB Goes Down — New Error Signatures
+
+**Story:** *"The database goes down. Services start throwing transaction errors and health check failures that have never appeared before. The framework detects brand new error signatures on first occurrence — no threshold, no tuning required."*
+
+### Prerequisites
+```bash
+# Ensure clean error baseline (no prior errors)
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 10
+python3 core/error_fingerprint.py --environment petclinicmbtest show
+# Expected: 0 signatures (system is healthy)
+```
+
+### Step 1 — Kill the DB
+```bash
+k "kubectl scale deployment petclinic-db --replicas=0"
+```
+
+### Step 2 — Wait 3 minutes
+The loadgen hits owner/pet endpoints every ~5 seconds. After 3 minutes the watch window will contain DB-failure error traces.
+
+### Step 3 — Run error detection
+```bash
+python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+```
+
+**Expected output:**
+```
+  ANOMALY DETECTED
+    Type:    NEW_ERROR_SIGNATURE
+    Message: New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on OwnerRepository.findAll
+    Detail:  call_path=api-gateway:GET customers-service -> api-gateway:GET
+
+  ANOMALY DETECTED
+    Type:    NEW_ERROR_SIGNATURE
+    Message: New error signature in customers-service: 503 on GET /actuator/health
+    Detail:  call_path=admin-server:GET
+
+  ANOMALY DETECTED
+    Type:    NEW_ERROR_SIGNATURE
+    Message: New error signature in api-gateway: 500 on GET customers-service
+    Detail:  call_path=root
+
+  ... (8 anomalies total across customers-service, vets-service, visits-service, api-gateway)
+
+  Checked 11 traces, 0 skipped, 8 anomalies detected
+```
+
+**Key talking points:**
+- *"A DB outage doesn't just spike existing errors — it creates brand new error signatures that have never appeared before."*
+- *"The framework fires on first occurrence. No threshold to set, no baseline rate to exceed."*
+- *"The cascade is visible: DB down → CannotCreateTransactionException in customers-service → 500 in api-gateway → 503 health checks across all DB-dependent services."*
+
+### Step 4 — Restore
+```bash
+k "kubectl scale deployment petclinic-db --replicas=1"
+
+# Re-learn clean baseline after demo
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 10
+```
+
+---
+
 ## Demo 3: Missing Service Detection + AI Triage
 
 **Story:** *"vets-service goes down. The framework detects the structural absence
