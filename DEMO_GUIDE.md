@@ -97,44 +97,63 @@ k "kubectl scale deployment petclinic-db --replicas=0"
 ### Step 2 — Wait 3 minutes
 The loadgen hits owner/pet endpoints every ~5 seconds. After 3 minutes the watch window will contain DB-failure error traces.
 
-### Step 3 — Run error detection
+### Step 3 — Run detection + triage (one command)
 ```bash
-python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
+  | python3 agent.py --environment petclinicmbtest
 ```
 
-**Expected output:**
+**Expected terminal output:**
 ```
-  ANOMALY DETECTED
-    Type:    NEW_ERROR_SIGNATURE
-    Message: New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on OwnerRepository.findAll
-    Detail:  call_path=api-gateway:GET customers-service -> api-gateway:GET
+[agent] env=petclinicmbtest | 8 anomaly(s) from watch
+  Reasoning with Claude...
 
-  ANOMALY DETECTED
-    Type:    NEW_ERROR_SIGNATURE
-    Message: New error signature in customers-service: 503 on GET /actuator/health
-    Detail:  call_path=admin-server:GET
+[!!] INCIDENT — Multiple services (customers-service, vets-service, visits-service) are
+    throwing new error signatures simultaneously, with customers-service unable to create
+    database transactions, strongly indicating a shared database is down.
+    Root cause: The database is unreachable, causing CannotCreateTransactionException in
+    customers-service and 503 health-check failures across vets-service and visits-service.
+    ...
+    Confidence: HIGH | Affected: customers-service, vets-service, visits-service, api-gateway
+    Recommended action: PAGE_ONCALL
 
-  ANOMALY DETECTED
-    Type:    NEW_ERROR_SIGNATURE
-    Message: New error signature in api-gateway: 500 on GET customers-service
-    Detail:  call_path=root
+    [TRIAGE SUMMARY] written to alerts.log
+```
 
-  ... (8 anomalies total across customers-service, vets-service, visits-service, api-gateway)
+**Expected alerts.log:**
+```
+════════════════════════════════════════════════════════════════════════
+[2026-03-29 05:21:39 UTC]  DETECTION
+  anomaly type         : NEW_ERROR_SIGNATURE
+  service              : customers-service
+  message              : New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on OwnerRepository.findAll
+  error type           : org.springframework.transaction.CannotCreateTransactionException
+  call path            : api-gateway:GET customers-service -> api-gateway:GET
+────────────────────────────────────────────────────────────────────────
+... (8 DETECTION entries total)
 
-  Checked 11 traces, 0 skipped, 8 anomalies detected
+════════════════════════════════════════════════════════════════════════
+[2026-03-29 05:21:39 UTC]  TRIAGE
+  severity             : INCIDENT
+  confidence           : HIGH
+  affected services    : customers-service, vets-service, visits-service, api-gateway
+  action               : PAGE_ONCALL
+  narrative            : ...database is unreachable...
+────────────────────────────────────────────────────────────────────────
 ```
 
 **Key talking points:**
 - *"A DB outage doesn't just spike existing errors — it creates brand new error signatures that have never appeared before."*
 - *"The framework fires on first occurrence. No threshold to set, no baseline rate to exceed."*
 - *"The cascade is visible: DB down → CannotCreateTransactionException in customers-service → 500 in api-gateway → 503 health checks across all DB-dependent services."*
+- *"Claude correctly identifies the shared database as the root cause from the error pattern alone — no metric thresholds triggered."*
 
 ### Step 4 — Restore
 ```bash
 k "kubectl scale deployment petclinic-db --replicas=1"
 
 # Re-learn clean baseline after demo
-python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 10
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
 ```
 
 ---
