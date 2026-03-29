@@ -26,7 +26,7 @@ k "kubectl get pods --no-headers | awk '{print \$1, \$3}'"
 
 ### Verify baseline is clean (0 anomalies)
 ```bash
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 2
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
 
@@ -42,7 +42,7 @@ tail -f data/alerts.log
 **Story:** *"vets-service goes down. The framework detects the structural absence
 from traces and calls Claude (via AWS Bedrock) to reason about it — producing an
 INCIDENT verdict with root cause and recommended action, written to a log file in
-under 2 minutes."*
+under 3 minutes."*
 
 ### Step 1 — Clear the alert log
 ```bash
@@ -54,13 +54,13 @@ cat /dev/null > data/alerts.log
 k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 3 — Wait 2 minutes
-The loadgen hits the vets endpoint every ~5 seconds. After 2 minutes the 2-minute
+### Step 3 — Wait 3 minutes
+The loadgen hits the vets endpoint every ~5 seconds. After 3 minutes the 3-minute
 watch window will contain only post-failure traces.
 
 ### Step 4 — Run detection + triage (one command)
 ```bash
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 2 --json \
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -130,7 +130,7 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 - *"No alert rules. No thresholds. The framework learned the normal call graph from traffic — api-gateway always calls vets-service on this path — and detected when that stopped."*
 - *"The detection uses structural trace analysis: the span for vets-service is missing from a path where it always appeared."*
 - *"Claude reads exactly what was detected — one clean anomaly — and reasons about it: INCIDENT, HIGH confidence, PAGE_ONCALL."*
-- *"Total time from kill to triage: 2 minutes."*
+- *"Total time from kill to triage: 3 minutes."*
 
 ### Step 5 — Restore
 ```bash
@@ -145,7 +145,7 @@ k "kubectl scale deployment vets-service --replicas=1"
 LEARN  →  Sample 200 traces from live traffic
           Build fingerprints: "api-gateway always calls vets-service on GET /vets"
 
-WATCH  →  Sample 200 traces from the last 2 minutes
+WATCH  →  Sample 200 traces from the last 3 minutes
           If a known root_op has zero traces → MISSING_SERVICE anomaly
           Output as JSON
 
@@ -156,7 +156,7 @@ TRIAGE →  Claude reads the JSON anomaly list
 
 One command runs WATCH + TRIAGE:
 ```bash
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 2 --json \
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
 ```
 
