@@ -301,6 +301,70 @@ The `agents/` directory contains 14 single-purpose scripts built before `agent.p
 
 ---
 
+---
+
+## Demos
+
+Live demos tested against the `petclinicmbtest` environment (Spring PetClinic on k3d + Splunk OTel).
+
+### Prerequisites (run once before any demo)
+```bash
+cd /Users/mbui/Documents/o11y-behaviorbaseline
+source .env
+
+# AWS credentials for Bedrock (required for Demo 7 — AI triage)
+source /tmp/aws_exports.sh
+
+# SSH alias for cluster commands
+alias k='sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@18.208.249.178'
+```
+
+### Splunk O11y URLs
+- **APM Service Map**: https://app.us1.signalfx.com/#/apm?environments=petclinicmbtest
+- **Behavioral Baseline Dashboard**: https://app.us1.signalfx.com/#/dashboard/HERM9jxA1po
+
+---
+
+### Demo 0: Context Setting — Framework in Steady State
+
+**Story:** *"This is what the framework looks like before we break anything. Every component is autonomous — no manual alerting rules, no hardcoded thresholds."*
+
+```bash
+# What environments are provisioned and their health
+python3 onboard.py --show-state
+
+# 6 known call patterns learned from real traffic
+python3 core/trace_fingerprint.py --environment petclinicmbtest show
+
+# Known error signatures
+python3 core/error_fingerprint.py --environment petclinicmbtest show
+
+# Cron jobs managing everything autonomously
+crontab -l | grep behavioral
+
+# Confirm 0 anomalies right now
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+```
+
+**Expected output (trace show):**
+```
+Baseline (environment 'petclinicmbtest'): 6 fingerprints
+  Services: [api-gateway, customers-service, discovery-server, vets-service, visits-service, ...]
+
+  api-gateway:GET /api/gateway/owners/{ownerId}  (1 pattern)
+  api-gateway:GET customers-service              (3 patterns)
+  api-gateway:GET vets-service                   (1 pattern)
+  api-gateway:PUT customers-service              (1 pattern)
+```
+
+**Key talking points:**
+- *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
+- *"6 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"8 cron jobs per environment run autonomously — trace watch, error watch, correlate, dedup every 5 minutes; relearn daily."*
+- *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
+
+---
+
 ## Limitations
 
 - **Auto-promotion lag**: New patterns after a deployment will alert for up to `AUTO_PROMOTE_THRESHOLD × cron_interval` minutes. Use `promote` immediately after a known deployment to skip the wait.
