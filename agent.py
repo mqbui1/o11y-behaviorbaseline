@@ -79,16 +79,23 @@ Respond ONLY with valid JSON matching this schema:
 }
 
 Anomaly type meanings:
-  MISSING_SERVICE   — a service that normally appears in traces is completely absent.
-                      Most likely cause: the service is down or unreachable.
-  NEW_FINGERPRINT   — an execution path was seen that wasn't in the baseline.
-                      Could be a new code path, a deployment, or a transient issue.
-  NEW_SERVICE       — a new service appeared in traces that wasn't there at baseline time.
-  SPAN_COUNT_SPIKE  — a trace has far more spans than usual (extra hops, retry storms).
+  MISSING_SERVICE        — a service that normally appears in traces is completely absent.
+                           Most likely cause: the service is down or unreachable.
+  NEW_FINGERPRINT        — an execution path was seen that wasn't in the baseline.
+                           Could be a new code path, a deployment, or a transient issue.
+  NEW_SERVICE            — a new service appeared in traces that wasn't there at baseline time.
+  SPAN_COUNT_SPIKE       — a trace has far more spans than usual (extra hops, retry storms).
+  NEW_ERROR_SIGNATURE    — an error type/operation combination never seen before just appeared.
+                           Most likely cause: a new failure mode — downstream outage, bad deploy, or new code path throwing.
+  SIGNATURE_VANISHED     — a previously dominant error signature disappeared entirely.
+                           Could mean the underlying issue resolved, or something worse replaced it.
+  SIGNATURE_SPIKE        — a known error signature is occurring at much higher rate than baseline.
 
 Severity guidelines:
-  INCIDENT  — a service is completely missing (MISSING_SERVICE) with HIGH confidence
-  DEGRADED  — anomalies present but uncertain impact
+  INCIDENT  — a service is completely missing (MISSING_SERVICE) with HIGH confidence,
+              or multiple NEW_ERROR_SIGNATUREs across several services simultaneously
+              (indicates a shared dependency like a database is down)
+  DEGRADED  — one or two NEW_ERROR_SIGNATUREs on a single service, or SIGNATURE_SPIKE
   OK        — no anomalies or low-confidence noise
 
 Only recommend PAGE_ONCALL for INCIDENT severity with HIGH confidence.
@@ -161,7 +168,29 @@ def act(plan: dict, watch_result: dict, env: str, dry_run: bool = False) -> None
         print("\n    (dry-run — skipping alerts.log write)")
         return
 
-    # Build missing_services summary from raw anomaly list
+    # Write one DETECTION entry per anomaly
+    for a in watch_result.get("anomalies", []):
+        atype = a.get("anomaly_type", "")
+        fields: dict = {
+            "anomaly type": atype,
+            "environment":  env,
+            "service":      a.get("service", a.get("root_op", "")),
+            "message":      a.get("message", ""),
+            "detail":       a.get("detail", ""),
+        }
+        if a.get("trace_id"):
+            fields["trace id"] = a["trace_id"]
+        if atype == "MISSING_SERVICE":
+            fields["root op"] = a.get("root_op", "")
+            svcs = a.get("missing_services") or a.get("services_in_trace", [])
+            fields["services in trace"] = ", ".join(svcs) if isinstance(svcs, list) else svcs
+        elif atype in ("NEW_ERROR_SIGNATURE", "SIGNATURE_VANISHED", "SIGNATURE_SPIKE"):
+            fields["error type"] = a.get("error_type", "")
+            fields["operation"]  = a.get("operation", "")
+            fields["call path"]  = a.get("call_path", "")
+        collect.log_alert("DETECTION", fields)
+
+    # Build missing_services summary for triage entry
     missing_lines = []
     for a in watch_result.get("anomalies", []):
         if a.get("anomaly_type") == "MISSING_SERVICE":
