@@ -334,16 +334,26 @@ def correlate(events: list[dict],
         environment = svc_events[0].get("environment", "all")
 
         # ── Deployment correlation ────────────────────────────────────────────
-        # Check if a deployment event for this service exists within the
-        # deployment correlation window relative to the earliest anomaly.
+        # Check if a deployment event exists for this service OR any affected
+        # service mentioned in the anomaly events (e.g. a deployment for
+        # vets-service that surfaces as MISSING_SERVICE on api-gateway).
         deployment_match: dict | None = None
         earliest_ms = min(timestamps) if timestamps else 0
         window_ms   = DEPLOYMENT_CORRELATION_WINDOW_MINUTES * 60 * 1000
-        for d in deploy_by_service.get(service, []):
-            delta_ms = abs(d["timestamp"] - earliest_ms)
-            if delta_ms <= window_ms:
-                deployment_match = d
-                break  # use the first (closest) match
+        # Collect all services mentioned in anomaly event messages
+        candidate_services = {service}
+        for deployed_svc in deploy_by_service:
+            for e in svc_events:
+                if deployed_svc in e.get("message", ""):
+                    candidate_services.add(deployed_svc)
+        for candidate in candidate_services:
+            for d in deploy_by_service.get(candidate, []):
+                delta_ms = abs(d["timestamp"] - earliest_ms)
+                if delta_ms <= window_ms:
+                    deployment_match = d
+                    break
+            if deployment_match:
+                break
 
         if deployment_match:
             # Downgrade severity — change is likely intentional
