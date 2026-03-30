@@ -153,9 +153,18 @@ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-m
 ```bash
 k "kubectl scale deployment petclinic-db --replicas=1"
 
-# Re-learn clean baseline after demo
+# Wait for DB to come up and services to reconnect (~30s)
+k "kubectl rollout status deployment/petclinic-db --timeout=60s"
+
+# Verify services are responding again
+k "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-gateway:82/api/vet/vets --max-time 8 | head -c 50"
+# Expected: JSON list of vets (not 404 or timeout)
+
+# Re-learn clean error baseline after DB recovery
 python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
 ```
+
+> **Critical:** Services (customers-service, visits-service) take ~30s to reconnect to the DB after it comes back. Don't start the next demo until the curl above returns data. If traces are missing from subsequent learn runs, regenerate traffic and relearn (see Restore/Reset section).
 
 ---
 
@@ -342,6 +351,96 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 ### Step 4 — Restore
 ```bash
 k "kubectl scale deployment vets-service --replicas=1"
+```
+
+---
+
+## Demo 4: Correlated Anomaly — Two Tiers Fire Simultaneously
+
+**Story:** *"Both vets-service AND the database go down at the same time. The trace tier sees MISSING_SERVICE across multiple paths. The error tier sees new CannotCreateTransactionException signatures. When both tiers fire on the same service simultaneously, `correlate.py` emits a high-confidence TIER2_TIER3 correlated event — turning noisy individual signals into a single actionable alert."*
+
+### Prerequisites
+```bash
+# Clear alert log
+cat /dev/null > data/alerts.log
+
+# Reset error baseline to 0
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
+python3 core/error_fingerprint.py --environment petclinicmbtest show
+# Expected: 0 signatures
+
+# Verify 0 trace anomalies
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+# Expected: "All trace paths match baseline"
+```
+
+### Step 1 — Kill both vets-service and petclinic-db simultaneously
+```bash
+k "kubectl scale deployment vets-service --replicas=0 && kubectl scale deployment petclinic-db --replicas=0"
+```
+
+### Step 2 — Wait 3 minutes
+The loadgen hits both vets and owner/pet endpoints continuously. After 3 minutes the watch window will contain:
+- Trace tier: MISSING_SERVICE for vets-service and owner detail paths (DB down = no traces completing)
+- Error tier: CannotCreateTransactionException from customers-service on every DB call
+
+### Step 3 — Run detection + triage (combined tiers)
+```bash
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
+  | python3 agent.py --environment petclinicmbtest
+```
+
+**Expected terminal output:**
+```
+[agent] env=petclinicmbtest | 9 anomaly(s) from watch
+  Reasoning with Claude...
+
+[!!] INCIDENT — The customers-service database is unreachable, causing transaction failures
+    and cascading 500 errors through the api-gateway, while multiple expected trace paths
+    are completely silent.
+    Root cause: The database backing customers-service is down — CannotCreateTransactionException
+    on OwnerRepository.findAll indicates Spring cannot open a DB transaction. This explains
+    why traces for PUT/GET owner and vets-service routes are all silent.
+    Confidence: HIGH | Affected: customers-service, api-gateway, vets-service, visits-service
+    Recommended action: PAGE_ONCALL
+
+    [TRIAGE SUMMARY] written to alerts.log
+    [PAGE_ONCALL] event emitted to Splunk
+```
+
+### Step 3b — Run correlate.py to see the TIER2_TIER3 event
+```bash
+python3 core/correlate.py --environment petclinicmbtest --window-minutes 15
+```
+
+**Expected output:**
+```
+[correlate] Found 62 anomaly events across 2 tiers
+  Found 1 correlated anomaly group(s):
+
+  [Major] TIER2_TIER3 — api-gateway
+    Tiers:         tier2, tier3
+    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE, NEW_FINGERPRINT, SIGNATURE_VANISHED
+    Events:        28 over 659s
+    - No traces for 'api-gateway:GET customers-service' — expected service(s) absent
+    - No traces for 'api-gateway:GET vets-service' — expected service(s) absent
+    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' — expected service(s) absent
+```
+
+**Key talking points:**
+- *"Tier 2 (trace) fires alone: a new service going down could be a canary deploy. Error tier firing alone: a spike on one service could be noise. But both firing on the same service simultaneously? That's a real incident."*
+- *"correlate.py reads Splunk custom events directly — it works even when agent.py isn't running. It's the persistent cross-tier join layer."*
+- *"9 individual anomalies collapsed into 1 TIER2_TIER3 correlated event at [Major] severity. One page instead of 9."*
+- *"Claude sees the full picture: missing traces AND CannotCreateTransactionException together → unambiguously points to the database."*
+
+### Step 4 — Restore
+```bash
+k "kubectl scale deployment vets-service petclinic-db --replicas=1"
+k "kubectl rollout status deployment/vets-service deployment/petclinic-db --timeout=90s"
+
+# Wait ~30s for services to reconnect, then relearn
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
 ```
 
 ---
