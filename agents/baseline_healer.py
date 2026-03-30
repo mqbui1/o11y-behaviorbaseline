@@ -44,6 +44,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,9 @@ RATE_WINDOW_MINUTES = int(os.environ.get("HEALER_RATE_WINDOW_MINUTES", "10"))
 
 # Minimum traces needed in a window to be scoreable
 MIN_TRACES_FOR_SCORING = int(os.environ.get("HEALER_MIN_TRACES", "10"))
+
+# Parallel workers for trace fetching within a scoring window
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
 
 # Script paths
 _SCRIPT_DIR = Path(__file__).parent
@@ -276,7 +280,7 @@ def score_window(start_ms: int, end_ms: int, environment: str | None,
                 "trace_count": trace_count, "error_rate": 1.0,
                 "diversity": 0, "score": 0.0, "scoreable": False}
 
-    # Fetch full spans for a subset to measure error rate
+    # Fetch full spans for a subset to measure error rate — parallel
     sample_ids = [
         e.get("traceId") or e.get("id", "")
         for e in examples[:30]
@@ -285,10 +289,10 @@ def score_window(start_ms: int, end_ms: int, environment: str | None,
     error_count = 0
     unique_paths: set[str] = set()
 
-    for tid in sample_ids:
+    def _score_trace(tid: str) -> tuple[bool, str]:
         trace = _get_trace_full(tid)
         if not trace:
-            continue
+            return False, ""
         spans = trace.get("spans", [])
         has_error = False
         path_sigs = []
@@ -299,10 +303,14 @@ def score_window(start_ms: int, end_ms: int, environment: str | None,
                     or str(tags.get("http.status_code", "200")).startswith(("4", "5"))):
                 has_error = True
             path_sigs.append(f"{span.get('serviceName')}:{span.get('operationName')}")
-        if has_error:
-            error_count += 1
-        if path_sigs:
-            unique_paths.add("|".join(sorted(path_sigs)))
+        return has_error, "|".join(sorted(path_sigs)) if path_sigs else ""
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        for has_error, path_sig in pool.map(_score_trace, sample_ids):
+            if has_error:
+                error_count += 1
+            if path_sig:
+                unique_paths.add(path_sig)
 
     sample_size = len(sample_ids)
     error_rate  = error_count / sample_size if sample_size else 1.0
@@ -336,15 +344,20 @@ def pick_best_window(incident_start_ms: int,
     Score all CANDIDATE_WINDOWS relative to the incident start time.
     Returns the highest-scoring scoreable window, or None if none qualify.
     """
-    print(f"  [healer] Scoring {len(CANDIDATE_WINDOWS)} candidate windows...")
+    print(f"  [healer] Scoring {len(CANDIDATE_WINDOWS)} candidate windows in parallel...")
     scored = []
-    for offset_min, duration_min in CANDIDATE_WINDOWS:
+
+    def _score_one(args: tuple) -> dict:
+        offset_min, duration_min = args
         end_ms   = incident_start_ms - offset_min * 60 * 1000
         start_ms = end_ms - duration_min * 60 * 1000
         label    = f"-{offset_min}m to -{offset_min + duration_min}m"
-        result   = score_window(start_ms, end_ms, environment, label)
-        if result["scoreable"]:
-            scored.append(result)
+        return score_window(start_ms, end_ms, environment, label)
+
+    with ThreadPoolExecutor(max_workers=len(CANDIDATE_WINDOWS)) as pool:
+        for result in pool.map(_score_one, CANDIDATE_WINDOWS):
+            if result["scoreable"]:
+                scored.append(result)
 
     if not scored:
         print("  [healer] No scoreable windows found — cannot auto-heal.")
