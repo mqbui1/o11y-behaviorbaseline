@@ -1,6 +1,6 @@
 # Behavioral Baseline — Anomaly Detection for Splunk Observability
 
-Detects **structural and behavioral changes** in distributed systems instrumented with Splunk Observability APM. Goes beyond metric thresholds to catch things that standard alerting misses:
+**Augments Splunk APM AutoDetect** with structural and behavioral detection that metric thresholds cannot catch. Splunk's built-in AutoDetect already covers error rate, latency, and request rate anomalies for every APM-enabled service. This framework adds a second layer on top:
 
 - A service that has never called your database suddenly does
 - A known DB caller goes completely silent
@@ -110,19 +110,18 @@ Action types: `NO_ACTION`, `SUPPRESS_ANOMALY`, `RELEARN_BASELINE`, `EMIT_EVENT`,
 
 ## Detection tiers
 
-The `core/` scripts handle detection. They run on cron (managed by `onboard.py`) and emit custom events to Splunk.
-
-| Tier | Script | What it detects | How |
+| Tier | Source | What it detects | How |
 |------|--------|----------------|-----|
-| 1b | `core/provision_detectors.py` | Request rate spike on ingress services | APM AutoDetectCustomization |
+| 1b | Splunk APM AutoDetect _(native)_ | Request rate spike on ingress services | Built-in — fires for all APM environments automatically |
+| 3  | Splunk APM AutoDetect _(native)_ | Error rate spike per service | Built-in — fires for all APM environments automatically |
+| 4  | Splunk APM AutoDetect _(native)_ | p99 latency drift per service | Built-in — fires for all APM environments automatically |
 | 2  | `core/trace_fingerprint.py`  | New/changed execution paths, missing services | SHA-256 of ordered parent→child span edge sequence |
-| 3  | `core/error_fingerprint.py`  | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
-| 3  | `core/provision_detectors.py` | Error rate spike per service | APM AutoDetectCustomization |
-| 4  | `core/provision_detectors.py` | p99 latency drift per service | APM AutoDetectCustomization |
+| 3+ | `core/error_fingerprint.py`  | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
 | C  | `core/correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 2/3 events by service within a time window |
 
-**Tiers 1b, 3, 4** run as persistent Splunk detectors (always-on SignalFlow).
-**Tiers 2, 3, and C** run as scheduled scripts on cron.
+**Tiers 1b, 3, and 4** are native Splunk APM AutoDetect — no provisioning required; they fire automatically for every APM-enabled environment.
+
+**Tiers 2, 3+, and C** are this framework's behavioral layer — structural drift detection that AutoDetect cannot provide. They run as scheduled scripts on cron.
 
 ---
 
@@ -169,9 +168,10 @@ python onboard.py --teardown --environment petclinicmbtest
 
 For each new environment, `onboard.py` creates:
 
+> **Note:** Error rate, latency, and request rate alerts are already covered by Splunk APM AutoDetect for every APM-enabled environment. No detector provisioning is required.
+
 | Output | Location | Description |
 |--------|----------|-------------|
-| SignalFlow detectors | Splunk Alerts & Detectors UI | Error rate + latency + request rate per service |
 | Trace baseline | `data/baseline.<env>.json` | Structural call path fingerprints from live traffic |
 | Error baseline | `data/error_baseline.<env>.json` | Known error signatures from live traffic |
 | Dashboard | Splunk Dashboards | Behavioral Baseline dashboard linked to env |
