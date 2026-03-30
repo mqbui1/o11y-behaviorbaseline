@@ -165,6 +165,57 @@ Teardown removes all per-environment entries:
 python onboard.py --teardown --environment petclinicmbtest
 ```
 
+### What onboarding produces
+
+For each new environment, `onboard.py` creates:
+
+| Output | Location | Description |
+|--------|----------|-------------|
+| SignalFlow detectors | Splunk Alerts & Detectors UI | Error rate + latency + request rate per service |
+| Trace baseline | `data/baseline.<env>.json` | Structural call path fingerprints from live traffic |
+| Error baseline | `data/error_baseline.<env>.json` | Known error signatures from live traffic |
+| Dashboard | Splunk Dashboards | Behavioral Baseline dashboard linked to env |
+| Cron jobs | Local crontab | Watch every 5m, learn daily, correlate every 5m |
+| Runbook | `agents/RUNBOOK.<env>.md` | Claude-generated incident runbook (see below) |
+
+### Auto-generated runbook
+
+When a new environment is onboarded, `runbook_generator.py` calls Claude (AWS Bedrock) with the live APM topology and produces a tailored incident runbook at `agents/RUNBOOK.<env>.md`. It includes:
+
+- **Service map** — ASCII dependency graph drawn from actual trace data
+- **Blast radius ranking** — shared dependencies sorted by number of callers
+- **First 10 minutes triage checklist** — top-down investigation order (ingress → shared deps → domain services)
+- **Per-service reference** — role, upstream/downstream callers, known error types, investigation commands
+- **Common failure scenarios** — DB down, discovery down, bad deploy patterns specific to this topology
+- **Copy-paste commands** — ready-to-run triage commands for each service
+
+Example for a 6-service Spring PetClinic stack:
+
+```
+## 2. First 10 Minutes: Triage Checklist
+
+### Step 1 — Run Global Triage (0:00–1:00)
+python3 triage_agent.py --environment petclinicmbtest --window-minutes 60
+
+### Step 2 — Check api-gateway (1:00–2:00)
+api-gateway is the single ingress. If it is erroring, all users are affected.
+
+### Step 3 — Check Shared Dependencies (2:00–5:00)
+If multiple domain services are failing simultaneously, check shared deps first:
+  discovery-server (4 callers — highest blast radius)
+  mysql:petclinic  (3 callers — DB outage pattern)
+
+### Step 4 — Check Domain Services (5:00–8:00)
+python3 triage_agent.py --environment petclinicmbtest --service customers-service
+python3 triage_agent.py --environment petclinicmbtest --service vets-service
+```
+
+Regenerate after topology changes:
+
+```bash
+python3 agents/runbook_generator.py --environment petclinicmbtest --force
+```
+
 ---
 
 ## Deployment-aware correlation
