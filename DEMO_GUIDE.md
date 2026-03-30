@@ -445,6 +445,84 @@ python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --
 
 ---
 
+## Demo 5: Deploy-Correlated Severity Downgrade
+
+**Story:** *"A deploy of vets-service is announced via `notify_deployment.py`. The deploy is bad — vets-service crashes. Anomalies fire: trace tier detects MISSING_SERVICE, error tier detects 503s. On its own, agent.py calls it INCIDENT + PAGE_ONCALL. But `correlate.py` finds the deployment event in its window and downgrades severity from Major → Minor, annotating it as `[deployment-correlated]`. The on-call gets context: this looks like a deploy regression, not a random outage."*
+
+### Prerequisites
+```bash
+# Clear alert log and reset error baseline
+cat /dev/null > data/alerts.log
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
+
+# Verify 0 anomalies
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+# Expected: "All trace paths match baseline"
+```
+
+### Step 1 — Announce the deployment, then immediately kill vets-service
+```bash
+# Notify the framework that a deploy is happening
+python3 notify_deployment.py --service vets-service --environment petclinicmbtest \
+  --version v2.1.0 --description "Update vet specialties endpoint"
+
+# Simulate bad deploy (service crashes on startup)
+k "kubectl scale deployment vets-service --replicas=0"
+```
+
+### Step 2 — Wait 3 minutes
+
+### Step 3 — Run detection + triage (agent sees INCIDENT, doesn't know about deploy)
+```bash
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
+  | python3 agent.py --environment petclinicmbtest
+```
+
+**Expected terminal output:**
+```
+[agent] env=petclinicmbtest | 2 anomaly(s) from watch
+  Reasoning with Claude...
+
+[!!] INCIDENT — vets-service is completely unreachable, causing the api-gateway to
+    return 503 errors on all GET vets-service requests.
+    Root cause: vets-service is down or unreachable — absent from all traces and
+    api-gateway is receiving 503s with no downstream spans recorded.
+    Confidence: HIGH | Affected: vets-service, api-gateway
+    Recommended action: PAGE_ONCALL
+```
+
+### Step 3b — Run correlate.py (sees the deployment event → downgrades severity)
+```bash
+python3 core/correlate.py --environment petclinicmbtest --window-minutes 15
+```
+
+**Expected output:**
+```
+[correlate] Found 1 deployment event(s) in last 60m:
+    vets-service  version=v2.1.0  deployer=n/a
+
+  Found 1 correlated anomaly group(s):
+
+  [Minor] TIER2_TIER3 — api-gateway  [deployment-correlated]
+    Tiers:         tier2, tier3
+    Deployment:    version=v2.1.0  "Update vet specialties endpoint"
+    - No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent
+```
+
+**Key talking points:**
+- *"agent.py fires INCIDENT + PAGE_ONCALL because it only sees signals — it doesn't know about the deployment."*
+- *"correlate.py is the deployment-aware layer. It queries Splunk for `deployment.started` events emitted by your CI/CD pipeline and matches them against anomaly timing."*
+- *"Severity downgrade: Major → Minor. The on-call still gets notified — but at lower urgency with the context 'this is correlated to the v2.1.0 deploy of vets-service'."*
+- *"The key insight: you call `notify_deployment.py` from your CI/CD pipeline once. From that point on, every anomaly that fires within 60 minutes of a deploy gets automatically annotated and downgraded. Zero manual work per deployment."*
+
+### Step 4 — Restore
+```bash
+k "kubectl scale deployment vets-service --replicas=1"
+```
+
+---
+
 ## How it works (30-second explanation)
 
 ```
