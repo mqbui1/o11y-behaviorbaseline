@@ -722,77 +722,169 @@ def cmd_watch(window_minutes: int = 10,
             all_trace_sigs.append((tid, sigs))
 
     # Second pass: classify anomalies now that watch_counts is fully populated
+    # Group NEW_ERROR_SIGNATURE anomalies by (service, error_type) so that a
+    # single root exception type propagating through multiple operations and call
+    # paths fires ONE detection entry instead of N. SIGNATURE_SPIKE alerts are
+    # not grouped — each spike is a distinct rate signal.
     new_sigs_seen: set[str] = set()
+    # grouped_new: key=(service, error_type) → best anomaly+sig+trace_id+operations
+    grouped_new: dict[tuple, dict] = {}
+    spike_anomalies: list[tuple[str, dict, dict]] = []  # (trace_id, anomaly, sig)
+
     for trace_id, sigs in all_trace_sigs:
         for sig in sigs:
             if sig["hash"] in alerted_hashes:
                 continue
             anomaly = classify_signature(sig, baseline, watch_counts)
-            if anomaly:
-                alerted_hashes.add(sig["hash"])
-                if anomaly["type"] == "NEW_ERROR_SIGNATURE":
-                    new_sigs_seen.add(sig["hash"])
-                    # Upsert a pending-promotion record
-                    stored_sigs = baseline.setdefault("signatures", {})
-                    if sig["hash"] not in stored_sigs:
-                        stored_sigs[sig["hash"]] = {
-                            "hash":          sig["hash"],
-                            "service":       sig["service"],
-                            "error_type":    sig["error_type"],
-                            "http_status":   sig["http_status"],
-                            "db_system":     sig["db_system"],
-                            "operation":     sig["operation"],
-                            "call_path":     sig["call_path"],
-                            "occurrences":   1,
-                            "watch_hits":    0,
-                            "auto_promoted": False,
-                            "promoted_at":   None,
-                            "first_seen":    datetime.now(timezone.utc).isoformat(),
-                        }
-                anomalies_found += 1
-                anomaly_list.append({
-                    "anomaly_type": anomaly["type"],
-                    "service":      sig["service"],
-                    "message":      anomaly["message"],
-                    "detail":       anomaly["detail"],
-                    "trace_id":     trace_id,
-                    "error_type":   sig["error_type"],
-                    "operation":    sig["operation"],
-                    "call_path":    sig["call_path"],
-                })
-                print(f"\n  ANOMALY DETECTED")
-                print(f"    Type:    {anomaly['type']}")
-                print(f"    Message: {anomaly['message']}")
-                print(f"    Detail:  {anomaly['detail']}")
-                print(f"    TraceID: {trace_id}")
-                try:
-                    dims = {
-                        "anomaly_type":  anomaly["type"],
+            if not anomaly:
+                continue
+            alerted_hashes.add(sig["hash"])
+            if anomaly["type"] == "NEW_ERROR_SIGNATURE":
+                new_sigs_seen.add(sig["hash"])
+                # Upsert a pending-promotion record
+                stored_sigs = baseline.setdefault("signatures", {})
+                if sig["hash"] not in stored_sigs:
+                    stored_sigs[sig["hash"]] = {
+                        "hash":          sig["hash"],
                         "service":       sig["service"],
                         "error_type":    sig["error_type"],
-                        "sig_hash":      sig["hash"],
-                        "sf_environment": environment or "all",
+                        "http_status":   sig["http_status"],
+                        "db_system":     sig["db_system"],
+                        "operation":     sig["operation"],
+                        "call_path":     sig["call_path"],
+                        "occurrences":   1,
+                        "watch_hits":    0,
+                        "auto_promoted": False,
+                        "promoted_at":   None,
+                        "first_seen":    datetime.now(timezone.utc).isoformat(),
                     }
-                    send_custom_event(
-                        event_type="error.signature.drift",
-                        dimensions=dims,
-                        properties={
-                            "message":       anomaly["message"],
-                            "detail":        anomaly["detail"],
-                            "trace_id":      trace_id,
-                            "operation":     sig["operation"],
-                            "call_path":     sig["call_path"],
-                            "http_status":   sig["http_status"],
-                            "db_system":     sig["db_system"],
-                            "sf_environment": environment or "all",
-                            "detector_tier": "tier3",
-                            "detector_name": "error-signature-fingerprint",
-                        },
-                    )
-                    send_metric("behavioral_baseline.anomaly.count", 1, dims)
-                    print(f"    Event sent (error.signature.drift)")
-                except Exception as e:
-                    print(f"    Failed to send event: {e}", file=sys.stderr)
+                group_key = (sig["service"], sig["error_type"])
+                if group_key not in grouped_new:
+                    grouped_new[group_key] = {
+                        "anomaly":    anomaly,
+                        "sig":        sig,
+                        "trace_id":   trace_id,
+                        "operations": [],
+                        "call_paths": [],
+                    }
+                if sig["operation"] not in grouped_new[group_key]["operations"]:
+                    grouped_new[group_key]["operations"].append(sig["operation"])
+                if sig["call_path"] and sig["call_path"] not in grouped_new[group_key]["call_paths"]:
+                    grouped_new[group_key]["call_paths"].append(sig["call_path"])
+            else:
+                spike_anomalies.append((trace_id, anomaly, sig))
+
+    # Emit one alert per unique (service, error_type) group
+    for group_key, entry in grouped_new.items():
+        anomaly    = entry["anomaly"]
+        sig        = entry["sig"]
+        trace_id   = entry["trace_id"]
+        operations = entry["operations"]
+        call_paths = entry["call_paths"]
+        # Update message to reflect all affected operations if more than one
+        message = anomaly["message"]
+        if len(operations) > 1:
+            ops_str = ", ".join(operations[:3])
+            if len(operations) > 3:
+                ops_str += f" (+{len(operations)-3} more)"
+            message = (f"New error signature in {sig['service']}: "
+                       f"{sig['error_type']} on {ops_str}")
+        anomalies_found += 1
+        anomaly_list.append({
+            "anomaly_type": anomaly["type"],
+            "service":      sig["service"],
+            "message":      message,
+            "detail":       anomaly["detail"],
+            "trace_id":     trace_id,
+            "error_type":   sig["error_type"],
+            "operation":    ", ".join(operations),
+            "call_path":    sig["call_path"],
+        })
+        print(f"\n  ANOMALY DETECTED")
+        print(f"    Type:    {anomaly['type']}")
+        print(f"    Message: {message}")
+        print(f"    Detail:  {anomaly['detail']}")
+        if len(operations) > 1:
+            print(f"    Ops:     {len(operations)} operation(s): {', '.join(operations[:3])}"
+                  + (f" ..." if len(operations) > 3 else ""))
+        if call_paths:
+            print(f"    Paths:   {len(call_paths)} call path(s)")
+        print(f"    TraceID: {trace_id}")
+        try:
+            dims = {
+                "anomaly_type":   anomaly["type"],
+                "service":        sig["service"],
+                "error_type":     sig["error_type"],
+                "sig_hash":       sig["hash"],
+                "sf_environment": environment or "all",
+            }
+            send_custom_event(
+                event_type="error.signature.drift",
+                dimensions=dims,
+                properties={
+                    "message":        anomaly["message"],
+                    "detail":         anomaly["detail"],
+                    "trace_id":       trace_id,
+                    "operation":      sig["operation"],
+                    "call_path":      sig["call_path"],
+                    "http_status":    sig["http_status"],
+                    "db_system":      sig["db_system"],
+                    "sf_environment": environment or "all",
+                    "detector_tier":  "tier3",
+                    "detector_name":  "error-signature-fingerprint",
+                },
+            )
+            send_metric("behavioral_baseline.anomaly.count", 1, dims)
+            print(f"    Event sent (error.signature.drift)")
+        except Exception as e:
+            print(f"    Failed to send event: {e}", file=sys.stderr)
+
+    # Emit spike anomalies (not grouped — each spike is distinct)
+    for trace_id, anomaly, sig in spike_anomalies:
+        anomalies_found += 1
+        anomaly_list.append({
+            "anomaly_type": anomaly["type"],
+            "service":      sig["service"],
+            "message":      anomaly["message"],
+            "detail":       anomaly["detail"],
+            "trace_id":     trace_id,
+            "error_type":   sig["error_type"],
+            "operation":    sig["operation"],
+            "call_path":    sig["call_path"],
+        })
+        print(f"\n  ANOMALY DETECTED")
+        print(f"    Type:    {anomaly['type']}")
+        print(f"    Message: {anomaly['message']}")
+        print(f"    Detail:  {anomaly['detail']}")
+        print(f"    TraceID: {trace_id}")
+        try:
+            dims = {
+                "anomaly_type":   anomaly["type"],
+                "service":        sig["service"],
+                "error_type":     sig["error_type"],
+                "sig_hash":       sig["hash"],
+                "sf_environment": environment or "all",
+            }
+            send_custom_event(
+                event_type="error.signature.drift",
+                dimensions=dims,
+                properties={
+                    "message":        anomaly["message"],
+                    "detail":         anomaly["detail"],
+                    "trace_id":       trace_id,
+                    "operation":      sig["operation"],
+                    "call_path":      sig["call_path"],
+                    "http_status":    sig["http_status"],
+                    "db_system":      sig["db_system"],
+                    "sf_environment": environment or "all",
+                    "detector_tier":  "tier3",
+                    "detector_name":  "error-signature-fingerprint",
+                },
+            )
+            send_metric("behavioral_baseline.anomaly.count", 1, dims)
+            print(f"    Event sent (error.signature.drift)")
+        except Exception as e:
+            print(f"    Failed to send event: {e}", file=sys.stderr)
 
     # Third pass: check for vanished dominant signatures
     vanished = check_vanished_signatures(
