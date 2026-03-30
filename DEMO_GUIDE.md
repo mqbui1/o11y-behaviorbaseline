@@ -620,6 +620,127 @@ python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --
 
 ---
 
+## Demo 7: Self-Healing — Auto-Promotion + Baseline Healer
+
+**Story:** *"A deploy of vets-service changes its trace structure. The new call path fires NEW_FINGERPRINT on the first watch run. After 2 consecutive clean runs the framework promotes it automatically — no human intervention, no alert fatigue. In the background, `baseline_healer.py` monitors anomaly event rates; when it detects a spike followed by a drop-to-zero, it scores pre-incident windows, picks the cleanest one, and re-learns the baseline autonomously."*
+
+### Prerequisites
+```bash
+cat /dev/null > data/alerts.log
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
+
+# Simulate a deploy: remove vets-service fingerprint from baseline
+# (represents a deployment that changed the call path)
+python3 -c "
+import json
+with open('data/baseline.petclinicmbtest.json') as f:
+    b = json.load(f)
+fps = b['fingerprints']
+removed = [h for h, info in fps.items() if info.get('root_op','').startswith('api-gateway:GET vets')]
+for h in removed: del fps[h]
+with open('data/baseline.petclinicmbtest.json', 'w') as f:
+    json.dump(b, f, indent=2)
+print(f'Removed {len(removed)} vets fingerprint(s) — simulating new deploy')
+"
+```
+
+### Part 1 — Auto-Promotion
+
+#### Watch run 1 — NEW_FINGERPRINT fires, watch_hits=1
+```bash
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+```
+
+**Expected output:**
+```
+  ANOMALY DETECTED
+    Type:    NEW_FINGERPRINT
+    Message: Unknown execution path for 'api-gateway:GET vets-service'
+    Detail:  Path: api-gateway:GET vets-service -> ... -> vets-service:VetRepository.findAll -> ...
+    TraceID: ae74792d29ba9822fd3e2c47cb1fa0bf
+    Event sent (trace.path.drift)
+
+  Checked 3 traces, 61 skipped, 1 anomalies detected
+```
+
+#### Watch run 2 — auto-promotes (watch_hits=2 ≥ threshold)
+```bash
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+```
+
+**Expected output:**
+```
+  ANOMALY DETECTED
+    Type:    NEW_FINGERPRINT
+    Message: Unknown execution path for 'api-gateway:GET vets-service'
+    ...
+
+  AUTO-PROMOTED: 31ddc9717bc4e16a... (seen 2 watch runs) root_op=api-gateway:GET vets-service
+  Baseline saved  (6 fingerprints)
+
+  Checked 24 traces, 176 skipped, 1 anomalies detected, 1 auto-promoted
+```
+
+#### Watch run 3 — completely silent
+```bash
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+```
+
+**Expected output:**
+```
+  Checked 26 traces, 174 skipped, 0 anomalies detected
+  All trace paths match baseline
+```
+
+### Part 2 — Baseline Healer (scoring demo)
+
+The healer runs autonomously in the background. Show the scoring logic directly:
+
+```bash
+python3 -c "
+import sys, time, calendar
+sys.path.insert(0, 'agents')
+from baseline_healer import pick_best_window, heal
+
+# Set incident_start_ms to when the outage began
+incident_start = int(time.time() * 1000) - 20 * 60 * 1000   # ~20 min ago
+best = pick_best_window(incident_start, 'petclinicmbtest')
+if best:
+    heal(incident_start, 'petclinicmbtest', best, dry_run=True)
+"
+```
+
+**Expected output:**
+```
+  [healer] Scoring 4 candidate windows...
+    -30m to -90m:    80 traces, error_rate=0.0%, diversity=7,  score=0.656
+    -60m to -120m:   80 traces, error_rate=0.0%, diversity=11, score=0.688  ← winner
+    -120m to -240m:  80 traces, error_rate=0.0%, diversity=7,  score=0.656
+    -240m to -360m:  80 traces, error_rate=0.0%, diversity=8,  score=0.664
+
+  [healer] Best window: -60m to -120m (score=0.688, error_rate=0.0%, diversity=11)
+
+  [healer] Healing baseline for 'petclinicmbtest' using window -60m to -120m...
+    $ python3 trace_fingerprint.py --environment petclinicmbtest learn \
+        --window-minutes 60 --window-offset-minutes 85 --reset
+    $ python3 error_fingerprint.py --environment petclinicmbtest learn \
+        --window-minutes 60 --window-offset-minutes 85 --reset
+```
+
+**Key talking points:**
+- *"No one configured a threshold for 'how many times to see a new pattern before accepting it'. 2 (or 5 in production) is the default — tunable via `AUTO_PROMOTE_THRESHOLD`."*
+- *"The framework learns the new normal on its own. After a deployment, new trace paths stop firing within 25 minutes at the default setting. Zero alert fatigue from known-good deploys."*
+- *"The healer scores candidate windows by two metrics: error rate (lower is cleaner) and trace diversity (higher means richer coverage). It picks the window most likely to produce a good baseline — not just the most recent one."*
+- *"In production, the healer runs on a 6-hour cron (`0 */6 * * *`). It's stateless — just looks at the last 20 minutes of anomaly events vs the 20 minutes before that. If the rate spiked then dropped, it heals."*
+
+### Restore
+```bash
+# Relearn baseline to get vets fingerprint back properly
+python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 10
+```
+
+---
+
 ## How it works (30-second explanation)
 
 ```
