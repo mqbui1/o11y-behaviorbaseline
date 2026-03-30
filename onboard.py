@@ -448,12 +448,6 @@ def _run(script: str, args: list[str], dry_run: bool = False) -> bool:
     return True
 
 
-def provision_environment(env: str | None, dry_run: bool = False) -> bool:
-    """Run provision_detectors.py for a specific environment."""
-    args = ["--environment", env] if env else []
-    return _run("provision_detectors.py", args, dry_run=dry_run)
-
-
 def build_baseline(env: str | None, window_minutes: int = 120,
                    dry_run: bool = False) -> bool:
     """Run trace_fingerprint.py learn for a specific environment."""
@@ -473,11 +467,8 @@ def build_error_baseline(env: str | None, window_minutes: int = 120,
 
 
 def teardown_environment(env: str | None, dry_run: bool = False) -> bool:
-    """Run provision_detectors.py --teardown for a specific environment."""
-    args = ["--teardown"]
-    if env:
-        args += ["--environment", env]
-    return _run("provision_detectors.py", args, dry_run=dry_run)
+    """Stub — metric detectors are covered natively by Splunk AutoDetect."""
+    return True
 
 
 # ── Dashboard provisioning ─────────────────────────────────────────────────────
@@ -720,9 +711,10 @@ def run(
                 print(f"    [warn] Onboarding advisor failed: {e}",
                       file=sys.stderr)
 
-        # Provision detectors first (prerequisite), then run both baselines
-        # and create the dashboard concurrently.
-        ok_provision = provision_environment(env, dry_run=dry_run)
+        # Metric-based detection (error rate, latency, request rate) is covered
+        # natively by Splunk APM AutoDetect for all APM-enabled environments.
+        # This framework augments AutoDetect with structural/behavioral detection
+        # (trace path drift, error signature drift, cross-tier correlation).
 
         # Only create dashboard if one doesn't already exist for this env
         existing_dashboard_id = (state.get("environments", {})
@@ -757,7 +749,6 @@ def run(
             "env":               env,
             "label":             label,
             "action":            action,
-            "ok_provision":      ok_provision,
             "ok_baseline":       ok_baseline,
             "ok_error_baseline": ok_error_baseline,
             "dashboard_id":      dashboard_id,
@@ -781,24 +772,13 @@ def run(
     for r in results:
         if not dry_run:
             env_key = r["env"] or "__none__"
-            # Resolve services: prefer topology discovery result; fall back to
-            # what provision_detectors discovered (stored in state after first run).
             discovered_services = current_envs.get(r["env"], [])
-            if not discovered_services:
-                # Single-env mode: re-query topology to capture real service set
-                try:
-                    from core.provision_detectors import discover_topology
-                    topo = discover_topology(r["env"])
-                    discovered_services = topo.get("services", [])
-                except Exception:
-                    pass
             state.setdefault("environments", {})[env_key] = {
                 "services":                sorted(discovered_services),
                 "provisioned_at":          ts,
                 "baseline_built_at":       ts if r["ok_baseline"] else None,
                 "error_baseline_built_at": ts if r["ok_error_baseline"] else None,
                 "last_action":             r["action"],
-                "provision_ok":            r["ok_provision"],
                 "baseline_ok":             r["ok_baseline"],
                 "error_baseline_ok":       r["ok_error_baseline"],
                 "dashboard_id":            r["dashboard_id"],
@@ -806,7 +786,6 @@ def run(
             send_audit_event("behavioral_baseline.onboarded", {
                 "environment":        r["label"],
                 "action":             r["action"],
-                "provision_ok":       str(r["ok_provision"]),
                 "baseline_ok":        str(r["ok_baseline"]),
                 "error_baseline_ok":  str(r["ok_error_baseline"]),
             })
