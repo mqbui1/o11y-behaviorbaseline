@@ -298,10 +298,19 @@ def correlate(events: list[dict],
     for d in (deployments or []):
         deploy_by_service[d["service"]].append(d)
 
-    # Group anomaly events by service
+    # Group anomaly events by service.
+    # For MISSING_SERVICE tier2 events, also fan out to every affected service
+    # listed in props["services"] so that a tier3 error on e.g. customers-service
+    # joins the same group as a MISSING_SERVICE silent on api-gateway:PUT customers-service.
     by_service: dict[str, list[dict]] = defaultdict(list)
     for event in events:
         by_service[event["service"]].append(event)
+        if event.get("anomaly_type") == "MISSING_SERVICE":
+            raw_props = event.get("raw", {}).get("properties", {})
+            extra_svcs = [s.strip() for s in raw_props.get("services", "").split(",") if s.strip()]
+            for svc in extra_svcs:
+                if svc != event["service"]:
+                    by_service[svc].append(event)
 
     correlations = []
     for service, svc_events in by_service.items():
@@ -410,7 +419,7 @@ def send_correlated_event(corr: dict) -> None:
         "anomaly_types": ",".join(corr["anomaly_types"]),
         "event_count":   corr["event_count"],
         "time_span_s":   corr["time_span_s"],
-        "environment":   corr["environment"],
+        "environment":   corr.get("sf_environment") or corr.get("environment", "all"),
         "details":       " | ".join(corr["messages"][:5]),
         "detector_tier": "correlation",
         "detector_name": "cross-tier-correlator",

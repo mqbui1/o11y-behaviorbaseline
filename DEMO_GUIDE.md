@@ -525,6 +525,19 @@ k "kubectl scale deployment vets-service --replicas=1"
 # Clear alert log
 cat /dev/null > data/alerts.log
 
+# Strip any stale watch-promoted fingerprints (occurrences=1 noise from prior demos)
+python3 -c "
+import json, pathlib
+p = pathlib.Path('data/baseline.petclinicmbtest.json')
+d = json.loads(p.read_text())
+before = len(d['fingerprints'])
+d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
+                     if fp['occurrences'] >= 2 and fp['watch_hits'] == 0}
+after = len(d['fingerprints'])
+p.write_text(json.dumps(d, indent=2))
+print(f'Trace baseline: removed {before-after} stale entries, kept {after} clean fingerprints.')
+"
+
 # Reset error baseline to 0
 python3 -c "
 import json, pathlib, datetime
@@ -538,7 +551,7 @@ print('Error baseline wiped.')
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: 0 signatures
 
-# Verify 0 trace anomalies
+# Verify 0 trace anomalies (cluster must be fully healthy before this check)
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
@@ -548,10 +561,12 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 k "kubectl scale deployment vets-service --replicas=0 && kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 2 — Wait 90 seconds (countdown for audience)
-Two services down simultaneously means failures appear quickly. 90 seconds is enough.
+### Step 2 — Wait 3 minutes (countdown for audience)
+The watch window is 3 minutes. Pre-kill traces stay in the window for up to 3 minutes — running
+detection before the window clears means healthy vets-service traces are still visible and
+MISSING_SERVICE will not fire.
 ```bash
-for i in $(seq 90 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run detection now.                             "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run detection now.                             "
 ```
 The watch window will contain:
 - Trace tier: MISSING_SERVICE for vets-service and owner detail paths (DB down = no traces completing)
@@ -566,21 +581,28 @@ The watch window will contain:
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 9 anomaly(s) from watch
+[agent] env=petclinicmbtest | 6 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — The customers-service database is unreachable, causing transaction failures
-    and cascading 500 errors through the api-gateway, while multiple expected trace paths
-    are completely silent.
-    Root cause: The database backing customers-service is down — CannotCreateTransactionException
-    on OwnerRepository.findAll indicates Spring cannot open a DB transaction. This explains
-    why traces for PUT/GET owner and vets-service routes are all silent.
-    Confidence: HIGH | Affected: customers-service, api-gateway, vets-service, visits-service
+[!!] INCIDENT — Multiple services are unreachable and the customers-service is failing to
+    create database transactions, indicating a database outage affecting the entire petclinic stack.
+    Root cause: The database (likely MySQL/PostgreSQL) backing customers-service is down or
+    unreachable, causing CannotCreateTransactionException; this also explains why PUT/GET
+    operations to customers-service, vets-service, and visits-service have gone silent — all
+    depend on DB connectivity to serve requests.
+    Confidence: HIGH | Affected: api-gateway, customers-service, visits-service, vets-service
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
     [PAGE_ONCALL] event emitted to Splunk
 ```
+
+The 6 anomalies:
+- `NEW_FINGERPRINT` ×2 on `GET customers-service` — partial/truncated traces (DB call started but never completed)
+- `MISSING_SERVICE` — `api-gateway:GET vets-service` — vets-service pod down
+- `MISSING_SERVICE` — `api-gateway:GET /api/gateway/owners/{ownerId}` — owner detail path silent (visits-service DB-dependent)
+- `MISSING_SERVICE` — `api-gateway:PUT customers-service` — write path silent (can't open DB transaction)
+- `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` on `GET /owners, OwnerRepository.findAll`
 
 ### Step 3b — Run correlate.py to see the TIER2_TIER3 event
 ```bash
@@ -589,16 +611,22 @@ python3 core/correlate.py --environment petclinicmbtest --window-minutes 15
 
 **Expected output:**
 ```
-[correlate] Found 62 anomaly events across 2 tiers
+[correlate] Fetching anomaly + deployment events in parallel (environment 'petclinicmbtest')...
+  Found 16 anomaly events across 2 tiers
+    tier2: 15 event(s)
+    tier3: 1 event(s)
+
   Found 1 correlated anomaly group(s):
 
-  [Major] TIER2_TIER3 — api-gateway
+  [Major] TIER2_TIER3 — customers-service
     Tiers:         tier2, tier3
-    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE, NEW_FINGERPRINT, SIGNATURE_VANISHED
-    Events:        28 over 659s
-    - No traces for 'api-gateway:GET customers-service' — expected service(s) absent
-    - No traces for 'api-gateway:GET vets-service' — expected service(s) absent
-    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' — expected service(s) absent
+    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Events:        10 over 597s
+    - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
+    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent: ['api-gateway', 'customers-service', 'visits-service']
+    - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent: ['api-gateway', 'customers-service']
+
+  Event sent for customers-service (behavioral_baseline.correlated_anomaly)
 ```
 
 **Key talking points:**
@@ -676,12 +704,15 @@ for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d
 [agent] env=petclinicmbtest | 2 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — vets-service is completely unreachable, causing the api-gateway to
-    return 503 errors on all GET vets-service requests.
-    Root cause: vets-service is down or unreachable — absent from all traces and
-    api-gateway is receiving 503s with no downstream spans recorded.
+[!!] INCIDENT — The vets-service is completely unreachable, causing 503 errors at the
+    api-gateway for all GET vets-service requests.
+    Root cause: vets-service is down or unreachable — it is absent from all traces and
+    the api-gateway is returning 503s when attempting to call it.
     Confidence: HIGH | Affected: vets-service, api-gateway
     Recommended action: PAGE_ONCALL
+
+    [TRIAGE SUMMARY] written to alerts.log
+    [PAGE_ONCALL] event emitted to Splunk
 ```
 
 ### Step 3b — Run correlate.py (sees the deployment event → downgrades severity)
@@ -691,15 +722,26 @@ python3 core/correlate.py --environment petclinicmbtest --window-minutes 15
 
 **Expected output:**
 ```
-[correlate] Found 1 deployment event(s) in last 60m:
+[correlate] Fetching anomaly + deployment events in parallel (environment 'petclinicmbtest')...
+  Found 9 anomaly events across 2 tiers
+    tier2: 7 event(s)
+    tier3: 2 event(s)
+  Found 1 deployment event(s) in last 60m:
     vets-service  version=v2.1.0  deployer=n/a
 
   Found 1 correlated anomaly group(s):
 
   [Minor] TIER2_TIER3 — api-gateway  [deployment-correlated]
     Tiers:         tier2, tier3
-    Deployment:    version=v2.1.0  "Update vet specialties endpoint"
+    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Events:        9 over 901s
+    Deployment:    version=v2.1.0  commit=n/a  deployer=n/a
+                   "Update vet specialties endpoint"
+    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent
     - No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent
+    - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent
+
+  Event sent for api-gateway (behavioral_baseline.correlated_anomaly)
 ```
 
 **Key talking points:**
@@ -715,111 +757,7 @@ k "kubectl scale deployment vets-service --replicas=1"
 
 ---
 
-## Demo 6: Auto-Onboarding a New Environment
-
-**Story:** *"A new environment shows up in Splunk APM — a team just deployed their first instrumented services. `onboard.py --auto` discovers it automatically, provisions detectors, builds baselines from live traffic, creates a dashboard, registers cron jobs, and generates a runbook via Claude. Zero manual configuration. The framework is fully operational for the new environment in one command."*
-
-### Prerequisites
-```bash
-# Remove the environment from onboarding state to simulate a new environment
-python3 -c "
-import json
-with open('data/onboarding_state.json') as f:
-    state = json.load(f)
-del state['environments']['petclinicmbtest']
-with open('data/onboarding_state.json', 'w') as f:
-    json.dump(state, f, indent=2)
-print('Simulated: petclinicmbtest removed from known environments')
-"
-```
-
-### Step 1 — Preview what --auto would do (dry run)
-```bash
-python3 onboard.py --auto --dry-run
-```
-
-**Expected output:**
-```
-[onboard] Discovering all active environments...
-  petclinicmbtest: 6 services — [api-gateway, customers-service, ...]
-
-[onboard] Diff results:
-  New environments:     ['petclinicmbtest']
-  Updated environments: —
-
-[onboard] [DRY RUN] Acting on changes...
-
-  [new] petclinicmbtest
-    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
-      [dry-run] skipped
-    Provisioning dashboard for environment 'petclinicmbtest'...
-      [dry-run] Would create dashboard: Behavioral Baseline — petclinicmbtest
-    Cron jobs for 'petclinicmbtest' already present — skipping
-```
-
-### Step 2 — Run for real
-```bash
-python3 onboard.py --auto
-```
-
-**Expected output:**
-```
-[onboard] Discovering all active environments...
-  petclinicmbtest: 6 services — [api-gateway, customers-service, ...]
-
-[onboard] Diff results:
-  New environments:     ['petclinicmbtest']
-
-[onboard] Acting on changes...
-
-  [new] petclinicmbtest
-    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn
-    $ python3 core/error_fingerprint.py --environment petclinicmbtest learn
-    Dashboard created: HEogjMMA0AU (group: HD0uRkOA0AE)
-    Cron jobs for 'petclinicmbtest' already present — skipping
-    [runbook-generator] Generating runbook for 'petclinicmbtest'...
-      ✅ Runbook written to agents/RUNBOOK.petclinicmbtest.md (366 lines)
-    State saved -> data/onboarding_state.json
-
-[onboard] Done.
-```
-
-**What was created in ~60 seconds:**
-- Trace fingerprint baseline: 7 structural call path patterns
-- Error signature baseline: 0 signatures (healthy system = no errors)
-- Dashboard: linked to the Behavioral Baseline dashboard group
-- Cron jobs: 8 scheduled jobs (watch every 5m, learn daily)
-- Runbook: `RUNBOOK.petclinicmbtest.md` generated by Claude with service topology context
-
-> **Note:** Error rate, latency, and request rate detectors are already live via Splunk APM AutoDetect — no provisioning needed. This framework adds the behavioral layer on top.
-
-**Key talking points:**
-- *"No YAML. No alert rules. No thresholds to configure. The framework reads the live APM topology, learns what normal looks like, and is ready to detect anomalies — all from a single command."*
-- *"Metric-based alerts (error rate, latency, request rate) are already covered by Splunk's built-in APM AutoDetect for every environment with traces flowing. This framework adds a second layer: structural drift, new error signatures, cross-tier correlation."*
-- *"`--auto` runs every 30 minutes via cron. If your platform team deploys a new environment on Monday morning, it's onboarded by Monday morning. Zero human intervention."*
-- *"The runbook is generated by Claude from the actual service topology — not a generic template. It knows which services call the DB, which are ingress, and what dependencies exist."*
-- *"Teardown is one command: `python3 onboard.py --teardown --environment <env>`. Removes cron jobs and dashboard entries."*
-
-### Teardown (after demo)
-```bash
-# Restore original state (from backup created during setup)
-cp data/onboarding_state.json.bak data/onboarding_state.json
-
-# Reset error baseline to clean state
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
-```
-
----
-
-## Demo 7: Self-Healing — Auto-Promotion + Baseline Healer
+## Demo 6: Self-Healing — Auto-Promotion + Baseline Healer
 
 **Story:** *"A deploy of vets-service changes its trace structure. The new call path fires NEW_FINGERPRINT on the first watch run. After 2 consecutive clean runs the framework promotes it automatically — no human intervention, no alert fatigue. In the background, `baseline_healer.py` monitors anomaly event rates; when it detects a spike followed by a drop-to-zero, it scores pre-incident windows, picks the cleanest one, and re-learns the baseline autonomously."*
 
@@ -945,6 +883,100 @@ if best:
 # Relearn baseline to get vets fingerprint back properly
 python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 10
 ```
+
+---
+
+## Demo 7: Auto-Onboarding a New Environment
+
+**Story:** *"A new environment shows up in Splunk APM — a team just deployed their first instrumented services. `onboard.py --auto` discovers it automatically, builds baselines from live traffic, creates a dashboard, registers cron jobs, and generates a runbook via Claude. Zero manual configuration. The framework is fully operational for the new environment in one command."*
+
+> **Why this is last:** `onboard.py --auto` re-learns baselines from the last 120 minutes (which includes any outage errors from earlier demos) and adds cron jobs. Running it last means there's no cleanup needed before subsequent demos.
+
+### Prerequisites
+```bash
+# Back up onboarding state so we can restore after
+cp data/onboarding_state.json data/onboarding_state.json.bak
+
+# Remove the environment from onboarding state to simulate a new environment
+python3 -c "
+import json
+with open('data/onboarding_state.json') as f:
+    state = json.load(f)
+del state['environments']['petclinicmbtest']
+with open('data/onboarding_state.json', 'w') as f:
+    json.dump(state, f, indent=2)
+print('Simulated: petclinicmbtest removed from known environments')
+"
+```
+
+### Step 1 — Preview what --auto would do (dry run)
+```bash
+python3 onboard.py --auto --dry-run
+```
+
+**Expected output:**
+```
+[onboard] Discovering all active environments...
+  petclinicmbtest: 6 services — [api-gateway, customers-service, ...]
+
+[onboard] Diff results:
+  New environments:     ['petclinicmbtest']
+  Updated environments: —
+
+[onboard] [DRY RUN] Acting on changes...
+
+  [new] petclinicmbtest
+    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
+      [dry-run] skipped
+    Provisioning dashboard for environment 'petclinicmbtest'...
+      [dry-run] Would create dashboard: Behavioral Baseline — petclinicmbtest
+      [dry-run] skipped
+    [dry-run] Would add 8 cron job(s) for 'petclinicmbtest'
+    [dry-run] Would add 2 global cron job(s)
+
+[onboard] Dry run complete — no changes written.
+```
+
+### Step 2 — Run for real
+```bash
+python3 onboard.py --auto
+```
+
+**Expected output:**
+```
+[onboard] Discovering all active environments...
+  petclinicmbtest: 6 services — [api-gateway, customers-service, ...]
+
+[onboard] Diff results:
+  New environments:     ['petclinicmbtest']
+
+[onboard] Acting on changes...
+
+  [new] petclinicmbtest
+    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
+    $ python3 core/error_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
+    Dashboard created: HEwlLLDA4AE (group: HD0uRkOA0AE)
+    Added 8 cron job(s) for 'petclinicmbtest'
+    Added 2 global cron job(s)
+    State saved -> data/onboarding_state.json
+
+[onboard] Done.
+```
+
+**What was created in ~60 seconds:**
+- Trace fingerprint baseline: 7 structural call path patterns
+- Error signature baseline: learned from last 120 minutes of live traffic
+- Dashboard: linked to the Behavioral Baseline dashboard group
+- Cron jobs: 8 per-environment + 2 global scheduled jobs
+- Runbook: `RUNBOOK.petclinicmbtest.md` generated by Claude with service topology context
+
+> **Note:** Error rate, latency, and request rate detectors are already live via Splunk APM AutoDetect — no provisioning needed. This framework adds the behavioral layer on top.
+
+**Key talking points:**
+- *"No YAML. No alert rules. No thresholds to configure. The framework reads the live APM topology, learns what normal looks like, and is ready to detect anomalies — all from a single command."*
+- *"Metric-based alerts (error rate, latency, request rate) are already covered by Splunk's built-in APM AutoDetect for every environment with traces flowing. This framework adds a second layer: structural drift, new error signatures, cross-tier correlation."*
+- *"`--auto` runs every 30 minutes via cron. If your platform team deploys a new environment on Monday morning, it's onboarded by Monday morning. Zero human intervention."*
+- *"The runbook is generated by Claude from the actual service topology — not a generic template. It knows which services call the DB, which are ingress, and what dependencies exist."*
 
 ---
 
