@@ -151,7 +151,10 @@ python3 core/error_fingerprint.py --environment petclinicmbtest show
 k "kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 2 — Wait 3 minutes
+### Step 2 — Wait 3 minutes (countdown for audience)
+```bash
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.          "
+```
 The loadgen hits owner/pet endpoints every ~5 seconds. After 3 minutes the watch window will contain DB-failure error traces.
 
 ### Step 3 — Run detection + triage (one command)
@@ -242,7 +245,10 @@ python3 core/error_fingerprint.py --environment petclinicmbtest show
 k "kubectl scale deployment visits-service --replicas=0"
 ```
 
-### Step 2 — Wait 3 minutes
+### Step 2 — Wait 3 minutes (countdown for audience)
+```bash
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.          "
+```
 The loadgen hits owner detail pages every ~5 seconds, which calls visits-service for pet visit history. After 3 minutes the watch window will contain the new connection errors.
 
 ### Step 3 — Run detection + triage (one command)
@@ -329,7 +335,10 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 2 — Wait 3 minutes
+### Step 2 — Wait 3 minutes (countdown for audience)
+```bash
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.          "
+```
 The loadgen hits the vets endpoint every ~5 seconds. After 3 minutes the watch window will contain only post-failure traces.
 
 ### Step 3 — Run detection + triage (one command)
@@ -435,7 +444,10 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 k "kubectl scale deployment vets-service --replicas=0 && kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 2 — Wait 3 minutes
+### Step 2 — Wait 3 minutes (countdown for audience)
+```bash
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.          "
+```
 The loadgen hits both vets and owner/pet endpoints continuously. After 3 minutes the watch window will contain:
 - Trace tier: MISSING_SERVICE for vets-service and owner detail paths (DB down = no traces completing)
 - Error tier: CannotCreateTransactionException from customers-service on every DB call
@@ -526,7 +538,10 @@ python3 notify_deployment.py --service vets-service --environment petclinicmbtes
 k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 2 — Wait 3 minutes
+### Step 2 — Wait 3 minutes (countdown for audience)
+```bash
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.          "
+```
 
 ### Step 3 — Run detection + triage (agent sees INCIDENT, doesn't know about deploy)
 ```bash
