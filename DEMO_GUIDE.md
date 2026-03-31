@@ -20,8 +20,26 @@ alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no -o P
 ### Verify cluster is healthy
 ```bash
 k "kubectl get pods --no-headers | awk '{print \$1, \$3}'"
-# All pods should show Running
 ```
+
+**Expected output (all pods Running):**
+```
+admin-server-586785575f-dr9n9                          Running
+api-gateway-765b86f689-5jldp                           Running
+config-server-694b6b694c-bfmgz                         Running
+customers-service-f688fbb85-xxcpj                      Running
+discovery-server-88d47ff57-dzktk                       Running
+petclinic-db-758f495756-nx7cn                          Running
+petclinic-loadgen-deployment-6954c49d9-qg58j           Running
+splunk-otel-collector-agent-m2csz                      Running
+splunk-otel-collector-agent-m8jqk                      Running
+splunk-otel-collector-agent-zdl5b                      Running
+splunk-otel-collector-k8s-cluster-receiver-658b69d995-xp6vj  Running
+splunk-otel-collector-operator-67ff5f79b8-zwfj6        Running
+vets-service-74885f446b-rgf72                          Running
+visits-service-787d65b9c9-q4h6k                        Running
+```
+> Pod name suffixes will differ — focus on the deployment prefix and `Running` status. If any pod shows `CrashLoopBackOff` or `Pending`, resolve before proceeding.
 
 ### Verify baseline is clean (0 anomalies)
 ```bash
