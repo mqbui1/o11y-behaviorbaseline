@@ -902,6 +902,7 @@ def cmd_watch(window_minutes: int = 10,
     # Per-service counters for summary
     svc_checked: dict[str, int] = defaultdict(int)
     svc_anomalies: dict[str, int] = defaultdict(int)
+    all_downstream: set[str] = set()  # all services seen across all traces
 
     trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
     total = len(trace_ids)
@@ -946,6 +947,7 @@ def cmd_watch(window_minutes: int = 10,
         checked += 1
         root_svc_key = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
         svc_checked[root_svc_key] += 1
+        all_downstream.update(fp.get("services", []))
         if fp["hash"] in alerted_hashes:
             continue
 
@@ -1172,6 +1174,9 @@ def cmd_watch(window_minutes: int = 10,
             n_anom    = svc_anomalies.get(svc_name, 0)
             flag = f"  [{n_anom} anomaly{'s' if n_anom != 1 else ''}]" if n_anom else ""
             print(f"    {svc_name:<35} {n_checked:>3} traces checked{flag}")
+        downstream_only = sorted(all_downstream - set(all_svcs))
+        if downstream_only:
+            print(f"  Downstream services seen: {', '.join(downstream_only)}")
     if anomalies_found == 0:
         print("  All trace paths match baseline")
 
