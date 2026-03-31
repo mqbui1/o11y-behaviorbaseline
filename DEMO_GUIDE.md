@@ -64,7 +64,7 @@ cd /Users/mbui/Documents/o11y-behaviorbaseline
 tail -f data/alerts.log
 ```
 
-> **Note on cron jobs:** Cron jobs are **not required** for the demo — every detection step is run manually. Active cron jobs running in the background can interfere by consuming anomaly events between demo steps. The `crontab -l` command in Demo 0 is purely to show the audience that autonomous scheduling exists — it does not need to be actively firing.
+> **Note on cron jobs:** All cron jobs have been removed for the demo. Every detection step is run manually. The `crontab -l` command in Demo 0 is purely to show the audience that autonomous scheduling exists — the output shown below is what it looks like in a production setup, not what is active during the demo.
 
 ---
 
@@ -82,9 +82,16 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest show
 # Known error signatures
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 
-# Show the cron jobs that manage everything autonomously in production
-# (display only — cron does not need to be active during the demo)
-crontab -l | grep behavioral
+# Show what the autonomous cron schedule looks like in production
+# Cron jobs are disabled for this demo — talk through the output below instead
+echo "--- In production, these jobs run automatically: ---"
+echo "*/5 * * * *  trace_fingerprint watch    # structural drift, every 5m"
+echo "*/5 * * * *  error_fingerprint watch    # error signatures, every 5m"
+echo "*/5 * * * *  correlate                  # cross-tier correlation, every 5m"
+echo "*/5 * * * *  dedup_agent                # flood suppression, every 5m"
+echo "0   2 * * *  trace_fingerprint learn    # relearn baseline, daily"
+echo "0   2 * * *  error_fingerprint learn    # relearn error baseline, daily"
+echo "*/30 * * * * onboard --auto             # discover new environments, every 30m"
 
 # Confirm 0 anomalies right now
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
