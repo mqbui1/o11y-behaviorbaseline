@@ -71,10 +71,13 @@ k "kubectl rollout status deployment/petclinic-db vets-service visits-service --
 # Step 2 — Wait for services to reconnect to DB (~30s)
 sleep 30
 
-# Step 3 — Clear the alert log
+# Step 3 — Remove any cron jobs added by Demo 7 (onboard.py --auto)
+crontab -l | grep -v "behavioral-baseline-managed" | crontab -
+
+# Step 4 — Clear the alert log
 cat /dev/null > data/alerts.log
 
-# Step 4 — Hard-wipe the error baseline (cluster must be healthy before this step)
+# Step 5 — Hard-wipe the error baseline (cluster must be healthy before this step)
 python3 -c "
 import json, pathlib, datetime
 pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
@@ -87,7 +90,22 @@ print('Error baseline wiped.')
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: "Error baseline for environment 'petclinicmbtest' is empty"
 
-# Step 5 — Confirm 0 trace anomalies (1-minute window for speed — avoids waiting for outage traces to age out)
+# Step 6 — Strip any stale watch-promoted trace fingerprints
+python3 -c "
+import json, pathlib
+p = pathlib.Path('data/baseline.petclinicmbtest.json')
+d = json.loads(p.read_text())
+before = len(d['fingerprints'])
+d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
+                     if fp['occurrences'] >= 2 and fp['watch_hits'] == 0}
+p.write_text(json.dumps(d, indent=2))
+print(f'Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
+"
+
+# Step 7 — Refresh AWS credentials (tokens expire every few hours)
+python3 refresh_aws_creds.py && source .env
+
+# Step 8 — Confirm 0 trace anomalies
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
