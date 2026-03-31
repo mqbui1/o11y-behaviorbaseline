@@ -49,9 +49,10 @@ if not ACCESS_TOKEN:
     sys.exit(1)
 
 try:
-    import boto3
-    _BEDROCK = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+    import boto3 as _boto3
+    _BEDROCK = True  # defer actual client creation to call time
 except ImportError:
+    _boto3  = None
     _BEDROCK = None
 
 
@@ -150,8 +151,11 @@ def read_watch_output() -> dict:
 
 def reason(watch_result: dict) -> dict:
     """Single Claude call. Returns structured triage plan."""
-    if _BEDROCK is None:
+    if _boto3 is None:
         raise RuntimeError("boto3 not available — install with: pip install boto3")
+
+    # Create client at call time so it always picks up current AWS env vars
+    bedrock = _boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
@@ -160,7 +164,7 @@ def reason(watch_result: dict) -> dict:
         "messages": [{"role": "user", "content": json.dumps(watch_result, indent=2)}],
     })
 
-    response = _BEDROCK.invoke_model(modelId=BEDROCK_ARN, body=body)
+    response = bedrock.invoke_model(modelId=BEDROCK_ARN, body=body)
     text = json.loads(response["body"].read())["content"][0]["text"].strip()
 
     if text.startswith("```"):
