@@ -13,16 +13,21 @@ source .env
 alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@$EC2_IP'
 ```
 
-### Verify AWS credentials (required for Claude/Bedrock triage)
-The agent uses temporary STS tokens from Okta — these expire every few hours.
+### Refresh AWS credentials (required for Claude/Bedrock triage)
+AWS STS tokens from Okta expire every few hours. Run this **from a terminal that has fresh credentials** (e.g. the Claude Code terminal) before starting the demo:
 ```bash
-python3 -c "import boto3; print('AWS credentials OK:', boto3.client('sts', region_name='us-west-2').get_caller_identity()['Arn'])"
+python3 refresh_aws_creds.py
+# Expected:
+#   Credentials verified: arn:aws:sts::387769110234:assumed-role/...
+#   .env updated with fresh AWS credentials.
 ```
 
-**If this fails** with `Unable to locate credentials` or `ExpiredToken`:
-1. Open a new terminal — Claude Code refreshes credentials on launch
-2. Re-run `source .env` and retry the check above
-3. If still failing, re-authenticate via Okta and export fresh `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` into your shell
+Then in your **demo terminal**:
+```bash
+source .env
+```
+
+This writes the current tokens into `.env` so all scripts pick them up automatically — no AWS env vars needed in the demo terminal itself.
 
 ### Splunk O11y URLs
 - **APM Service Map**: https://app.us1.signalfx.com/#/apm?environments=petclinicmbtest
