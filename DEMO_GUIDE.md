@@ -41,8 +41,17 @@ visits-service-787d65b9c9-q4h6k                        Running
 ```
 > Pod name suffixes will differ — focus on the deployment prefix and `Running` status. If any pod shows `CrashLoopBackOff` or `Pending`, resolve before proceeding.
 
-### Verify baseline is clean (0 anomalies)
+### Reset and verify baselines are clean
 ```bash
+# Clear the alert log
+cat /dev/null > data/alerts.log
+
+# Reset error baseline to 0 signatures (removes any stale errors from prior runs)
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 2
+python3 core/error_fingerprint.py --environment petclinicmbtest show
+# Expected: "Error baseline for environment 'petclinicmbtest' is empty"
+
+# Confirm 0 trace anomalies
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
