@@ -64,6 +64,8 @@ cd /Users/mbui/Documents/o11y-behaviorbaseline
 tail -f data/alerts.log
 ```
 
+> **Note on cron jobs:** Cron jobs are **not required** for the demo — every detection step is run manually. Active cron jobs running in the background can interfere by consuming anomaly events between demo steps. The `crontab -l` command in Demo 0 is purely to show the audience that autonomous scheduling exists — it does not need to be actively firing.
+
 ---
 
 ## Demo 0: Context Setting — Framework in Steady State
@@ -80,7 +82,8 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest show
 # Known error signatures
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 
-# Cron jobs managing everything autonomously
+# Show the cron jobs that manage everything autonomously in production
+# (display only — cron does not need to be active during the demo)
 crontab -l | grep behavioral
 
 # Confirm 0 anomalies right now
