@@ -285,7 +285,13 @@ def main() -> None:
         plan = reason(watch_result)
     except Exception as e:
         print(f"  [error] Claude call failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        # Retry once with a fresh client in case credentials rotated mid-flight
+        try:
+            print("  Retrying...", file=sys.stderr)
+            plan = reason(watch_result)
+        except Exception as e2:
+            print(f"  [error] Retry failed: {e2}", file=sys.stderr)
+            sys.exit(1)
 
     act(plan, watch_result, env, dry_run=args.dry_run)
     sys.exit(0 if plan.get("severity") != "INCIDENT" else 1)
