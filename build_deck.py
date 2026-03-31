@@ -152,27 +152,27 @@ def slide_title(prs):
     add_rect(s, left=Inches(0), top=Inches(0),
              width=Inches(0.18), height=H, fill=CYAN)
 
-    # Main title
+    # Main title — centered
     add_textbox(s,
                 left=Inches(0.45), top=Inches(1.4),
-                width=Inches(6.5),  height=Inches(1.4),
+                width=Inches(9.2),  height=Inches(1.4),
                 text="Behavioral Anomaly Detection Framework",
                 font_size=44, bold=True, color=CYAN,
-                align=PP_ALIGN.LEFT)
+                align=PP_ALIGN.CENTER)
 
     add_textbox(s,
                 left=Inches(0.45), top=Inches(2.75),
-                width=Inches(6.5),  height=Inches(0.6),
+                width=Inches(9.2),  height=Inches(0.6),
                 text="AI-Powered Behavioral Anomaly Detection for Splunk Observability APM",
                 font_size=18, bold=False, color=WHITE,
-                align=PP_ALIGN.LEFT)
+                align=PP_ALIGN.CENTER)
 
     add_textbox(s,
                 left=Inches(0.45), top=Inches(3.5),
-                width=Inches(4),  height=Inches(0.4),
+                width=Inches(9.2),  height=Inches(0.4),
                 text="Marc Bui  |  Splunk",
                 font_size=13, bold=False, color=RGBColor(0xAA, 0xC4, 0xD8),
-                align=PP_ALIGN.LEFT)
+                align=PP_ALIGN.CENTER)
 
     footer(s)
     return s
