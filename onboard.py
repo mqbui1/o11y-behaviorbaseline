@@ -859,7 +859,25 @@ def main() -> None:
 
     if args.show_state:
         state = load_state()
-        print(json.dumps(state, indent=2))
+        envs  = state.get("environments", {})
+        last_run = state.get("last_run", "unknown")
+        print(f"[onboard] Known environments ({len(envs)})   last run: {last_run[:19]}\n")
+        if not envs:
+            print("  (none)")
+        else:
+            col_env  = max(len(k) for k in envs) + 2
+            header   = f"  {'Environment':<{col_env}}  {'Services':<10}  {'Baselined':<12}  {'Dashboard':<16}  Status"
+            print(header)
+            print("  " + "-" * (len(header) - 2))
+            for env_key, info in sorted(envs.items()):
+                n_svc     = len(info.get("services", []))
+                svc_label = f"{n_svc} service{'s' if n_svc != 1 else ''}"
+                baselined = (info.get("baseline_built_at") or "")[:10] or "—"
+                dash      = info.get("dashboard_id") or "—"
+                ok_bl     = info.get("baseline_ok", False)
+                ok_ebl    = info.get("error_baseline_ok", False)
+                status    = "ok" if (ok_bl and ok_ebl) else ("partial" if (ok_bl or ok_ebl) else "error")
+                print(f"  {env_key:<{col_env}}  {svc_label:<10}  {baselined:<12}  {dash:<16}  {status}")
         return
 
     if not args.environment and not args.auto:
