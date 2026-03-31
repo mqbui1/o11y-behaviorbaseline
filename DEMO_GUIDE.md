@@ -48,7 +48,10 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 ```
 
 ### Open the alert log in a separate terminal
+All Python scripts (detection, triage, correlation) run **locally** — only `k "..."` commands go to the EC2 cluster.
 ```bash
+# Run this in a second terminal tab, from the same directory
+cd /Users/mbui/Documents/o11y-behaviorbaseline
 tail -f data/alerts.log
 ```
 
