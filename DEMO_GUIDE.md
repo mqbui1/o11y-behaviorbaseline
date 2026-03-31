@@ -776,12 +776,14 @@ print('Error baseline wiped.')
 
 # Simulate a deploy: remove vets-service fingerprint from baseline
 # (represents a deployment that changed the call path)
+# Also remove the vets-service startup fingerprint (config-server call on pod start)
+# — it only appears during restarts, causes MISSING_SERVICE noise during the demo
 python3 -c "
 import json
 with open('data/baseline.petclinicmbtest.json') as f:
     b = json.load(f)
 fps = b['fingerprints']
-removed = [h for h, info in fps.items() if info.get('root_op','').startswith('api-gateway:GET vets')]
+removed = [h for h, info in fps.items() if info.get('root_op','').startswith('vets-service:') or info.get('root_op','').startswith('api-gateway:GET vets')]
 for h in removed: del fps[h]
 with open('data/baseline.petclinicmbtest.json', 'w') as f:
     json.dump(b, f, indent=2)
@@ -801,11 +803,14 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
   ANOMALY DETECTED
     Type:    NEW_FINGERPRINT
     Message: Unknown execution path for 'api-gateway:GET vets-service'
-    Detail:  Path: api-gateway:GET vets-service -> ... -> vets-service:VetRepository.findAll -> ...
-    TraceID: ae74792d29ba9822fd3e2c47cb1fa0bf
+    Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /vets -> vets-service:GET /vets -> vets-service:VetRepository.findAll -> ...
+    TraceID: 480b3c097b6f49d9d2d0cacbc3452f6d
     Event sent (trace.path.drift)
 
-  Checked 3 traces, 61 skipped, 1 anomalies detected
+  Checked 27 traces, 173 skipped, 1 anomalies detected
+  Per-service breakdown:
+    api-gateway                          27 traces checked  [1 anomaly]
+  Downstream services seen: customers-service, vets-service, visits-service
 ```
 
 #### Watch run 2 — auto-promotes (watch_hits=2 ≥ threshold)
@@ -818,12 +823,17 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
   ANOMALY DETECTED
     Type:    NEW_FINGERPRINT
     Message: Unknown execution path for 'api-gateway:GET vets-service'
-    ...
+    Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> ...
+    TraceID: 2e27c87771595231cc4ed1a000d314de
+    Event sent (trace.path.drift)
 
   AUTO-PROMOTED: 31ddc9717bc4e16a... (seen 2 watch runs) root_op=api-gateway:GET vets-service
-  Baseline saved  (6 fingerprints)
+  Baseline saved -> data/baseline.petclinicmbtest.json  (6 fingerprints)
 
-  Checked 24 traces, 176 skipped, 1 anomalies detected, 1 auto-promoted
+  Checked 18 traces, 182 skipped, 1 anomalies detected, 1 auto-promoted
+  Per-service breakdown:
+    api-gateway                          18 traces checked  [1 anomaly]
+  Downstream services seen: customers-service, vets-service, visits-service
 ```
 
 #### Watch run 3 — completely silent
@@ -833,7 +843,10 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
 
 **Expected output:**
 ```
-  Checked 26 traces, 174 skipped, 0 anomalies detected
+  Checked 24 traces, 176 skipped, 0 anomalies detected
+  Per-service breakdown:
+    api-gateway                          24 traces checked
+  Downstream services seen: customers-service, vets-service, visits-service
   All trace paths match baseline
 ```
 
@@ -857,19 +870,25 @@ if best:
 
 **Expected output:**
 ```
-  [healer] Scoring 4 candidate windows...
-    -30m to -90m:    80 traces, error_rate=0.0%, diversity=7,  score=0.656
-    -60m to -120m:   80 traces, error_rate=0.0%, diversity=11, score=0.688  ← winner
-    -120m to -240m:  80 traces, error_rate=0.0%, diversity=7,  score=0.656
-    -240m to -360m:  80 traces, error_rate=0.0%, diversity=8,  score=0.664
+  [healer] Scoring 4 candidate windows in parallel...
+    Scoring window -30m to -90m...
+    Scoring window -60m to -120m...
+    Scoring window -120m to -240m...
+    Scoring window -240m to -360m...
+      17:28-18:28 UTC: 80 traces, error_rate=3.3%, diversity=13, score=0.684
+      14:58-16:58 UTC: 80 traces, error_rate=3.3%, diversity=6,  score=0.628
+      16:58-17:58 UTC: 80 traces, error_rate=0.0%, diversity=7,  score=0.656
+      12:58-14:58 UTC: 80 traces, error_rate=0.0%, diversity=6,  score=0.648
 
-  [healer] Best window: -60m to -120m (score=0.688, error_rate=0.0%, diversity=11)
+  [healer] Best window: -30m to -90m (score=0.684, error_rate=3.3%, diversity=13)
 
-  [healer] Healing baseline for 'petclinicmbtest' using window -60m to -120m...
-    $ python3 trace_fingerprint.py --environment petclinicmbtest learn \
-        --window-minutes 60 --window-offset-minutes 85 --reset
-    $ python3 error_fingerprint.py --environment petclinicmbtest learn \
-        --window-minutes 60 --window-offset-minutes 85 --reset
+  [healer] Healing baseline for 'petclinicmbtest' using window -30m to -90m...
+    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn \
+        --window-minutes 60 --window-offset-minutes 50 --reset
+    $ python3 core/error_fingerprint.py --environment petclinicmbtest learn \
+        --window-minutes 60 --window-offset-minutes 50 --reset
+    [dry-run] skipped
+  [healer] Dry run complete — no changes written.
 ```
 
 **Key talking points:**
@@ -945,23 +964,29 @@ python3 onboard.py --auto
 **Expected output:**
 ```
 [onboard] Discovering all active environments...
-  petclinicmbtest: 6 services — [api-gateway, customers-service, ...]
+  petclinicmbtest: 6 services — ['api-gateway', 'config-server', 'customers-service', 'discovery-server', 'vets-service', 'visits-service']
+  unknown: 1 services — ['admin-server']
 
 [onboard] Diff results:
   New environments:     ['petclinicmbtest']
+  Updated environments: —
+  Removed environments: ['mbtest-7043-workshop']
 
 [onboard] Acting on changes...
 
   [new] petclinicmbtest
     $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
     $ python3 core/error_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
-    Dashboard created: HEwlLLDA4AE (group: HD0uRkOA0AE)
+    Dashboard created: HEwtJd2A0As (group: HD0uRkOA0AE)
     Added 8 cron job(s) for 'petclinicmbtest'
     Added 2 global cron job(s)
+    /Users/mbui/Documents/o11y-behaviorbaseline/agents/RUNBOOK.petclinicmbtest.md already exists. Use --force to regenerate.
     State saved -> data/onboarding_state.json
 
 [onboard] Done.
 ```
+
+> The runbook line shows "already exists" because it was generated in a prior session. In a truly fresh environment it generates automatically. Use `--force` on `runbook_generator.py` to regenerate.
 
 **What was created in ~60 seconds:**
 - Trace fingerprint baseline: 7 structural call path patterns
