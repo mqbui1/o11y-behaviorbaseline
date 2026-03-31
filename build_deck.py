@@ -156,14 +156,14 @@ def slide_title(prs):
     add_textbox(s,
                 left=Inches(0.45), top=Inches(1.4),
                 width=Inches(6.5),  height=Inches(1.4),
-                text="Behavioral Baseline",
+                text="Behavioral Anomaly Detection Framework",
                 font_size=44, bold=True, color=CYAN,
                 align=PP_ALIGN.LEFT)
 
     add_textbox(s,
                 left=Inches(0.45), top=Inches(2.75),
                 width=Inches(6.5),  height=Inches(0.6),
-                text="AI-Powered Anomaly Detection for Splunk Observability APM",
+                text="AI-Powered Behavioral Anomaly Detection for Splunk Observability APM",
                 font_size=18, bold=False, color=WHITE,
                 align=PP_ALIGN.LEFT)
 
@@ -233,7 +233,7 @@ def slide_solution_overview(prs):
     add_rect(s, Inches(0), Inches(0), Inches(0.18), H, CYAN)
 
     add_textbox(s, Inches(0.45), Inches(0.25), Inches(9), Inches(0.55),
-                "What Behavioral Baseline Does",
+                "What the Behavioral Anomaly Detection Framework Does",
                 font_size=26, bold=True, color=CYAN)
     add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
 
@@ -364,7 +364,7 @@ def slide_autodetect_relationship(prs):
     add_rect(s, Inches(4.9), Inches(1.05), Inches(4.75), Inches(3.85), DKGRAY)
     add_rect(s, Inches(4.9), Inches(1.05), Inches(4.75), Inches(0.06), CYAN)
     add_textbox(s, Inches(5.02), Inches(1.13), Inches(4.5), Inches(0.45),
-                "Behavioral Baseline adds on top",
+                "Behavioral Anomaly Detection adds on top",
                 font_size=13, bold=True, color=CYAN)
     bb_items = [
         "  \u2022  Structural trace path drift",
