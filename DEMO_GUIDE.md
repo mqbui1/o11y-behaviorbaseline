@@ -87,8 +87,8 @@ print('Error baseline wiped.')
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: "Error baseline for environment 'petclinicmbtest' is empty"
 
-# Step 5 — Confirm 0 trace anomalies
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+# Step 5 — Confirm 0 trace anomalies (1-minute window for speed — avoids waiting for outage traces to age out)
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
 # Expected: "All trace paths match baseline"
 ```
 
@@ -129,8 +129,8 @@ echo "0   2 * * *  trace_fingerprint learn    # relearn baseline, daily"
 echo "0   2 * * *  error_fingerprint learn    # relearn error baseline, daily"
 echo "*/30 * * * * onboard --auto             # discover new environments, every 30m"
 
-# Confirm 0 anomalies right now
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+# Confirm 0 anomalies right now (1-minute window avoids waiting for outage traces to age out)
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
 ```
 
 **Expected output (trace show):**
@@ -425,7 +425,7 @@ print('Error baseline wiped.')
 ```bash
 # Clear alert log and verify 0 trace anomalies
 cat /dev/null > data/alerts.log
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
 # Expected: "All trace paths match baseline"
 ```
 
@@ -542,7 +542,7 @@ python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: 0 signatures
 
 # Verify 0 trace anomalies
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
 # Expected: "All trace paths match baseline"
 ```
 
@@ -647,7 +647,7 @@ print('Error baseline wiped.')
 "
 
 # Verify 0 anomalies
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
 # Expected: "All trace paths match baseline"
 ```
 
