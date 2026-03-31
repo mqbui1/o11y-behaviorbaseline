@@ -655,11 +655,11 @@ def build():
 
     slide_title(prs)
     slide_problem(prs)
+    slide_tiers(prs)
     slide_solution_overview(prs)
     slide_architecture(prs)
     slide_autodetect_relationship(prs)
     slide_key_capabilities(prs)
-    slide_tiers(prs)
     slide_demo_overview(prs)
     slide_section_break(prs, "Live Demo")
     slide_next_steps(prs)
