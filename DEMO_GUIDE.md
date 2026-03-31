@@ -7,11 +7,10 @@
 cd /Users/mbui/Documents/o11y-behaviorbaseline
 source .env
 
-# AWS credentials for Bedrock (Claude reasoning)
-source /tmp/aws_exports.sh
-
 # SSH alias for cluster commands
-alias k='sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@18.208.249.178'
+# EC2_IP changes when the instance is restarted — check current IP before demo
+# Password is stored in your local .env file as EC2_PASSWORD
+alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@$EC2_IP'
 ```
 
 ### Splunk O11y URLs
