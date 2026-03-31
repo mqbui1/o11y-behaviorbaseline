@@ -170,7 +170,7 @@ def slide_title(prs):
     add_textbox(s,
                 left=Inches(0.45), top=Inches(3.5),
                 width=Inches(4),  height=Inches(0.4),
-                text="Manh Bui  |  Splunk",
+                text="Marc Bui  |  Splunk",
                 font_size=13, bold=False, color=RGBColor(0xAA, 0xC4, 0xD8),
                 align=PP_ALIGN.LEFT)
 
@@ -639,7 +639,7 @@ def slide_next_steps(prs):
 
     # Bottom tagline
     add_textbox(s, Inches(0.45), Inches(4.78), Inches(9.2), Inches(0.35),
-                "Questions?  \u2014  Manh Bui  |  Splunk Observability",
+                "Questions?  \u2014  Marc Bui  |  Splunk Observability",
                 font_size=12, bold=False,
                 color=RGBColor(0xAA, 0xC4, 0xD8),
                 align=PP_ALIGN.CENTER)
