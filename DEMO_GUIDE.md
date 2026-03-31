@@ -58,21 +58,36 @@ visits-service-787d65b9c9-q4h6k                        Running
 > Pod name suffixes will differ — focus on the deployment prefix and `Running` status. If any pod shows `CrashLoopBackOff` or `Pending`, resolve before proceeding.
 
 ### Reset and verify baselines are clean
+
+> **Critical order:** restore the cluster to fully healthy BEFORE wiping the baseline.
+> If any service is down when you wipe, the first watch run will immediately re-learn
+> the active error signatures — defeating the reset.
+
 ```bash
-# Clear the alert log
+# Step 1 — Ensure all services are restored (run after any prior demo)
+k "kubectl scale deployment petclinic-db vets-service visits-service customers-service --replicas=1"
+k "kubectl rollout status deployment/petclinic-db vets-service visits-service --timeout=90s"
+
+# Step 2 — Wait for services to reconnect to DB (~30s)
+sleep 30
+
+# Step 3 — Clear the alert log
 cat /dev/null > data/alerts.log
 
-# Hard-wipe the error baseline file — guarantees 0 signatures regardless of prior demo state
+# Step 4 — Hard-wipe the error baseline (cluster must be healthy before this step)
 python3 -c "
-import json, pathlib
-f = pathlib.Path('data/error_baseline.petclinicmbtest.json')
-f.write_text(json.dumps({}))
+import json, pathlib, datetime
+pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
+    'signatures': {},
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'environment': 'petclinicmbtest',
+}))
 print('Error baseline wiped.')
 "
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: "Error baseline for environment 'petclinicmbtest' is empty"
 
-# Confirm 0 trace anomalies
+# Step 5 — Confirm 0 trace anomalies
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
