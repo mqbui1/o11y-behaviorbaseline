@@ -349,21 +349,25 @@ Both the trace tier and error tier are piped together — Claude sees the full p
 
 [!!] INCIDENT — The visits-service is completely absent from traces that normally
     include it when fetching owner details via the api-gateway.
-    Root cause: visits-service is down or unreachable, causing it to be skipped
-    entirely in the GET /api/gateway/owners/{ownerId} call chain.
-    ...customers-service is completing successfully, so the issue is isolated to
-    visits-service...
+    Root cause: visits-service is down or unreachable, causing it to be dropped
+    from the GET /api/gateway/owners/{ownerId} call path.
+    As of 05:12 UTC, the visits-service has completely disappeared from traces.
+    The api-gateway is successfully routing to customers-service and retrieving
+    owner data, but the expected downstream call to visits-service is not
+    occurring at all.
     Confidence: HIGH | Affected: visits-service, api-gateway
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
+    [PAGE_ONCALL] event emitted to Splunk
 ```
 
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 06:17:53 UTC]  DETECTION
+[2026-03-31 05:13:07 UTC]  DETECTION
   anomaly type         : MISSING_SERVICE
+  environment          : petclinicmbtest
   service              : api-gateway
   root op              : api-gateway:GET /api/gateway/owners/{ownerId}
   message              : Expected service(s) absent from 'api-gateway:GET /api/gateway/owners/{ownerId}': ['visits-service']
@@ -372,15 +376,21 @@ Both the trace tier and error tier are piped together — Claude sees the full p
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 06:17:53 UTC]  TRIAGE
+[2026-03-31 05:13:07 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
+  environment          : petclinicmbtest
   affected services    : visits-service, api-gateway
+  assessment           : The visits-service is completely absent from traces that
+                         normally include it when fetching owner details via the api-gateway.
+  root cause           : visits-service is down or unreachable, causing it to be
+                         dropped from the GET /api/gateway/owners/{ownerId} call path.
   missing services     : api-gateway:GET /api/gateway/owners/{ownerId} → missing: visits-service
   action               : PAGE_ONCALL
-  narrative            : ...visits-service has stopped appearing in traces...
-                         customers-service is completing successfully, so the issue
-                         is isolated to visits-service...
+  narrative            : The api-gateway is successfully routing to customers-service
+                         and retrieving owner data, but the expected downstream call to
+                         visits-service is not occurring at all. Pet visit history is
+                         unavailable — page on-call immediately.
 ────────────────────────────────────────────────────────────────────────
 ```
 
