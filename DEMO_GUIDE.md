@@ -209,40 +209,61 @@ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-m
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 8 anomaly(s) from watch
+[agent] env=petclinicmbtest | 2 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — Multiple services (customers-service, vets-service, visits-service) are
-    throwing new error signatures simultaneously, with customers-service unable to create
-    database transactions, strongly indicating a shared database is down.
-    Root cause: The database is unreachable, causing CannotCreateTransactionException in
-    customers-service and 503 health-check failures across vets-service and visits-service.
-    ...
-    Confidence: HIGH | Affected: customers-service, vets-service, visits-service, api-gateway
+[!] DEGRADED — The customers-service cannot create database transactions, causing 500
+    errors to propagate back through the api-gateway on the GET /owners endpoint.
+    Root cause: The customers-service has lost connectivity to its database —
+    org.springframework.transaction.CannotCreateTransactionException on
+    OwnerRepository.findAll strongly indicates the database is unreachable or
+    refusing connections.
+    Confidence: HIGH | Affected: customers-service, api-gateway
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
+    [PAGE_ONCALL] event emitted to Splunk
 ```
+
+> Severity shows `DEGRADED` (not `INCIDENT`) because only the customer/owner path is affected —
+> vets-service is still up. Demo 4 (both DB + vets down) produces `INCIDENT`.
 
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 05:21:39 UTC]  DETECTION
+[2026-03-31 05:03:46 UTC]  DETECTION
   anomaly type         : NEW_ERROR_SIGNATURE
+  environment          : petclinicmbtest
   service              : customers-service
-  message              : New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on OwnerRepository.findAll
+  message              : New error signature in customers-service: org.springframework
+                         .transaction.CannotCreateTransactionException on OwnerRepository.findAll, GET /owners
   error type           : org.springframework.transaction.CannotCreateTransactionException
+  operation            : OwnerRepository.findAll, GET /owners
   call path            : api-gateway:GET customers-service -> api-gateway:GET
 ────────────────────────────────────────────────────────────────────────
-... (8 DETECTION entries total)
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 05:21:39 UTC]  TRIAGE
-  severity             : INCIDENT
+[2026-03-31 05:03:46 UTC]  DETECTION
+  anomaly type         : NEW_ERROR_SIGNATURE
+  environment          : petclinicmbtest
+  service              : api-gateway
+  message              : New error signature in api-gateway: 500 on GET, GET customers-service
+  error type           : 500
+  operation            : GET, GET customers-service
+  call path            : api-gateway:GET customers-service
+────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════
+[2026-03-31 05:03:46 UTC]  TRIAGE
+  severity             : DEGRADED
   confidence           : HIGH
-  affected services    : customers-service, vets-service, visits-service, api-gateway
+  environment          : petclinicmbtest
+  affected services    : customers-service, api-gateway
+  root cause           : customers-service has lost connectivity to its database
   action               : PAGE_ONCALL
-  narrative            : ...database is unreachable...
+  narrative            : customers-service is throwing CannotCreateTransactionException
+                         when attempting to query the owners table — the backing database
+                         is down or unreachable...
 ────────────────────────────────────────────────────────────────────────
 ```
 
