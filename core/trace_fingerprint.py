@@ -899,16 +899,25 @@ def cmd_watch(window_minutes: int = 10,
     anomaly_list: list[dict] = []
     # Track which new hashes were seen this run (for auto-promotion)
     new_hashes_seen: set[str] = set()
+    # Per-service counters for summary
+    svc_checked: dict[str, int] = defaultdict(int)
+    svc_anomalies: dict[str, int] = defaultdict(int)
 
     trace_ids = [m.get("traceId") for m in traces if m.get("traceId")]
-    print(f"  Fetching {len(trace_ids)} traces ({MAX_WORKERS} parallel)...")
+    total = len(trace_ids)
+    print(f"  Fetching {total} traces ({MAX_WORKERS} parallel)...")
 
-    # Fetch all traces in parallel, then process results
+    # Fetch all traces in parallel with inline progress updates
     fetched: list[tuple[str, dict]] = []
+    done_count = 0
+    PROGRESS_INTERVAL = max(1, total // 5)  # print ~5 updates
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         future_to_id = {pool.submit(get_trace_full, tid): tid for tid in trace_ids}
         for future in as_completed(future_to_id):
             tid = future_to_id[future]
+            done_count += 1
+            if done_count % PROGRESS_INTERVAL == 0 or done_count == total:
+                print(f"    {done_count}/{total} fetched...", flush=True)
             try:
                 trace = future.result()
             except Exception as e:
@@ -935,12 +944,15 @@ def cmd_watch(window_minutes: int = 10,
             continue
 
         checked += 1
+        root_svc_key = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
+        svc_checked[root_svc_key] += 1
         if fp["hash"] in alerted_hashes:
             continue
 
         anomaly = classify_anomaly(fp, baseline)
         if anomaly:
             alerted_hashes.add(fp["hash"])
+            svc_anomalies[root_svc_key] += 1
             if anomaly["type"] == "NEW_FINGERPRINT":
                 new_hashes_seen.add(fp["hash"])
                 # Upsert a pending-promotion record so watch_hits persists
@@ -960,7 +972,7 @@ def cmd_watch(window_minutes: int = 10,
                         "first_seen":    datetime.now(timezone.utc).isoformat(),
                     }
             anomalies_found += 1
-            svc = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
+            svc = root_svc_key
             # Extract missing services from the message for MISSING_SERVICE anomalies
             _missing = []
             if anomaly["type"] == "MISSING_SERVICE":
@@ -1151,6 +1163,15 @@ def cmd_watch(window_minutes: int = 10,
     print(f"\n  Checked {checked} traces, {skipped} skipped, "
           f"{anomalies_found} anomalies detected"
           + (f", {promoted_count} auto-promoted" if promoted_count else ""))
+    # Per-service breakdown
+    all_svcs = sorted(set(list(svc_checked.keys()) + list(svc_anomalies.keys())))
+    if all_svcs:
+        print("  Per-service breakdown:")
+        for svc_name in all_svcs:
+            n_checked = svc_checked.get(svc_name, 0)
+            n_anom    = svc_anomalies.get(svc_name, 0)
+            flag = f"  [{n_anom} anomaly{'s' if n_anom != 1 else ''}]" if n_anom else ""
+            print(f"    {svc_name:<35} {n_checked:>3} traces checked{flag}")
     if anomalies_found == 0:
         print("  All trace paths match baseline")
 
