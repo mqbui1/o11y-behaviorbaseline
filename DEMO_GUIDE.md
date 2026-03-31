@@ -449,26 +449,17 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 
 **Expected terminal output:**
 ```
-[watch] Discovering topology + searching traces in parallel (environment 'petclinicmbtest')...
-  Topology: 6 services | Traces: 200 candidates
-  Fetching 200 traces (20 parallel)...
-
-  ANOMALY DETECTED
-    Type:    MISSING_SERVICE
-    Message: Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-    Detail:  Path: api-gateway:GET vets-service
-    TraceID: 50c692ed3df2d5b6179dc9c3c249bad0
-    Event sent (trace.path.drift)
-
-  Checked 29 traces, 171 skipped, 1 anomalies detected
-
 [agent] env=petclinicmbtest | 1 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — The vets-service is completely absent from traces that normally route
-    through api-gateway:GET vets-service, indicating it is down or unreachable.
-    Root cause: vets-service is likely crashed, unresponsive, or has lost network connectivity.
-    ...
+[!!] INCIDENT — The vets-service is completely absent from traces that normally flow
+    through api-gateway to vets-service, indicating the service is down or unreachable.
+    Root cause: vets-service is down or unreachable — the api-gateway is receiving
+    requests for GET vets-service but no spans from vets-service are appearing in traces.
+    As of 16:45 UTC, vets-service has completely vanished from distributed traces.
+    The api-gateway is routing GET requests intended for vets-service but receiving
+    no response spans, consistent with vets-service being crashed, undeployed, or
+    network-isolated.
     Confidence: HIGH | Affected: vets-service, api-gateway
     Recommended action: PAGE_ONCALL
 
@@ -479,31 +470,27 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 04:27:01 UTC]  DETECTION
+[2026-03-31 16:45:00 UTC]  DETECTION
   anomaly type         : MISSING_SERVICE
   environment          : petclinicmbtest
   service              : api-gateway
   root op              : api-gateway:GET vets-service
   message              : Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-  trace id             : 50c692ed3df2d5b6179dc9c3c249bad0
   services in trace    : api-gateway
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-29 04:27:07 UTC]  TRIAGE
+[2026-03-31 16:45:00 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
   environment          : petclinicmbtest
   affected services    : vets-service, api-gateway
-  assessment           : The vets-service is completely absent from traces that
-                         normally flow through api-gateway:GET vets-service.
-  root cause           : vets-service is not responding or has crashed, causing
-                         api-gateway to receive no downstream spans.
-  missing services     : api-gateway:GET vets-service → missing: api-gateway
+  root cause           : vets-service is down or unreachable — no spans appearing in traces
   action               : PAGE_ONCALL
-  narrative            : In the last 3 minutes, traces for 'api-gateway:GET vets-service'
-                         show only the api-gateway span — vets-service has completely vanished
-                         from the call path...
+  narrative            : vets-service has completely vanished from distributed traces.
+                         The api-gateway is routing GET requests to vets-service but
+                         receiving no response spans — consistent with the service being
+                         crashed, undeployed, or network-isolated.
 ────────────────────────────────────────────────────────────────────────
 ```
 
