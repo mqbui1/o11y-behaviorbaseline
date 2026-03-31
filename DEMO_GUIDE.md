@@ -108,6 +108,23 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
   api-gateway:PUT customers-service              (1 pattern)
 ```
 
+**Expected output (trace watch — 0 anomalies):**
+```
+[watch] Discovering topology + searching traces in parallel (environment 'petclinicmbtest')...
+  Topology: 6 services | Traces: 200 candidates
+  Fetching 200 traces (20 parallel)...
+    40/200 fetched...
+    80/200 fetched...
+    120/200 fetched...
+    160/200 fetched...
+    200/200 fetched...
+
+  Checked 21 traces, 179 skipped, 0 anomalies detected
+  Per-service breakdown:
+    api-gateway                          21 traces checked
+  All trace paths match baseline
+```
+
 **Key talking points:**
 - *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
 - *"6 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
