@@ -14,20 +14,22 @@ alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no -o P
 ```
 
 ### Refresh AWS credentials (required for Claude/Bedrock triage)
-AWS STS tokens from Okta expire every few hours. Run this **from a terminal that has fresh credentials** (e.g. the Claude Code terminal) before starting the demo:
+AWS STS tokens expire every few hours. `refresh_aws_creds.py` reads them from the environment — it only works in a terminal that already has AWS credentials set (Claude Code does this automatically).
+
+**Step 1 — In the CLAUDE CODE terminal:**
 ```bash
-python3 refresh_aws_creds.py
+cd /Users/mbui/Documents/o11y-behaviorbaseline && python3 refresh_aws_creds.py
 # Expected:
 #   Credentials verified: arn:aws:sts::387769110234:assumed-role/...
 #   .env updated with fresh AWS credentials.
 ```
 
-Then in your **demo terminal**:
+**Step 2 — Back in your DEMO terminal:**
 ```bash
 source .env
 ```
 
-This writes the current tokens into `.env` so all scripts pick them up automatically — no AWS env vars needed in the demo terminal itself.
+This writes the tokens into `.env` so all scripts pick them up automatically. Do NOT run `refresh_aws_creds.py` in the demo terminal — it will fail with "Missing AWS env vars".
 
 ### Splunk O11y URLs
 - **APM Service Map**: https://app.us1.signalfx.com/#/apm?environments=petclinicmbtest
@@ -106,7 +108,11 @@ print(f'Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 "
 
 # Step 7 — Refresh AWS credentials (tokens expire every few hours)
-python3 refresh_aws_creds.py && source .env
+# !! Run this in the CLAUDE CODE terminal (it has AWS env vars set automatically) !!
+#    cd /Users/mbui/Documents/o11y-behaviorbaseline && python3 refresh_aws_creds.py
+#
+# Then back in THIS demo terminal:
+source .env
 
 # Step 8 — Confirm 0 trace anomalies
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
