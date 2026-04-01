@@ -276,16 +276,20 @@ def fetch_autodetect_incidents(start_ms: int, end_ms: int,
     Fetch active Tier 1 incidents from Splunk AutoDetect detectors.
 
     Strategy:
-      1. GET /v2/incident?includeResolved=false — active incidents only
+      1. GET /v2/incident?includeResolved=true — active + recently resolved
       2. Filter to incidents whose anomalyStateUpdateTimestamp falls within window
-      3. For each incident, resolve service + environment from detector tags
-         (tags like svc-<name> and env-<name> are set by provision_detectors.py)
-      4. Only include incidents from detectors tagged TIER1_DETECTOR_TAG to
-         avoid generic infra alerts polluting APM correlation
+      3. For each incident, resolve service + environment:
+         - Path A (managed detectors): detector tags svc-<name> / env-<name>
+         - Path B (native AutoDetect): incident events[].inputs.<key>.sf_service/sf_environment
+      4. Managed detectors require TIER1_DETECTOR_TAG to avoid infra alert pollution.
+         Native AutoDetect detectors (detectorOrigin=AutoDetect) are always included
+         since they are APM-scoped by construction.
     """
-    # Step 1: fetch all active incidents (paginate up to 200)
+    # Step 1: fetch all recent incidents (active + recently resolved).
+    # includeResolved=true so we catch incidents that triggered within the window
+    # but already resolved by the time correlate.py runs.
     try:
-        resp = _request("GET", "/v2/incident?includeResolved=false&limit=200")
+        resp = _request("GET", "/v2/incident?includeResolved=true&limit=200")
     except Exception as e:
         print(f"  [warn] Could not fetch Tier 1 incidents: {e}", file=sys.stderr)
         return []
@@ -293,30 +297,66 @@ def fetch_autodetect_incidents(start_ms: int, end_ms: int,
     raw_incidents = resp if isinstance(resp, list) else resp.get("results", [])
 
     # Step 2: build a detector tag index to avoid redundant API calls
-    # Collect all unique detector IDs from relevant incidents first
+    # Collect all unique detector IDs from relevant incidents first.
+    # Also extract sf_service/sf_environment from the incident's events[].inputs
+    # for native AutoDetect detectors that don't carry behavioral-baseline-managed tags.
+    # The inputs structure is: events[i].inputs.<signal_label>.key.sf_service/sf_environment
     candidate_ids = set()
+    incident_inputs: dict[str, dict] = {}  # detectorId -> {sf_service, sf_environment}
     for inc in raw_incidents:
         ts = inc.get("anomalyStateUpdateTimestamp", 0)
         if start_ms <= ts <= end_ms:
-            candidate_ids.add(inc.get("detectorId"))
+            det_id = inc.get("detectorId")
+            candidate_ids.add(det_id)
+            # Extract service/environment from the first event's inputs
+            if det_id not in incident_inputs:
+                events_list = inc.get("events", [])
+                for ev in events_list:
+                    ev_inputs = ev.get("inputs", {})
+                    if isinstance(ev_inputs, dict):
+                        for sig_val in ev_inputs.values():
+                            key = sig_val.get("key", {}) if isinstance(sig_val, dict) else {}
+                            svc = key.get("sf_service")
+                            env = key.get("sf_environment")
+                            if svc:
+                                incident_inputs[det_id] = {"sf_service": svc,
+                                                           "sf_environment": env}
+                                break
+                    if det_id in incident_inputs:
+                        break
 
     if not candidate_ids:
         return []
 
-    # Fetch detector details in parallel to resolve tags
+    # Fetch detector details in parallel to resolve tags + origin
     detector_index: dict[str, dict] = {}  # detectorId -> {service, environment, tier}
 
     def _fetch_detector_tags(det_id: str) -> tuple[str, dict]:
         try:
             d = _request("GET", f"/v2/detector/{det_id}")
-            tags = d.get("tags", [])
-            if TIER1_DETECTOR_TAG not in tags:
-                return det_id, {}
-            svc = next((t[4:] for t in tags if t.startswith("svc-")), None)
-            env = next((t[4:] for t in tags if t.startswith("env-")), None)
-            tier = next((t for t in tags if t in ("tier1b", "tier3", "tier4")), "tier1")
-            return det_id, {"service": svc, "environment": env, "tier": tier,
-                            "name": d.get("name", det_id)}
+            tags   = d.get("tags", [])
+            origin = d.get("detectorOrigin", "")
+            name   = d.get("name", det_id)
+
+            # Path A: our managed detectors (behavioral-baseline-managed tag)
+            if TIER1_DETECTOR_TAG in tags:
+                svc  = next((t[4:] for t in tags if t.startswith("svc-")), None)
+                env  = next((t[4:] for t in tags if t.startswith("env-")), None)
+                tier = next((t for t in tags if t in ("tier1b", "tier3", "tier4")),
+                            "tier1")
+                return det_id, {"service": svc, "environment": env, "tier": tier,
+                                "name": name, "origin": "managed"}
+
+            # Path B: native APM AutoDetect detectors (detectorOrigin=AutoDetect
+            # or AutoDetectCustomization) — resolve service/env from incident events.inputs
+            if origin in ("AutoDetect", "AutoDetectCustomization"):
+                inputs = incident_inputs.get(det_id, {})
+                svc    = inputs.get("sf_service")
+                env    = inputs.get("sf_environment")
+                return det_id, {"service": svc, "environment": env, "tier": "tier1",
+                                "name": name, "origin": "autodetect"}
+
+            return det_id, {}
         except Exception:
             return det_id, {}
 
@@ -325,29 +365,44 @@ def fetch_autodetect_incidents(start_ms: int, end_ms: int,
             if info:
                 detector_index[det_id] = info
 
-    # Step 3: build tier1 events from qualifying incidents
+    # Step 3: build tier1 events from qualifying incidents.
+    # For native AutoDetect detectors the incident itself carries sf_service /
+    # sf_environment in its "inputs" structure, so we fall back to that when
+    # the detector index didn't resolve a service.
     events = []
     for inc in raw_incidents:
         ts = inc.get("anomalyStateUpdateTimestamp", 0)
         if not (start_ms <= ts <= end_ms):
             continue
         det_id = inc.get("detectorId")
-        info = detector_index.get(det_id)
-        if not info or not info.get("service"):
+        info   = detector_index.get(det_id, {})
+
+        # Resolve service: detector index first, then incident inputs fallback
+        svc = info.get("service")
+        if not svc:
+            inputs = incident_inputs.get(det_id, {})
+            svc = inputs.get("sf_service")
+        if not svc:
             continue
-        svc = info["service"]
-        env = info["environment"] or "all"
+
+        # Resolve environment
+        env = info.get("environment")
+        if not env:
+            inputs = incident_inputs.get(det_id, {})
+            env = inputs.get("sf_environment") or "all"
+
         if environment and env not in (environment, "all"):
             continue
-        detector_tier = info["tier"]
-        # Map detector tier tags to tier1 for correlation purposes
-        # (tier1b = request rate, tier3/tier4 via AutoDetect = metric-based)
+
+        detector_tier = info.get("tier", "tier1")
+        det_origin    = info.get("origin", "unknown")
         events.append({
             "tier":         "tier1",
             "event_type":   "autodetect.incident",
             "service":      svc,
-            "anomaly_type": detector_tier.upper(),
-            "message":      f"AutoDetect: {inc.get('detectLabel', info['name'])} "
+            "anomaly_type": "AUTODETECT_" + detector_tier.upper(),
+            "message":      f"AutoDetect [{det_origin}]: "
+                            f"{inc.get('detectLabel', info.get('name', det_id))} "
                             f"(severity={inc.get('severity', 'unknown')})",
             "timestamp":    ts,
             "environment":  env,
