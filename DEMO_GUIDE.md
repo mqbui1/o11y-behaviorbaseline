@@ -80,15 +80,7 @@ crontab -l | grep -v "behavioral-baseline-managed" | crontab -
 cat /dev/null > data/alerts.log
 
 # Step 5 — Hard-wipe the error baseline (cluster must be healthy before this step)
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: "Error baseline for environment 'petclinicmbtest' is empty"
 
@@ -206,15 +198,7 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
 ```bash
 # Clear alert log and ensure clean error baseline
 cat /dev/null > data/alerts.log
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: 0 signatures (system is healthy)
 ```
@@ -314,15 +298,7 @@ k "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-ga
 # Expected: JSON list of vets (not 404 or timeout)
 
 # Re-learn clean error baseline after DB recovery
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 ```
 
 > **Critical:** Services (customers-service, visits-service) take ~30s to reconnect to the DB after it comes back. Don't start the next demo until the curl above returns data. If traces are missing from subsequent learn runs, regenerate traffic and relearn (see Restore/Reset section).
@@ -337,15 +313,7 @@ print('Error baseline wiped.')
 ```bash
 # Clear alert log and ensure clean error baseline
 cat /dev/null > data/alerts.log
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: 0 signatures (system is healthy)
 ```
@@ -433,15 +401,7 @@ Both the trace tier and error tier are piped together — Claude sees the full p
 k "kubectl scale deployment visits-service --replicas=1"
 
 # Re-learn clean baseline after demo
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 ```
 
 ---
@@ -571,15 +531,7 @@ print(f'Trace baseline: removed {before-after} stale entries, kept {after} clean
 "
 
 # Reset error baseline to 0
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: 0 signatures
 
@@ -709,17 +661,6 @@ python3 core/correlate.py --environment petclinicmbtest --window-minutes 20
 ```bash
 k "kubectl scale deployment vets-service petclinic-db --replicas=1"
 k "kubectl rollout status deployment/vets-service deployment/petclinic-db --timeout=90s"
-
-# Wait ~30s for services to reconnect, then relearn
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
 ```
 
 ---
@@ -732,15 +673,7 @@ print('Error baseline wiped.')
 ```bash
 # Clear alert log and reset error baseline
 cat /dev/null > data/alerts.log
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 
 # Verify 0 anomalies
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
@@ -834,15 +767,7 @@ k "kubectl scale deployment vets-service --replicas=1"
 ### Prerequisites
 ```bash
 cat /dev/null > data/alerts.log
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 
 # Simulate a deploy: remove vets-service fingerprint from baseline
 # (represents a deployment that changed the call path)
@@ -1118,15 +1043,7 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --
 python3 core/trace_fingerprint.py --environment petclinicmbtest promote
 
 # Relearn error baseline after disruptions (wait for clean window first)
-python3 -c "
-import json, pathlib, datetime
-pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({
-    'signatures': {},
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'environment': 'petclinicmbtest',
-}))
-print('Error baseline wiped.')
-"
+python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 
 # Clear alert log
 cat /dev/null > data/alerts.log
