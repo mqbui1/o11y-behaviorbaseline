@@ -1,49 +1,49 @@
 #!/usr/bin/env python3
 """
-Behavioral Baseline — Cross-Tier Correlation Engine
-=====================================================
-Joins anomaly events from Tiers 2 and 3 across a time window and fires a
+Behavioral Anomaly Detection Framework — Cross-Tier Correlation Engine
+=======================================================================
+Joins anomaly signals from Tiers 1, 2, and 3 across a time window and fires a
 correlated alert when multiple tiers hit the same service simultaneously.
 
 Why this matters:
   Each tier firing alone may be a false positive — a new trace path could be
   a canary deployment, a new error signature could be a one-off. But when
-  Tier 2 (trace path drift) AND Tier 3 (new error signature) both fire on the
-  same service within minutes of each other, the probability of a real incident
-  is dramatically higher. Correlation turns noisy individual signals into
-  high-confidence actionable alerts.
+  Tier 1 (AutoDetect metric alert) AND Tier 2 (trace path drift) AND Tier 3
+  (new error signature) all fire on the same service within minutes of each
+  other, the probability of a real incident is dramatically higher.
+  Correlation turns noisy individual signals into high-confidence actionable alerts.
 
 Correlation rules:
   TIER2_TIER3  — trace path drift + error signature drift on same service
-  TIER2_TIER1  — trace path drift + topology new-service event on same service
-  MULTI_TIER   — 3+ different tiers hit the same service (highest confidence)
+  TIER1_TIER2  — AutoDetect metric alert + trace path drift on same service
+  TIER1_TIER3  — AutoDetect metric alert + error signature drift on same service
+  MULTI_TIER   — all 3 tiers hit the same service (highest confidence, Critical)
+
+Tier 1 — APM AutoDetect (built-in Splunk detectors):
+  Fetched via GET /v2/incident filtered to active incidents within the window.
+  Detector tags (svc-<name>, env-<name>) are used to resolve service+environment.
+  Only detectors tagged behavioral-baseline-managed are considered, so generic
+  infra alerts don't pollute correlation.
 
 Deployment correlation:
   If notify_deployment.py was called within DEPLOYMENT_CORRELATION_WINDOW_MINUTES
   of the anomalies, the correlated alert is annotated with deployment context
   and its severity is downgraded by one level (Critical→Major, Major→Minor).
-  This distinguishes "bad change" from "expected change" without suppressing
-  the alert entirely.
 
 How it works:
-  1. Queries recent custom events from Splunk:
-       trace.path.drift        (Tier 2)
-       error.signature.drift   (Tier 3)
-       topology.new_service    (Tier 1)
-       deployment.started      (from notify_deployment.py)
-  2. Groups anomaly events by service within a correlation window
+  1. In parallel, fetches:
+       trace.path.drift        (Tier 2) — via SignalFlow custom events
+       error.signature.drift   (Tier 3) — via SignalFlow custom events
+       active incidents        (Tier 1) — via GET /v2/incident + detector tag lookup
+       deployment.started               — via SignalFlow custom events
+  2. Groups all events by service within the correlation window
   3. If 2+ tiers are represented for the same service, fires a
      behavioral_baseline.correlated_anomaly event with full context
-  4. If a deployment event matches the same service+environment within
-     DEPLOYMENT_CORRELATION_WINDOW_MINUTES, annotates and downgrades severity
+  4. If a deployment event matches within DEPLOYMENT_CORRELATION_WINDOW_MINUTES,
+     annotates and downgrades severity
 
 Usage:
   python correlate.py [--window-minutes 30] [--environment petclinicmbtest]
-
-  # Run after each fingerprint watch cycle:
-  */5 * * * * python error_fingerprint.py --environment X watch --window-minutes 5
-  */5 * * * * python trace_fingerprint.py --environment X watch --window-minutes 5
-  */5 * * * * python correlate.py --environment X --window-minutes 15
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
@@ -97,12 +97,15 @@ DEPLOYMENT_CORRELATION_WINDOW_MINUTES = int(
     os.environ.get("DEPLOYMENT_CORRELATION_WINDOW_MINUTES", "60")
 )
 
-# Event types emitted by the fingerprint scripts — these are what we query
+# Custom event types emitted by the fingerprint scripts — queried via SignalFlow
 TIER_EVENT_MAP = {
     "trace.path.drift":       "tier2",
     "error.signature.drift":  "tier3",
-    "topology.new_service":   "tier1",
 }
+
+# Only consider Tier 1 incidents from detectors carrying this tag.
+# Prevents generic infra alerts from polluting APM service correlation.
+TIER1_DETECTOR_TAG = "behavioral-baseline-managed"
 
 # Severity downgrade map for deployment-correlated anomalies
 _SEVERITY_DOWNGRADE = {"Critical": "Major", "Major": "Minor", "Minor": "Info"}
@@ -267,6 +270,92 @@ def fetch_deployment_events(start_ms: int, end_ms: int,
     return deployments
 
 
+def fetch_autodetect_incidents(start_ms: int, end_ms: int,
+                               environment: str | None = None) -> list[dict]:
+    """
+    Fetch active Tier 1 incidents from Splunk AutoDetect detectors.
+
+    Strategy:
+      1. GET /v2/incident?includeResolved=false — active incidents only
+      2. Filter to incidents whose anomalyStateUpdateTimestamp falls within window
+      3. For each incident, resolve service + environment from detector tags
+         (tags like svc-<name> and env-<name> are set by provision_detectors.py)
+      4. Only include incidents from detectors tagged TIER1_DETECTOR_TAG to
+         avoid generic infra alerts polluting APM correlation
+    """
+    # Step 1: fetch all active incidents (paginate up to 200)
+    try:
+        resp = _request("GET", "/v2/incident?includeResolved=false&limit=200")
+    except Exception as e:
+        print(f"  [warn] Could not fetch Tier 1 incidents: {e}", file=sys.stderr)
+        return []
+
+    raw_incidents = resp if isinstance(resp, list) else resp.get("results", [])
+
+    # Step 2: build a detector tag index to avoid redundant API calls
+    # Collect all unique detector IDs from relevant incidents first
+    candidate_ids = set()
+    for inc in raw_incidents:
+        ts = inc.get("anomalyStateUpdateTimestamp", 0)
+        if start_ms <= ts <= end_ms:
+            candidate_ids.add(inc.get("detectorId"))
+
+    if not candidate_ids:
+        return []
+
+    # Fetch detector details in parallel to resolve tags
+    detector_index: dict[str, dict] = {}  # detectorId -> {service, environment, tier}
+
+    def _fetch_detector_tags(det_id: str) -> tuple[str, dict]:
+        try:
+            d = _request("GET", f"/v2/detector/{det_id}")
+            tags = d.get("tags", [])
+            if TIER1_DETECTOR_TAG not in tags:
+                return det_id, {}
+            svc = next((t[4:] for t in tags if t.startswith("svc-")), None)
+            env = next((t[4:] for t in tags if t.startswith("env-")), None)
+            tier = next((t for t in tags if t in ("tier1b", "tier3", "tier4")), "tier1")
+            return det_id, {"service": svc, "environment": env, "tier": tier,
+                            "name": d.get("name", det_id)}
+        except Exception:
+            return det_id, {}
+
+    with ThreadPoolExecutor(max_workers=min(10, len(candidate_ids))) as pool:
+        for det_id, info in pool.map(_fetch_detector_tags, candidate_ids):
+            if info:
+                detector_index[det_id] = info
+
+    # Step 3: build tier1 events from qualifying incidents
+    events = []
+    for inc in raw_incidents:
+        ts = inc.get("anomalyStateUpdateTimestamp", 0)
+        if not (start_ms <= ts <= end_ms):
+            continue
+        det_id = inc.get("detectorId")
+        info = detector_index.get(det_id)
+        if not info or not info.get("service"):
+            continue
+        svc = info["service"]
+        env = info["environment"] or "all"
+        if environment and env not in (environment, "all"):
+            continue
+        detector_tier = info["tier"]
+        # Map detector tier tags to tier1 for correlation purposes
+        # (tier1b = request rate, tier3/tier4 via AutoDetect = metric-based)
+        events.append({
+            "tier":         "tier1",
+            "event_type":   "autodetect.incident",
+            "service":      svc,
+            "anomaly_type": detector_tier.upper(),
+            "message":      f"AutoDetect: {inc.get('detectLabel', info['name'])} "
+                            f"(severity={inc.get('severity', 'unknown')})",
+            "timestamp":    ts,
+            "environment":  env,
+            "raw":          inc,
+        })
+    return events
+
+
 def _infer_service_from_event(dims: dict, props: dict) -> str | None:
     """
     Try to infer a service name from event dimensions/properties when
@@ -288,6 +377,10 @@ def correlate(events: list[dict],
     Group events by service and identify cases where multiple tiers fired.
     Returns a list of correlation results — one per affected service that
     meets the MIN_TIERS_FOR_CORRELATION threshold.
+
+    Tier 1 (AutoDetect incidents), Tier 2 (trace drift), and Tier 3 (error
+    signature drift) are all represented in the events list. When all three
+    fire on the same service → MULTI_TIER at Critical severity.
 
     deployments: list of deployment events from fetch_deployment_events().
     When provided, any correlated anomaly whose service+environment matches
@@ -319,14 +412,20 @@ def correlate(events: list[dict],
             continue
 
         # Determine correlation type
-        if len(tiers_present) >= 3:
+        has1 = "tier1" in tiers_present
+        has2 = "tier2" in tiers_present
+        has3 = "tier3" in tiers_present
+        if has1 and has2 and has3:
             corr_type = "MULTI_TIER"
             severity  = "Critical"
-        elif "tier2" in tiers_present and "tier3" in tiers_present:
+        elif has2 and has3:
             corr_type = "TIER2_TIER3"
             severity  = "Major"
-        elif "tier2" in tiers_present and "tier1" in tiers_present:
-            corr_type = "TIER2_TIER1"
+        elif has1 and has2:
+            corr_type = "TIER1_TIER2"
+            severity  = "Major"
+        elif has1 and has3:
+            corr_type = "TIER1_TIER3"
             severity  = "Major"
         else:
             corr_type = "MULTI_TIER"
@@ -461,17 +560,23 @@ def run(window_minutes: int = 30, environment: str | None = None,
 
     print(f"[correlate] Fetching anomaly + deployment events in parallel ({env_desc})...")
 
-    # Fetch anomaly events (3 tier types) and deployment events concurrently
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    # Fetch tier2/3 custom events, tier1 AutoDetect incidents, and deployment
+    # events all concurrently
+    with ThreadPoolExecutor(max_workers=3) as pool:
         anomaly_future    = pool.submit(fetch_anomaly_events, start_ms, now_ms,
+                                        environment)
+        tier1_future      = pool.submit(fetch_autodetect_incidents, start_ms, now_ms,
                                         environment)
         deployment_future = pool.submit(fetch_deployment_events, deploy_start_ms,
                                         now_ms, environment)
         events      = anomaly_future.result()
+        tier1_events = tier1_future.result()
         deployments = deployment_future.result()
 
-    print(f"  Found {len(events)} anomaly events across "
-          f"{len({e['tier'] for e in events})} tiers")
+    events = events + tier1_events
+
+    tiers_seen = {e["tier"] for e in events}
+    print(f"  Found {len(events)} anomaly events across {len(tiers_seen)} tier(s)")
 
     if not events:
         print("  No anomaly events found — nothing to correlate.")
