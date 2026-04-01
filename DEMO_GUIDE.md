@@ -114,9 +114,10 @@ print(f'Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 # Then back in THIS demo terminal:
 source .env
 
-# Step 8 — Confirm 0 trace anomalies
+# Step 8 — Confirm 0 trace anomalies (wait 60s after restore before running this)
 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
+# If you get "Traces: 0 candidates" — services are still warming up, wait 30s and retry
 ```
 
 ### Open the alert log in a separate terminal
@@ -156,8 +157,9 @@ echo "0   2 * * *  trace_fingerprint learn    # relearn baseline, daily"
 echo "0   2 * * *  error_fingerprint learn    # relearn error baseline, daily"
 echo "*/30 * * * * onboard --auto             # discover new environments, every 30m"
 
-# Confirm 0 anomalies right now (1-minute window avoids waiting for outage traces to age out)
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+# Confirm 0 anomalies right now
+# Note: use 3-minute window — 1 minute returns 0 traces if services just restarted
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 ```
 
 **Expected output (trace show):**
