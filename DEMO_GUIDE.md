@@ -536,7 +536,7 @@ k "kubectl scale deployment vets-service --replicas=1"
 
 ## Demo 4: Correlated Anomaly — Two Tiers Fire Simultaneously
 
-**Story:** *"Both vets-service AND the database go down at the same time. The trace tier sees MISSING_SERVICE across multiple paths. The error tier sees new CannotCreateTransactionException signatures. When both tiers fire on the same service simultaneously, `correlate.py` emits a high-confidence TIER2_TIER3 correlated event — turning noisy individual signals into a single actionable alert."*
+**Story:** *"Both vets-service AND the database go down at the same time. The trace tier sees MISSING_SERVICE across multiple paths. The error tier sees new CannotCreateTransactionException signatures. APM AutoDetect fires on the error rate spike. When all three tiers fire on the same service simultaneously, `correlate.py` emits a `[Critical] MULTI_TIER` correlated event — the highest-confidence signal in the framework."*
 
 ### Prerequisites
 ```bash
@@ -644,25 +644,35 @@ python3 core/correlate.py --environment petclinicmbtest --window-minutes 20
 ```
 [correlate] Fetching anomaly + deployment events in parallel (environment 'petclinicmbtest')...
   Found 20 anomaly events across 3 tier(s)
-    tier1: 2 event(s)
-    tier2: 15 event(s)
+    tier1: 3 event(s)
+    tier2: 14 event(s)
     tier3: 3 event(s)
 
-  Found 1 correlated anomaly group(s):
+  Found 2 correlated anomaly group(s):
 
   [Critical] MULTI_TIER — customers-service
     Tiers:         tier1, tier2, tier3
-    Anomaly types: TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Anomaly types: AUTODETECT_TIER1, AUTODETECT_TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE
     Events:        14 over 720s
-    - AutoDetect: [Behavioral Baseline] customers-service error rate spike (severity=Critical)
+    - AutoDetect [autodetect]: APM - Sudden change in service error rate (severity=Critical)
+    - AutoDetect [managed]: [Behavioral Baseline] customers-service error rate spike (severity=Critical)
     - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
-    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent
+
+  [Critical] MULTI_TIER — api-gateway
+    Tiers:         tier1, tier2, tier3
+    Anomaly types: AUTODETECT_TIER1, MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Events:        8 over 480s
+    - AutoDetect [autodetect]: APM - Sudden change in service error rate (severity=Critical)
+    - No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent
+    - New error signature in api-gateway: 503 on GET vets-service
 
   Event sent for customers-service (behavioral_baseline.correlated_anomaly)
+  Event sent for api-gateway (behavioral_baseline.correlated_anomaly)
 ```
 
-> **Note:** If AutoDetect hasn't fired yet, the output will show `[Major] TIER2_TIER3`
-> instead — that's also valid. Run correlate again after another 2-3 minutes.
+> **Note:** Exact event counts and services may vary. The key indicators are `3 tier(s)` in the header
+> and `[Critical] MULTI_TIER` in the output. If AutoDetect hasn't fired yet, you'll see `[Major] TIER2_TIER3`
+> instead — run correlate again after another 2-3 minutes.
 
 **Key talking points:**
 - *"Tier 2 alone: could be a canary deploy. Tier 3 alone: could be noise. But all three tiers firing on the same service simultaneously? That's unambiguous — Critical severity, page oncall immediately."*
