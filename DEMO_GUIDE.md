@@ -341,17 +341,15 @@ Both the trace tier and error tier are piped together — Claude sees the full p
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 1 anomaly(s) from watch
+[agent] env=petclinicmbtest | 3 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — The visits-service is completely absent from traces that normally
-    include it when fetching owner details via the api-gateway.
-    Root cause: visits-service is down or unreachable, causing it to be dropped
-    from the GET /api/gateway/owners/{ownerId} call path.
-    As of 05:12 UTC, the visits-service has completely disappeared from traces.
-    The api-gateway is successfully routing to customers-service and retrieving
-    owner data, but the expected downstream call to visits-service is not
-    occurring at all.
+[!!] INCIDENT — The visits-service is completely absent from traces and the
+    api-gateway is throwing WebClientRequestException errors when attempting
+    to reach it via GET /api/gateway/owners/{ownerId}.
+    Root cause: visits-service is down or unreachable, causing the api-gateway
+    to fail with a WebClientRequestException when attempting to call it as part
+    of owner detail lookups.
     Confidence: HIGH | Affected: visits-service, api-gateway
     Recommended action: PAGE_ONCALL
 
@@ -359,10 +357,14 @@ Both the trace tier and error tier are piped together — Claude sees the full p
     [PAGE_ONCALL] event emitted to Splunk
 ```
 
+The 3 anomalies:
+- `MISSING_SERVICE` ×2 — `api-gateway:GET /api/gateway/owners/{ownerId}` missing visits-service
+- `NEW_ERROR_SIGNATURE` ×1 — `WebClientRequestException` on GET in api-gateway
+
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-31 05:13:07 UTC]  DETECTION
+[2026-04-01 05:28:07 UTC]  DETECTION
   anomaly type         : MISSING_SERVICE
   environment          : petclinicmbtest
   service              : api-gateway
@@ -373,21 +375,30 @@ Both the trace tier and error tier are piped together — Claude sees the full p
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-31 05:13:07 UTC]  TRIAGE
+[2026-04-01 05:28:07 UTC]  DETECTION
+  anomaly type         : NEW_ERROR_SIGNATURE
+  environment          : petclinicmbtest
+  service              : api-gateway
+  message              : New error signature in api-gateway: org.springframework.web.reactive.function.client.WebClientRequestException on GET
+  error type           : org.springframework.web.reactive.function.client.WebClientRequestException
+  operation            : GET
+  call path            : api-gateway:GET /api/gateway/owners/{ownerId}
+────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════
+[2026-04-01 05:28:07 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
   environment          : petclinicmbtest
   affected services    : visits-service, api-gateway
-  assessment           : The visits-service is completely absent from traces that
-                         normally include it when fetching owner details via the api-gateway.
-  root cause           : visits-service is down or unreachable, causing it to be
-                         dropped from the GET /api/gateway/owners/{ownerId} call path.
+  root cause           : visits-service is down or unreachable, causing the
+                         api-gateway to fail with a WebClientRequestException
   missing services     : api-gateway:GET /api/gateway/owners/{ownerId} → missing: visits-service
   action               : PAGE_ONCALL
-  narrative            : The api-gateway is successfully routing to customers-service
-                         and retrieving owner data, but the expected downstream call to
-                         visits-service is not occurring at all. Pet visit history is
-                         unavailable — page on-call immediately.
+  narrative            : The visits-service has completely disappeared from all
+                         traces — every owner detail request that normally fans out to
+                         visits-service is completing without it, and the api-gateway is
+                         surfacing WebClientRequestException errors on those GET calls.
 ────────────────────────────────────────────────────────────────────────
 ```
 
