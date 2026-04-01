@@ -438,11 +438,12 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 2 — Wait 90 seconds (countdown for audience)
-The loadgen hits the vets endpoint every ~5 seconds. 90 seconds is enough to
-fill the watch window with failure traces — no need to wait the full 3 minutes.
+### Step 2 — Wait 3 minutes (countdown for audience)
+The watch window is 3 minutes. Pre-kill traces stay in the window for up to 3 minutes —
+running detection before the window clears means healthy vets-service traces are still
+visible and MISSING_SERVICE will not fire.
 ```bash
-for i in $(seq 90 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run detection now.                             "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run detection now.                             "
 ```
 
 ### Step 3 — Run detection + triage (one command)
