@@ -267,7 +267,7 @@ def slide_solution_overview(prs):
         "  \u2022  Service missing from traces (MISSING_SERVICE)",
         "  \u2022  Unknown call path appeared (NEW_FINGERPRINT)",
         "  \u2022  Brand new error type, first occurrence fires",
-        "  \u2022  2+ tiers on same service \u2192 correlated alert",
+        "  \u2022  2+ tiers on same service \u2192 correlated alert (up to [Critical] MULTI_TIER)",
         "  \u2022  Anomaly correlated to a recent deploy",
         "  \u2022  Baseline self-heals after an incident resolves",
     ]
@@ -296,7 +296,7 @@ def slide_architecture(prs):
         ("2. Watch\n(every 5 min)",
          "Compares new traces\nagainst baseline\nEmits custom events\nto Splunk on any\ndeviation"),
         ("3. Correlate\n(every 5 min)",
-         "Joins Tier 2 + Tier 3\nevents by service\nAnnotates with\ndeployment context\nDowngrades severity\nif deploy-correlated"),
+         "Joins Tier 1 + 2 + 3\nevents by service\nMULTI_TIER = Critical\nAnnotates with\ndeployment context\nDowngrades severity\nif deploy-correlated"),
         ("4. Agent\n(on demand)",
          "Claude (AWS Bedrock)\nreads all signals\nReasons holistically\nOutputs: severity,\nroot cause,\nrecommended action"),
     ]
@@ -370,7 +370,7 @@ def slide_autodetect_relationship(prs):
         "  \u2022  Structural trace path drift",
         "  \u2022  Service missing from traces",
         "  \u2022  New error signature, first occurrence",
-        "  \u2022  Cross-tier correlation (Tier 2 + 3)",
+        "  \u2022  Cross-tier correlation (Tier 1 + 2 + 3)",
         "  \u2022  Deployment-aware severity downgrade",
         "  \u2022  Auto-promotion of new patterns",
         "  \u2022  Self-healing baseline after incidents",
@@ -416,7 +416,7 @@ def slide_tiers(prs):
          CYAN, WHITE),
         ("Correlation",
          "Cross-Tier Join\n(correlate.py)",
-         "TIER2_TIER3\n  \u2192 trace + error both fired\n     on same service\n     = high-confidence incident\n\nDowngrades if a recent\ndeployment event matches",
+         "TIER2_TIER3  \u2192 Major\n  trace + error on same service\n\nTIER1_TIER2 / TIER1_TIER3\n  \u2192 Major\n\nMULTI_TIER  \u2192 Critical\n  all 3 tiers on same service\n  = highest confidence",
          RGBColor(0xFF, 0xA5, 0x00), WHITE),  # amber — the output
     ]
 
@@ -444,8 +444,8 @@ def slide_tiers(prs):
     # Bottom callout
     add_rect(s, Inches(0.45), Inches(4.88), Inches(9.2), Inches(0.38), RGBColor(0x1A, 0x3A, 0x5C))
     add_textbox(s, Inches(0.57), Inches(4.9), Inches(9.0), Inches(0.34),
-                "Demo 4:  vets-service + DB down  \u2192  Tier 2 fires MISSING_SERVICE  +  Tier 3 fires NEW_ERROR_SIGNATURE  "
-                "\u2192  correlate.py emits  [Major] TIER2_TIER3  on customers-service",
+                "Demo 4:  vets-service + DB down  \u2192  Tier 1 (AutoDetect error rate)  +  Tier 2 (MISSING_SERVICE)  +  Tier 3 (NEW_ERROR_SIGNATURE)  "
+                "\u2192  correlate.py emits  [Critical] MULTI_TIER",
                 font_size=10, bold=False, color=RGBColor(0xFF, 0xCC, 0x44))
 
     footer(s)
@@ -472,8 +472,8 @@ def slide_demo_overview(prs):
          "visits-service crashes on startup. First request to the dead service triggers detection. No threshold exceeded"),
         ("Demo 3", "Missing Service \u2192 AI Triage",
          "vets-service killed. Framework detects structural absence from traces. Claude produces root cause + action in 3 min"),
-        ("Demo 4", "Dual-Tier Correlation",
-         "Both vets-service and DB down simultaneously. 9 individual signals collapsed into 1 TIER2_TIER3 correlated alert"),
+        ("Demo 4", "All-Tier Correlation",
+         "Both vets-service and DB down simultaneously. AutoDetect + trace drift + error signatures \u2192 [Critical] MULTI_TIER"),
         ("Demo 5", "Deploy-Correlated Severity Downgrade",
          "Bad deploy announced via CI/CD hook. correlate.py finds the deployment event and downgrades Major \u2192 Minor"),
         ("Demo 6", "Self-Healing",
