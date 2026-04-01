@@ -90,14 +90,17 @@ print('Error baseline wiped.')
 python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: "Error baseline for environment 'petclinicmbtest' is empty"
 
-# Step 6 — Strip any stale watch-promoted trace fingerprints
+# Step 6 — Strip stale watch-promoted fingerprints AND vets-service startup fingerprint
+# (vets-service:GET -> config-server fires MISSING_SERVICE noise on every pod restart)
 python3 -c "
 import json, pathlib
 p = pathlib.Path('data/baseline.petclinicmbtest.json')
 d = json.loads(p.read_text())
 before = len(d['fingerprints'])
 d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
-                     if fp['occurrences'] >= 2 and fp['watch_hits'] == 0}
+                     if fp['occurrences'] >= 2
+                     and fp['watch_hits'] == 0
+                     and not fp.get('root_op','').startswith('vets-service:')}
 p.write_text(json.dumps(d, indent=2))
 print(f'Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 "
@@ -543,14 +546,17 @@ k "kubectl scale deployment vets-service --replicas=1"
 # Clear alert log
 cat /dev/null > data/alerts.log
 
-# Strip any stale watch-promoted fingerprints (occurrences=1 noise from prior demos)
+# Strip stale watch-promoted fingerprints AND vets-service startup fingerprint
+# (vets-service:GET -> config-server re-learns on every pod restart, causes noise)
 python3 -c "
 import json, pathlib
 p = pathlib.Path('data/baseline.petclinicmbtest.json')
 d = json.loads(p.read_text())
 before = len(d['fingerprints'])
 d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
-                     if fp['occurrences'] >= 2 and fp['watch_hits'] == 0}
+                     if fp['occurrences'] >= 2
+                     and fp['watch_hits'] == 0
+                     and not fp.get('root_op','').startswith('vets-service:')}
 after = len(d['fingerprints'])
 p.write_text(json.dumps(d, indent=2))
 print(f'Trace baseline: removed {before-after} stale entries, kept {after} clean fingerprints.')
