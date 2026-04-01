@@ -512,6 +512,12 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 ### Step 4 — Restore
 ```bash
 k "kubectl scale deployment vets-service --replicas=1"
+k "kubectl rollout status deployment/vets-service --timeout=60s"
+
+# Wait 3 full minutes for outage traces to age out of the watch window
+# before running Demo 4 prerequisites — otherwise trace watch will still
+# show vets-service MISSING_SERVICE from this demo
+for i in $(seq 180 -1 1); do printf "\r  Waiting for window to clear... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — proceed to Demo 4.                            "
 ```
 
 ---
