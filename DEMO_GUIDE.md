@@ -628,16 +628,17 @@ The 6 anomalies:
 - `MISSING_SERVICE` — `api-gateway:PUT customers-service` — write path silent (can't open DB transaction)
 - `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` on `GET /owners, OwnerRepository.findAll`
 
-### Step 3b — Wait for AutoDetect to fire (~5 minutes)
+### Step 3b — Wait for AutoDetect to fire (~3-5 minutes)
 AutoDetect needs sustained error rate before it fires. While the audience processes
-the triage output, wait for the error rate detectors to trigger on customers-service
-and api-gateway.
-```bash
-for i in $(seq 300 -1 1); do printf "\r  Waiting for AutoDetect to fire... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run correlate now.                             "
+the triage output, watch the Splunk Alerts page for Critical alerts to appear.
+
+```
+Splunk UI → Alerts → filter: APM, Any Service/Endpoint, petclinicmbtest environment
 ```
 
-> **Tip:** While waiting, show the Splunk APM AutoDetect dashboard to the audience —
-> you can watch the error rate climbing on customers-service in real time.
+**Don't use a fixed countdown** — run correlate as soon as you see 2 Critical alerts for
+`api-gateway` and `customers-service` on the Alerts page. In practice AutoDetect fires
+within 3-7 minutes of the outage starting.
 
 ### Step 3c — Run correlate.py to see MULTI_TIER / Critical
 With AutoDetect now firing (Tier 1) + trace drift (Tier 2) + error signatures (Tier 3)
