@@ -534,7 +534,7 @@ k "kubectl scale deployment vets-service --replicas=1"
 
 ---
 
-## Demo 4: Correlated Anomaly — Two Tiers Fire Simultaneously
+## Demo 4: Correlated Anomaly — All Three Tiers Fire Simultaneously
 
 **Story:** *"Both vets-service AND the database go down at the same time. The trace tier sees MISSING_SERVICE across multiple paths. The error tier sees new CannotCreateTransactionException signatures. APM AutoDetect fires on the error rate spike. When all three tiers fire on the same service simultaneously, `correlate.py` emits a `[Critical] MULTI_TIER` correlated event — the highest-confidence signal in the framework."*
 
