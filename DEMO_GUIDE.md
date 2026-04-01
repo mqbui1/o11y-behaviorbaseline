@@ -649,36 +649,46 @@ python3 core/correlate.py --environment petclinicmbtest --window-minutes 20
 **Expected output:**
 ```
 [correlate] Fetching anomaly + deployment events in parallel (environment 'petclinicmbtest')...
-  Found 20 anomaly events across 3 tier(s)
-    tier1: 3 event(s)
-    tier2: 14 event(s)
-    tier3: 3 event(s)
+  Found 34 anomaly events across 3 tier(s)
+    tier1: 8 event(s)
+    tier2: 16 event(s)
+    tier3: 10 event(s)
 
-  Found 2 correlated anomaly group(s):
-
-  [Critical] MULTI_TIER — customers-service
-    Tiers:         tier1, tier2, tier3
-    Anomaly types: AUTODETECT_TIER1, AUTODETECT_TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE
-    Events:        14 over 720s
-    - AutoDetect [autodetect]: APM - Sudden change in service error rate (severity=Critical)
-    - AutoDetect [managed]: [Behavioral Baseline] customers-service error rate spike (severity=Critical)
-    - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
+  Found 3 correlated anomaly group(s):
 
   [Critical] MULTI_TIER — api-gateway
     Tiers:         tier1, tier2, tier3
-    Anomaly types: AUTODETECT_TIER1, MISSING_SERVICE, NEW_ERROR_SIGNATURE
-    Events:        8 over 480s
-    - AutoDetect [autodetect]: APM - Sudden change in service error rate (severity=Critical)
-    - No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent
-    - New error signature in api-gateway: 503 on GET vets-service
+    Anomaly types: AUTODETECT_TIER1, AUTODETECT_TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE, NEW_FINGERPRINT, SIGNATURE_VANISHED
+    Events:        26 over 958s
+    - Dominant error signature disappeared in api-gateway: 503 on GET vets-service (was 97% of service errors)
+    - Dominant error signature disappeared in api-gateway: 503 on GET vets-service (was 97% of service errors)
+    - Dominant error signature disappeared in api-gateway: 503 on GET vets-service (was 97% of service errors)
 
-  Event sent for customers-service (behavioral_baseline.correlated_anomaly)
+  [Critical] MULTI_TIER — customers-service
+    Tiers:         tier1, tier2, tier3
+    Anomaly types: AUTODETECT_TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Events:        14 over 934s
+    - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
+    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent: ['api-gateway', 'customers-service', 'visits-service']
+    - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent: ['api-gateway', 'customers-service']
+
+  [Major] TIER2_TIER3 — vets-service
+    Tiers:         tier2, tier3
+    Anomaly types: MISSING_SERVICE, SIGNATURE_VANISHED
+    Events:        6 over 951s
+    - Dominant error signature disappeared in vets-service: java.net.ConnectException on GET (was 38% of service errors)
+    - Dominant error signature disappeared in vets-service: java.net.ConnectException on GET (was 38% of service errors)
+    - Dominant error signature disappeared in vets-service: java.net.ConnectException on GET (was 38% of service errors)
+
   Event sent for api-gateway (behavioral_baseline.correlated_anomaly)
+  Event sent for customers-service (behavioral_baseline.correlated_anomaly)
+  Event sent for vets-service (behavioral_baseline.correlated_anomaly)
 ```
 
-> **Note:** Exact event counts and services may vary. The key indicators are `3 tier(s)` in the header
-> and `[Critical] MULTI_TIER` in the output. If AutoDetect hasn't fired yet, you'll see `[Major] TIER2_TIER3`
-> instead — run correlate again after another 2-3 minutes.
+> **Note:** Exact event counts vary. Key indicators: `3 tier(s)` in the header and `[Critical] MULTI_TIER`
+> on api-gateway and customers-service. vets-service shows `[Major] TIER2_TIER3` because AutoDetect only
+> fired on api-gateway and customers-service (the DB-dependent paths). If AutoDetect hasn't fired yet,
+> all groups will show `TIER2_TIER3` — run correlate again after another 2-3 minutes.
 
 **Key talking points:**
 - *"Tier 2 alone: could be a canary deploy. Tier 3 alone: could be noise. But all three tiers firing on the same service simultaneously? That's unambiguous — Critical severity, page oncall immediately."*
