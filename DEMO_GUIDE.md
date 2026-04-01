@@ -457,54 +457,49 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 [agent] env=petclinicmbtest | 1 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — The vets-service is completely absent from traces that normally flow
-    through api-gateway to vets-service, indicating the service is down or unreachable.
-    Root cause: vets-service is down or unreachable — the api-gateway is receiving
-    requests for GET vets-service but no spans from vets-service are appearing in traces.
-    As of 16:45 UTC, vets-service has completely vanished from distributed traces.
-    The api-gateway is routing GET requests intended for vets-service but receiving
-    no response spans, consistent with vets-service being crashed, undeployed, or
-    network-isolated.
-    Confidence: HIGH | Affected: vets-service, api-gateway
+[!!] INCIDENT — Both api-gateway and vets-service have completely stopped producing
+    traces, indicating they are down or unreachable right now.
+    Root cause: api-gateway and/or vets-service are down or network-isolated — no
+    traces have been emitted for either service in the last 3 minutes, suggesting a
+    crash, failed deployment, or network partition affecting the vets service path.
+    Confidence: HIGH | Affected: api-gateway, vets-service
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
     [PAGE_ONCALL] event emitted to Splunk
 ```
 
+> Claude lists both api-gateway and vets-service as affected because when the root op
+> `api-gateway:GET vets-service` produces 0 traces, both the caller and callee are listed
+> as absent. The root cause still correctly points to the vets-service path being silent.
+
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-31 16:45:10 UTC]  DETECTION
+[2026-04-01 05:47:30 UTC]  DETECTION
   anomaly type         : MISSING_SERVICE
   environment          : petclinicmbtest
   service              : api-gateway
-  message              : Expected service(s) absent from 'api-gateway:GET vets-service': ['vets-service']
-  detail               : Path: api-gateway:GET vets-service
-  trace id             : 93634beae2b3078c883ca4fde0e6fe29
+  message              : No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent: ['api-gateway', 'vets-service']
+  detail               : Root op silent (0 traces in 3m window)
   root op              : api-gateway:GET vets-service
-  missing services     : vets-service
-  services in trace    : api-gateway
+  missing services     : api-gateway, vets-service
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-31 16:45:10 UTC]  TRIAGE
+[2026-04-01 05:47:30 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
   environment          : petclinicmbtest
-  affected services    : vets-service, api-gateway
-  assessment           : The vets-service is completely absent from traces that
-                         normally flow through api-gateway to vets-service.
-  root cause           : vets-service is down or unreachable — the api-gateway is
-                         receiving requests for GET vets-service but no spans from
-                         vets-service are appearing in traces.
-  missing services     : api-gateway:GET vets-service → missing: vets-service
+  affected services    : api-gateway, vets-service
+  root cause           : api-gateway and/or vets-service are down or network-isolated —
+                         no traces have been emitted for either service in the last 3 minutes
+  missing services     : api-gateway:GET vets-service → missing: api-gateway, vets-service
   action               : PAGE_ONCALL
-  narrative            : As of 16:45 UTC, vets-service has completely vanished from
-                         distributed traces in the petclinicmbtest environment. The
-                         api-gateway is routing GET requests intended for vets-service
-                         but receiving no response spans — consistent with vets-service
-                         being crashed, undeployed, or network-isolated.
+  narrative            : As of 05:47 UTC, there have been zero traces for the 'GET
+                         vets-service' path through api-gateway for the entire 3-minute
+                         observation window. The on-call engineer should immediately check
+                         the health and pod status of vets-service and review recent changes.
 ────────────────────────────────────────────────────────────────────────
 ```
 
