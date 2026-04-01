@@ -410,6 +410,10 @@ The 3 anomalies:
 ### Step 4 — Restore
 ```bash
 k "kubectl scale deployment visits-service --replicas=1"
+k "kubectl rollout status deployment/visits-service --timeout=60s"
+
+# Wait ~30s for loadgen to generate fresh traces before Demo 3 prerequisites
+sleep 30
 
 # Re-learn clean baseline after demo
 python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
