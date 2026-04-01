@@ -622,36 +622,53 @@ The 6 anomalies:
 - `MISSING_SERVICE` — `api-gateway:PUT customers-service` — write path silent (can't open DB transaction)
 - `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` on `GET /owners, OwnerRepository.findAll`
 
-### Step 3b — Run correlate.py to see the TIER2_TIER3 event
+### Step 3b — Wait for AutoDetect to fire (~5 minutes)
+AutoDetect needs sustained error rate before it fires. While the audience processes
+the triage output, wait for the error rate detectors to trigger on customers-service
+and api-gateway.
 ```bash
-python3 core/correlate.py --environment petclinicmbtest --window-minutes 15
+for i in $(seq 300 -1 1); do printf "\r  Waiting for AutoDetect to fire... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run correlate now.                             "
+```
+
+> **Tip:** While waiting, show the Splunk APM AutoDetect dashboard to the audience —
+> you can watch the error rate climbing on customers-service in real time.
+
+### Step 3c — Run correlate.py to see MULTI_TIER / Critical
+With AutoDetect now firing (Tier 1) + trace drift (Tier 2) + error signatures (Tier 3)
+all on the same service, correlate.py escalates to `[Critical] MULTI_TIER`.
+```bash
+python3 core/correlate.py --environment petclinicmbtest --window-minutes 20
 ```
 
 **Expected output:**
 ```
 [correlate] Fetching anomaly + deployment events in parallel (environment 'petclinicmbtest')...
-  Found 16 anomaly events across 2 tiers
+  Found 20 anomaly events across 3 tier(s)
+    tier1: 2 event(s)
     tier2: 15 event(s)
-    tier3: 1 event(s)
+    tier3: 3 event(s)
 
   Found 1 correlated anomaly group(s):
 
-  [Major] TIER2_TIER3 — customers-service
-    Tiers:         tier2, tier3
-    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
-    Events:        10 over 597s
+  [Critical] MULTI_TIER — customers-service
+    Tiers:         tier1, tier2, tier3
+    Anomaly types: TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Events:        14 over 720s
+    - AutoDetect: [Behavioral Baseline] customers-service error rate spike (severity=Critical)
     - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
-    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent: ['api-gateway', 'customers-service', 'visits-service']
-    - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent: ['api-gateway', 'customers-service']
+    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent
 
   Event sent for customers-service (behavioral_baseline.correlated_anomaly)
 ```
 
+> **Note:** If AutoDetect hasn't fired yet, the output will show `[Major] TIER2_TIER3`
+> instead — that's also valid. Run correlate again after another 2-3 minutes.
+
 **Key talking points:**
-- *"Tier 2 (trace) fires alone: a new service going down could be a canary deploy. Error tier firing alone: a spike on one service could be noise. But both firing on the same service simultaneously? That's a real incident."*
-- *"correlate.py reads Splunk custom events directly — it works even when agent.py isn't running. It's the persistent cross-tier join layer."*
-- *"9 individual anomalies collapsed into 1 TIER2_TIER3 correlated event at [Major] severity. One page instead of 9."*
-- *"Claude sees the full picture: missing traces AND CannotCreateTransactionException together → unambiguously points to the database."*
+- *"Tier 2 alone: could be a canary deploy. Tier 3 alone: could be noise. But all three tiers firing on the same service simultaneously? That's unambiguous — Critical severity, page oncall immediately."*
+- *"AutoDetect sees the error rate spike on metrics. Our framework sees the structural silence in traces AND the new exception type. correlate.py is the join layer that brings all three together."*
+- *"Without this correlation layer, you get 3 separate alerts from 3 different systems. With it, you get one [Critical] MULTI_TIER event with full context — tier1 metric anomaly, tier2 trace dropout, tier3 new error signature."*
+- *"This is the value of the framework as a layer on top of AutoDetect, not a replacement for it."*
 
 ### Step 4 — Restore
 ```bash
