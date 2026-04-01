@@ -582,15 +582,16 @@ The watch window will contain:
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 6 anomaly(s) from watch
+[agent] env=petclinicmbtest | 7 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — Multiple services are unreachable and the customers-service is failing to
-    create database transactions, indicating a database outage affecting the entire petclinic stack.
-    Root cause: The database (likely MySQL/PostgreSQL) backing customers-service is down or
-    unreachable, causing CannotCreateTransactionException; this also explains why PUT/GET
-    operations to customers-service, vets-service, and visits-service have gone silent — all
-    depend on DB connectivity to serve requests.
+[!!] INCIDENT — The database backing customers-service (and likely other services) is
+    unreachable, causing transaction failures, 500 errors on the api-gateway, and complete
+    silence on several previously active trace paths.
+    Root cause: A shared database dependency is down or unreachable — customers-service is
+    throwing CannotCreateTransactionException on every DB call, which cascades into 500s at
+    the api-gateway and explains why PUT/GET operations to customers-service, vets-service,
+    and visits-service have gone completely silent.
     Confidence: HIGH | Affected: api-gateway, customers-service, visits-service, vets-service
     Recommended action: PAGE_ONCALL
 
@@ -598,12 +599,13 @@ The watch window will contain:
     [PAGE_ONCALL] event emitted to Splunk
 ```
 
-The 6 anomalies:
-- `NEW_FINGERPRINT` ×2 on `GET customers-service` — partial/truncated traces (DB call started but never completed)
+The 7 anomalies:
+- `NEW_FINGERPRINT` ×2 on `GET customers-service` — truncated traces (DB call started but never completed)
 - `MISSING_SERVICE` — `api-gateway:GET vets-service` — vets-service pod down
-- `MISSING_SERVICE` — `api-gateway:GET /api/gateway/owners/{ownerId}` — owner detail path silent (visits-service DB-dependent)
+- `MISSING_SERVICE` — `api-gateway:GET /api/gateway/owners/{ownerId}` — owner detail path silent
 - `MISSING_SERVICE` — `api-gateway:PUT customers-service` — write path silent (can't open DB transaction)
-- `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` on `GET /owners, OwnerRepository.findAll`
+- `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` on `GET /owners, OwnerRepository.findAll` in customers-service
+- `NEW_ERROR_SIGNATURE` — `500 on GET, GET customers-service` in api-gateway
 
 ### Step 3b — Wait for AutoDetect to fire (~3-5 minutes)
 AutoDetect needs sustained error rate before it fires. While the audience processes
