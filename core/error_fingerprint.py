@@ -129,6 +129,18 @@ AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
 # Number of parallel threads for fetching trace details.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
 
+# Operations excluded from error signature detection (health checks / probes).
+EXCLUDE_OPERATIONS = {
+    "GET /actuator/health",
+    "GET /actuator/health/liveness",
+    "GET /actuator/health/readiness",
+    "GET /actuator/info",
+    "GET /health",
+    "GET /healthz",
+    "GET /readyz",
+    "GET /livez",
+}
+
 # Tags examined when building error signatures
 ERROR_TAG_KEYS = [
     "error",
@@ -354,6 +366,8 @@ def build_error_signatures(trace: dict) -> list[dict]:
         tags        = _span_tags(span)
         service     = span.get("serviceName", "unknown")
         operation   = span.get("operationName", "unknown")
+        if operation in EXCLUDE_OPERATIONS:
+            continue
         error_type  = (tags.get("exception.type")
                        or tags.get("error.type")
                        or tags.get("http.status_code")
