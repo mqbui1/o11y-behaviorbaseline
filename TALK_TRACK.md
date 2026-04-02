@@ -96,7 +96,23 @@
 
 ---
 
-## Slide 8 — Demo Agenda
+## Slide 8 — Demo Environment: Spring PetClinic
+
+> "Before I walk through the demos, let me orient you to the application they all run against.
+>
+> This is Spring PetClinic — a standard Java microservices reference app, deployed on Kubernetes using k3d on an EC2 instance. It's a realistic multi-service topology: seven services, a shared MySQL database, and a continuous load generator hitting it every five seconds.
+>
+> At the infrastructure layer: config-server centralizes Spring Cloud Config, discovery-server runs Eureka for service registration, and admin-server provides operational dashboards. These are the plumbing — they don't handle business traffic directly.
+>
+> The public entry point is api-gateway — everything flows through here. It fans out to three business services: customers-service manages owner and pet profiles, vets-service serves the veterinarian catalog, and visits-service handles appointment records. All three talk to a shared MySQL database.
+>
+> Every service is instrumented with the Splunk OpenTelemetry Java agent, injected automatically via the OTel Operator on Kubernetes. Traces and metrics flow continuously to Splunk Observability Cloud, tagged to the environment petclinicmbtest.
+>
+> This is what the behavioral baseline learns from. When I run a demo — kill vets-service, crash the DB, push a bad deploy — these are the services that change. The framework knows the normal call graph and fires when it deviates."
+
+---
+
+## Slide 9 — Demo Agenda
 
 > "Here's what I'll walk through today.
 >
@@ -118,7 +134,7 @@
 
 ---
 
-## Slide 9 — Live Demo
+## Slide 10 — Live Demo
 
 > "Alright — let's see it live."
 
@@ -126,7 +142,7 @@
 
 ---
 
-## Slide 10 — Product Proposal
+## Slide 11 — Product Proposal
 
 > "So the ask here isn't 'can I run this in one environment.' The ask is: should this become a native capability inside Splunk Observability Cloud?
 >
@@ -150,12 +166,13 @@
 |---------|---------|------|
 | Slides 1–3 | Title, Problem, Tiers | 5 min |
 | Slides 4–7 | Solution, Architecture, AutoDetect, Capabilities | 8 min |
-| Slide 8 | Demo agenda | 2 min |
+| Slide 8 | PetClinic topology overview | 2 min |
+| Slide 9 | Demo agenda | 1 min |
 | Demos 0–2 | Steady state, DB outage, bad deploy | 8 min |
 | Demo 3 | Missing service + AI triage | 5 min |
 | Demo 4 | All-tier correlation (MULTI_TIER) | 5 min |
-| Demos 5–7 | Deploy downgrade, self-healing, auto-onboard | 7 min |
-| Slide 10 | Next steps + Q&A | 10 min |
+| Demos 5–7 | Deploy downgrade, self-healing, auto-onboard | 6 min |
+| Slide 11 | Product Proposal + Q&A | 10 min |
 
 ---
 

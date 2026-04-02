@@ -452,6 +452,81 @@ def slide_tiers(prs):
     return s
 
 
+def slide_petclinic_topology(prs):
+    """Slide — Demo environment: Spring PetClinic topology."""
+    s = blank_slide(prs)
+    fill_bg(s, NAVY)
+    add_rect(s, Inches(0), Inches(0), Inches(0.18), H, CYAN)
+
+    add_textbox(s, Inches(0.45), Inches(0.25), Inches(9), Inches(0.55),
+                "Demo Environment: Spring PetClinic on Kubernetes",
+                font_size=26, bold=True, color=CYAN)
+    add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
+
+    add_textbox(s, Inches(0.45), Inches(1.0), Inches(9.2), Inches(0.38),
+                "All demos run against a live Spring PetClinic deployment on k3d (k8s). "
+                "Splunk OTel Java agent auto-instruments every service.",
+                font_size=12, color=RGBColor(0xCC, 0xDD, 0xEE))
+
+    BOX_W = Inches(2.0)
+    BOX_H = Inches(0.56)
+    INFRA  = RGBColor(0x33, 0x4E, 0x68)
+    GW     = RGBColor(0x1A, 0x5C, 0x4A)
+    SVC    = RGBColor(0x1A, 0x3A, 0x5C)
+    DB     = RGBColor(0x5C, 0x2A, 0x1A)
+
+    def svc_box(slide, x, y, label, sublabel, bar_color, fill_color):
+        add_rect(slide, x, y, BOX_W, BOX_H, fill_color)
+        add_rect(slide, x, y, BOX_W, Inches(0.05), bar_color)
+        add_textbox(slide, x + Inches(0.1), y + Inches(0.07),
+                    BOX_W - Inches(0.15), Inches(0.28),
+                    label, font_size=11, bold=True, color=WHITE)
+        add_textbox(slide, x + Inches(0.1), y + Inches(0.32),
+                    BOX_W - Inches(0.15), Inches(0.22),
+                    sublabel, font_size=9, bold=False, color=RGBColor(0xAA, 0xC4, 0xD8))
+
+    # Row 1 — infra services
+    row1_y = Inches(1.5)
+    svc_box(s, Inches(1.5),  row1_y, "config-server",     "Spring Cloud Config", MGRAY, INFRA)
+    svc_box(s, Inches(4.0),  row1_y, "discovery-server",  "Eureka Service Registry", MGRAY, INFRA)
+    svc_box(s, Inches(6.5),  row1_y, "admin-server",      "Spring Boot Admin", MGRAY, INFRA)
+
+    # Row 2 — gateway
+    row2_y = Inches(2.25)
+    svc_box(s, Inches(3.75), row2_y, "api-gateway",       "Public ingress / load balancer", CYAN, GW)
+
+    # Row 3 — core services
+    row3_y = Inches(3.0)
+    svc_box(s, Inches(1.2),  row3_y, "customers-service", "Owner + pet profiles", CYAN, SVC)
+    svc_box(s, Inches(3.75), row3_y, "vets-service",      "Veterinarian catalog", CYAN, SVC)
+    svc_box(s, Inches(6.3),  row3_y, "visits-service",    "Appointment records", CYAN, SVC)
+
+    # Row 4 — database
+    row4_y = Inches(3.75)
+    svc_box(s, Inches(3.75), row4_y, "petclinic-db",      "MySQL (shared data store)", RGBColor(0xFF, 0x66, 0x22), DB)
+
+    # Arrows
+    def arrow_down(slide, x, y):
+        add_textbox(slide, x, y, Inches(0.2), Inches(0.25),
+                    "\u25bc", font_size=9, bold=False, color=RGBColor(0x66, 0x99, 0xBB))
+
+    arrow_down(s, Inches(4.75), row1_y + BOX_H + Inches(0.02))   # infra row gap
+    arrow_down(s, Inches(4.75), row2_y + BOX_H + Inches(0.02))   # gw -> services
+    arrow_down(s, Inches(2.15), row3_y + BOX_H + Inches(0.02))   # customers -> db
+    arrow_down(s, Inches(4.75), row3_y + BOX_H + Inches(0.02))   # vets -> db
+    arrow_down(s, Inches(7.25), row3_y + BOX_H + Inches(0.02))   # visits -> db
+
+    # Legend bar
+    add_rect(s, Inches(0.45), Inches(4.82), Inches(9.2), Inches(0.42), RGBColor(0x1A, 0x3A, 0x5C))
+    add_textbox(s, Inches(0.57), Inches(4.84), Inches(9.0), Inches(0.38),
+                "Loadgen hits api-gateway every ~5 s  \u00b7  OTel Java agent on all services  \u00b7  "
+                "Traces + metrics flow to Splunk Observability (env: petclinicmbtest)",
+                font_size=10, color=RGBColor(0xBB, 0xCC, 0xDD))
+
+    footer(s)
+    return s
+
+
 def slide_demo_overview(prs):
     """Slide 6 — Demo agenda."""
     s = blank_slide(prs)
@@ -674,6 +749,7 @@ def build():
     slide_architecture(prs)
     slide_autodetect_relationship(prs)
     slide_key_capabilities(prs)
+    slide_petclinic_topology(prs)
     slide_demo_overview(prs)
     slide_section_break(prs, "Live Demo")
     slide_next_steps(prs)
