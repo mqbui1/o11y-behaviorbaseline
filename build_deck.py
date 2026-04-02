@@ -583,7 +583,7 @@ def slide_demo_overview(prs):
              RGBColor(0x1A, 0x3A, 0x5C))
     add_textbox(s, Inches(0.57), H - Inches(0.53), Inches(9.0), Inches(0.34),
                 "\u26a0  Demo note: detections write to alerts.log + Splunk custom events.  "
-                "Production target: full Splunk UI surfacing + PagerDuty / Slack notifications.",
+                "Production target: full Splunk UI surfacing + Splunk On-Call / Slack notifications.",
                 font_size=9, color=RGBColor(0xFF, 0xCC, 0x44))
 
     footer(s)
@@ -680,7 +680,7 @@ def slide_next_steps(prs):
          "Behavioral baseline learning built into\nAPM onboarding — a toggle, not a script.\n\n"
          "  \u2022  Detections surface alongside AutoDetect\n"
          "       alerts in the Splunk UI\n"
-         "  \u2022  Same notification routing (PagerDuty,\n"
+         "  \u2022  Same notification routing (Splunk On-Call,\n"
          "       Slack, webhook)\n"
          "  \u2022  Same muting, SLO wiring, and RBAC\n"
          "  \u2022  No external scripts or cron jobs"),
