@@ -150,7 +150,7 @@
 >
 > Three pillars.
 >
-> First: native platform integration. Behavioral baseline learning built into APM onboarding — not a script you run, a toggle you enable. Detections surface as first-class alerts in the Splunk UI alongside AutoDetect alerts, with the same notification routing, the same PagerDuty and Slack integrations, the same muting and SLO wiring.
+> First: native platform integration. Behavioral baseline learning built into APM onboarding — not a script you run, a toggle you enable. Detections surface as first-class alerts in the Splunk UI alongside AutoDetect alerts, with the same notification routing, the same Splunk On-Call and Slack integrations, the same muting and SLO wiring.
 >
 > Second: AI triage as a product feature. The Claude-generated verdict — severity, root cause, recommended action — becomes the 'Explain this alert' experience inside the alert detail view. Every INCIDENT gets a triage summary and a generated runbook attached automatically.
 >
