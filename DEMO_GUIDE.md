@@ -194,15 +194,6 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
 
 **Story:** *"The database goes down. Services start throwing transaction errors and health check failures that have never appeared before. The framework detects brand new error signatures on first occurrence — no threshold, no tuning required."*
 
-### Prerequisites
-```bash
-# Clear alert log and ensure clean error baseline
-cat /dev/null > data/alerts.log
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
-python3 core/error_fingerprint.py --environment petclinicmbtest show
-# Expected: 0 signatures (system is healthy)
-```
-
 ### Step 1 — Kill the DB
 ```bash
 k "kubectl scale deployment petclinic-db --replicas=0"
