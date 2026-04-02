@@ -584,61 +584,75 @@ def slide_section_break(prs, label="Live Demo"):
 
 
 def slide_next_steps(prs):
-    """Closing slide — next steps / ask."""
+    """Closing slide — product proposal for PM audience."""
     s = blank_slide(prs)
     fill_bg(s, NAVY)
     add_rect(s, Inches(0), Inches(0), Inches(0.18), H, CYAN)
 
     add_textbox(s, Inches(0.45), Inches(0.25), Inches(9), Inches(0.55),
-                "Next Steps",
-                font_size=26, bold=True, color=CYAN)
+                "Product Proposal: Make This Native to Splunk Observability Cloud",
+                font_size=22, bold=True, color=CYAN)
     add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
 
-    # Three action boxes
+    add_textbox(s, Inches(0.45), Inches(0.98), Inches(9.2), Inches(0.38),
+                "The proof of concept is working in production today. "
+                "The ask: productize this as a native platform capability.",
+                font_size=12, color=RGBColor(0xCC, 0xDD, 0xEE))
+
+    # Three pillars
     steps = [
-        ("Pilot Environment",
-         "Identify one production APM environment\nto run the framework against.\n\n"
-         "Onboarding takes < 5 minutes.\nBaseline learns from live traffic automatically."),
-        ("UI + Notifications",
-         "Today: detections log to alerts.log + Splunk\ncustom events (visible on dashboard).\n\n"
-         "Production target:\n"
-         "  \u2022  All alerts surfaced in Splunk UI\n"
-         "  \u2022  PagerDuty / Slack / webhook on INCIDENT\n"
-         "  \u2022  Triage summary attached to the alert\n"
-         "  \u2022  One-click runbook from the alert detail"),
-        ("Expand Coverage",
-         "Once baseline is stable (1–2 days):\n\n"
-         "  \u2022  Run onboard --auto on all environments\n"
-         "  \u2022  Add CI/CD deployment hook\n"
-         "  \u2022  Enable dedup agent to suppress floods\n"
-         "  \u2022  Add SLO impact estimator to runbook"),
+        ("Native Platform Integration",
+         "Behavioral baseline learning built into\nAPM onboarding — a toggle, not a script.\n\n"
+         "  \u2022  Detections surface alongside AutoDetect\n"
+         "       alerts in the Splunk UI\n"
+         "  \u2022  Same notification routing (PagerDuty,\n"
+         "       Slack, webhook)\n"
+         "  \u2022  Same muting, SLO wiring, and RBAC\n"
+         "  \u2022  No external scripts or cron jobs"),
+        ("AI Triage as a Product Feature",
+         "Claude-generated verdict becomes the\n'Explain this alert' experience.\n\n"
+         "  \u2022  Every INCIDENT gets a triage summary\n"
+         "       attached automatically\n"
+         "  \u2022  Root cause + affected services +\n"
+         "       recommended action in plain English\n"
+         "  \u2022  Generated runbook linked from the\n"
+         "       alert detail view"),
+        ("Platform Differentiation",
+         "AutoDetect covers the metric layer.\n"
+         "Every vendor covers the metric layer.\n\n"
+         "  \u2022  Structural + behavioral detection catches\n"
+         "       failures that leave no metric fingerprint\n"
+         "  \u2022  First-occurrence detection — no threshold\n"
+         "       to tune, fires on first event\n"
+         "  \u2022  Self-healing baseline — zero ops overhead\n"
+         "  \u2022  Defensible, differentiated capability"),
     ]
 
     bw = Inches(2.9)
-    bh = Inches(3.6)
+    bh = Inches(3.45)
     gap = Inches(0.18)
-    sy  = Inches(1.05)
+    sy  = Inches(1.45)
 
     for i, (title, body) in enumerate(steps):
         x = Inches(0.45) + i * (bw + gap)
         add_rect(s, x, sy, bw, bh, DKGRAY)
         add_rect(s, x, sy, bw, Inches(0.06), CYAN)
         # Step number badge
-        add_rect(s, x + Inches(0.12), sy + Inches(0.12),
+        add_rect(s, x + Inches(0.12), sy + Inches(0.1),
                  Inches(0.32), Inches(0.32), CYAN)
-        add_textbox(s, x + Inches(0.12), sy + Inches(0.1),
+        add_textbox(s, x + Inches(0.12), sy + Inches(0.08),
                     Inches(0.32), Inches(0.35),
                     str(i + 1), font_size=13, bold=True, color=NAVY,
                     align=PP_ALIGN.CENTER)
-        add_textbox(s, x + Inches(0.52), sy + Inches(0.1),
+        add_textbox(s, x + Inches(0.52), sy + Inches(0.08),
                     bw - Inches(0.65), Inches(0.42),
                     title, font_size=13, bold=True, color=CYAN)
-        add_textbox(s, x + Inches(0.12), sy + Inches(0.6),
-                    bw - Inches(0.22), Inches(2.9),
-                    body, font_size=11, color=WHITE)
+        add_textbox(s, x + Inches(0.12), sy + Inches(0.58),
+                    bw - Inches(0.22), Inches(2.75),
+                    body, font_size=10.5, color=WHITE)
 
     # Bottom tagline
-    add_textbox(s, Inches(0.45), Inches(4.78), Inches(9.2), Inches(0.35),
+    add_textbox(s, Inches(0.45), Inches(4.98), Inches(9.2), Inches(0.35),
                 "Questions?  \u2014  Marc Bui  |  Splunk Observability",
                 font_size=12, bold=False,
                 color=RGBColor(0xAA, 0xC4, 0xD8),
