@@ -377,8 +377,35 @@ otelcol-fingerprint (DaemonSet)
 Detection latency: **~10 seconds** vs ~5 minutes with cron.
 
 Events emitted:
-- `behavioral_baseline.trace.drift` — new/unknown trace structure
-- `behavioral_baseline.error.drift` — new error signature never seen in baseline
+- `trace.path.drift` — new/unknown trace structure (consumed by `correlate.py` as Tier 2)
+- `error.signature.drift` — new error signature never seen in baseline (consumed by `correlate.py` as Tier 3)
+
+### Detection boundary: edge processor vs. Python correlation layer
+
+The OTel processor and `correlate.py` are **complementary layers, not alternatives**. Moving all detection into the edge processor would lose critical signal. Use both.
+
+| Capability | OTel edge processor | Python `correlate.py` |
+|---|---|---|
+| Detection latency | ~10 seconds | ~1–5 minutes (cron) |
+| Trace structure drift (Tier 2) | ✅ locally | ✅ via Splunk APM backend |
+| New error signatures (Tier 3) | ✅ locally | ✅ via Splunk APM backend |
+| Tier 1 AutoDetect metric incidents | ❌ no API access | ✅ fetches via `/v2/incident` |
+| Multi-tier correlation (2+ tiers same service) | ❌ no tier concept | ✅ `TIER2_TIER3`, `MULTI_TIER`, etc. |
+| Multiple detectors for same application | ❌ unaware of detectors | ✅ joins all detector origins |
+| Spans split across multiple collector nodes | ⚠️ partial trace guard (see below) | ✅ queries full trace from backend |
+| Deployment-aware severity downgrade | ❌ | ✅ via `deployment.started` events |
+| Auto-promotion across watch runs | ❌ stateless | ✅ `dedup_state.<env>.json` |
+| Cross-environment correlation | ❌ | ✅ `multi_env_correlator.py` |
+
+**The edge processor is a fast-trigger early warning system.** Its `trace.path.drift` and `error.signature.drift` events feed directly into `correlate.py` (Tier 2 and Tier 3 respectively), where they are joined with Tier 1 AutoDetect incidents to produce high-confidence correlated alerts. The Python layer has the full picture; the edge layer has speed.
+
+### Partial trace guard
+
+In multi-node deployments, spans from the same trace can arrive at different collector instances (DaemonSet pods). Fingerprinting an incomplete span set produces a hash that will never match the baseline, causing false-positive alerts.
+
+The processor automatically skips detection when the local span count is below `partial_trace_threshold` (default: `0.7`) × the maximum span count seen for that `root_op` in the baseline. If fewer than 70% of the expected spans arrived locally, the trace is considered incomplete and silently dropped — `correlate.py` will catch the full picture on the next cron cycle.
+
+Set `partial_trace_threshold: 0.0` in the collector config to disable the guard (e.g. if all services send to a single collector).
 
 ### Directory layout
 
@@ -461,6 +488,7 @@ All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprin
 | `baseline_reload_interval` | `60s` | How often baseline JSON is re-read from disk |
 | `baseline_path` | `/baseline/baseline.json` | Mounted trace baseline file path |
 | `error_baseline_path` | `/baseline/error_baseline.json` | Mounted error baseline file path |
+| `partial_trace_threshold` | `0.7` | Min fraction of baseline span count required to fingerprint (0.0 = disabled). Guards against false positives when spans split across collector nodes. |
 
 ---
 

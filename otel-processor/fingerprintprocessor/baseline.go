@@ -9,12 +9,14 @@ import (
 
 // fingerprintEntry mirrors the Python baseline fingerprint dict.
 type fingerprintEntry struct {
-	Hash          string   `json:"hash"`
-	Path          string   `json:"path"`
-	RootOp        string   `json:"root_op"`
-	Services      []string `json:"services"`
-	Occurrences   int      `json:"occurrences"`
-	AutoPromoted  bool     `json:"auto_promoted"`
+	Hash         string   `json:"hash"`
+	Path         string   `json:"path"`
+	RootOp       string   `json:"root_op"`
+	Services     []string `json:"services"`
+	SpanCount    int      `json:"span_count"`
+	EdgeCount    int      `json:"edge_count"`
+	Occurrences  int      `json:"occurrences"`
+	AutoPromoted bool     `json:"auto_promoted"`
 }
 
 // errorSigEntry mirrors the Python error_baseline signature dict.
@@ -142,4 +144,21 @@ func (bs *baselineStore) isEmpty() bool {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
 	return len(bs.traceFingerprints) == 0 && len(bs.errorSignatures) == 0
+}
+
+// maxBaselineSpanCount returns the maximum span_count seen across all established
+// baseline fingerprints for the given root_op. Returns 0 if no established
+// fingerprints exist for the root_op (unknown operation — don't suppress).
+func (bs *baselineStore) maxBaselineSpanCount(rootOp string, minOccurrences int) int {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	max := 0
+	for _, e := range bs.traceFingerprints {
+		if e.RootOp == rootOp && e.Occurrences >= minOccurrences {
+			if e.SpanCount > max {
+				max = e.SpanCount
+			}
+		}
+	}
+	return max
 }

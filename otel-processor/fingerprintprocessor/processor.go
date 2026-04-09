@@ -197,6 +197,30 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 		return
 	}
 
+	// Partial trace guard: if we have established baselines for this root_op,
+	// check whether the spans we collected represent a meaningfully complete
+	// trace. In a multi-node deployment, spans from the same trace may arrive
+	// at different collector instances. Fingerprinting an incomplete span set
+	// produces a hash that will never match the baseline, causing false-positive
+	// NEW_FINGERPRINT alerts. Skip detection when the span count is below
+	// PartialTraceThreshold * max(baseline span counts for this root_op).
+	if p.cfg.PartialTraceThreshold > 0 {
+		maxExpected := p.baseline.maxBaselineSpanCount(fp.rootOp, p.cfg.MinBaselineOccurrences)
+		if maxExpected > 0 {
+			threshold := int(float64(maxExpected) * p.cfg.PartialTraceThreshold)
+			if fp.spanCount < threshold {
+				p.logger.Debug("skipping partial trace",
+					zap.String("trace_id", buf.traceID),
+					zap.String("root_op", fp.rootOp),
+					zap.Int("span_count", fp.spanCount),
+					zap.Int("expected_min", threshold),
+					zap.Int("baseline_max", maxExpected),
+				)
+				return
+			}
+		}
+	}
+
 	// Check for MISSING_SERVICE: same root_op in baseline but fewer services now
 	established := p.baseline.traceFingerprintsByRootOp(fp.rootOp, p.cfg.MinBaselineOccurrences)
 	if len(established) > 0 && entry == nil {
