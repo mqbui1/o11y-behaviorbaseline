@@ -1,0 +1,79 @@
+# baseline-sync: CronJob that pushes the latest baseline JSON files into the
+# 'behavioral-baseline' ConfigMap so the collector pods pick them up within
+# 60 seconds (Kubernetes ConfigMap volume propagation).
+#
+# Run manually first to seed the ConfigMap:
+#   kubectl create configmap behavioral-baseline \
+#     --from-file=baseline.json=baseline.<env>.json \
+#     --from-file=error_baseline.json=error_baseline.<env>.json \
+#     --dry-run=client -o yaml | kubectl apply -f -
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: baseline-sync
+  namespace: default
+spec:
+  schedule: "*/5 * * * *"   # sync every 5 minutes after Python learn runs
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: baseline-sync
+          restartPolicy: OnFailure
+          containers:
+            - name: sync
+              image: bitnami/kubectl:latest
+              env:
+                - name: ENVIRONMENT
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: env
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  # Baseline files are expected to be mounted from a PVC or
+                  # baked into the image. For workshop use, they're copied
+                  # from a shared volume written by the Python baseline job.
+                  kubectl create configmap behavioral-baseline \
+                    --from-file=baseline.json=/baseline/baseline.${ENVIRONMENT}.json \
+                    --from-file=error_baseline.json=/baseline/error_baseline.${ENVIRONMENT}.json \
+                    --dry-run=client -o yaml | kubectl apply -f -
+              volumeMounts:
+                - name: baseline-files
+                  mountPath: /baseline
+          volumes:
+            - name: baseline-files
+              persistentVolumeClaim:
+                claimName: baseline-pvc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: baseline-sync
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: baseline-sync
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: baseline-sync
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: baseline-sync
+roleRef:
+  kind: Role
+  name: baseline-sync
+  apiGroup: rbac.authorization.k8s.io
