@@ -352,9 +352,122 @@ The `agents/` directory contains 14 single-purpose scripts built before `agent.p
 
 ---
 
+## OTel Collector edge processor (real-time detection)
+
+The default cron-based watch cycle detects anomalies with ~1–5 minute latency. For near-real-time detection (~10 seconds), deploy the custom OTel Collector processor in `otel-processor/`.
+
+### How it works
+
+```
+App emits spans
+      │
+      ▼
+otelcol-fingerprint (DaemonSet)
+      │
+      ├── fingerprintprocessor (custom Go processor)
+      │     ├── buffers spans per traceId (10s tail window)
+      │     ├── on flush: compute trace fingerprint + error signatures
+      │     ├── compare against baseline (ConfigMap-mounted JSON)
+      │     ├── MATCH  → silent, pass through
+      │     └── DRIFT  → emit event to Splunk ingest immediately (~10s latency)
+      │
+      └── forward all spans to Splunk APM unchanged
+```
+
+Detection latency: **~10 seconds** vs ~5 minutes with cron.
+
+Events emitted:
+- `behavioral_baseline.trace.drift` — new/unknown trace structure
+- `behavioral_baseline.error.drift` — new error signature never seen in baseline
+
+### Directory layout
+
+```
+otel-processor/
+├── fingerprintprocessor/     ← Go processor (OTel Collector component)
+│   ├── processor.go          ← trace buffering + detection logic
+│   ├── fingerprint.go        ← fingerprinting + error sig extraction (mirrors Python)
+│   ├── baseline.go           ← thread-safe baseline store, reloads every 60s
+│   ├── emitter.go            ← POST events to Splunk ingest
+│   ├── factory.go            ← OTel Collector registration
+│   ├── config.go             ← config schema
+│   └── go.mod
+├── collector-builder/
+│   └── manifest.yaml         ← ocb manifest (compiles custom collector binary)
+├── k8s/
+│   ├── daemonset.yaml        ← DaemonSet + ConfigMap + Service + ServiceAccount
+│   ├── baseline-sync.yaml    ← CronJob: pushes baseline JSON into ConfigMap every 5m
+│   └── otelcol-config.yaml   ← collector pipeline config (reference)
+├── Dockerfile                ← multi-stage: ocb build + alpine runtime
+└── sync-baseline.sh          ← helper: push baseline files into ConfigMap
+```
+
+### Deploy
+
+**Prerequisites:** Docker, kubectl, a k8s cluster with a local or remote registry.
+
+**Step 1 — Build and push the image**
+
+```bash
+docker build -t localhost:9999/otelcol-fingerprint:latest otel-processor/
+docker push localhost:9999/otelcol-fingerprint:latest
+```
+
+**Step 2 — Learn baseline and seed the ConfigMap**
+
+```bash
+python3 core/trace_fingerprint.py --environment <env> learn
+python3 core/error_fingerprint.py --environment <env> learn
+
+./otel-processor/sync-baseline.sh <env>
+```
+
+**Step 3 — Deploy**
+
+```bash
+# Update image reference in daemonset.yaml if not using localhost:9999
+kubectl apply -f otel-processor/k8s/daemonset.yaml
+```
+
+**Step 4 — Redirect app spans through the processor**
+
+```bash
+for svc in api-gateway customers-service vets-service visits-service; do
+  kubectl set env deployment/$svc \
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol-fingerprint.default.svc.cluster.local:4317
+done
+```
+
+### Keeping the baseline in sync
+
+The processor reloads baseline files from the `behavioral-baseline` ConfigMap every 60 seconds. After each Python learn or promote cycle, push updated files:
+
+```bash
+./otel-processor/sync-baseline.sh <env>
+# Pods pick up the new baseline within ~60 seconds
+```
+
+The `baseline-sync` CronJob in `k8s/baseline-sync.yaml` can automate this if baseline files are on a shared PVC.
+
+### Processor configuration
+
+All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprintprocessor:`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `trace_buffer_timeout` | `10s` | How long to buffer spans per traceId before flushing |
+| `min_spans` | `2` | Minimum spans required to fingerprint a trace |
+| `min_baseline_occurrences` | `2` | Min baseline hits for a pattern to be considered established |
+| `baseline_reload_interval` | `60s` | How often baseline JSON is re-read from disk |
+| `baseline_path` | `/baseline/baseline.json` | Mounted trace baseline file path |
+| `error_baseline_path` | `/baseline/error_baseline.json` | Mounted error baseline file path |
+
+---
+
 ## Limitations
 
 - **Auto-promotion lag**: New patterns after a deployment will alert for up to `AUTO_PROMOTE_THRESHOLD × cron_interval` minutes. Use `promote` immediately after a known deployment to skip the wait.
 - **Trace search cap**: The Splunk APM trace search API returns at most 200 traces per query, regardless of `WATCH_SAMPLE_LIMIT`. Low-frequency paths may need multiple learn windows to achieve full coverage.
 - **AutoDetect parent detectors**: Tiers 1b, 3, and 4 create `AutoDetectCustomization` children. The org-wide parent detectors must exist in your org — they are created automatically by Splunk Observability in all orgs with APM enabled.
 - **Bedrock credentials**: `agent.py` and the Claude-calling standalone agents require ambient AWS credentials with Bedrock access.
+- **Edge processor baseline sync**: The OTel Collector processor detects against a static baseline snapshot. It does not auto-promote fingerprints — run `sync-baseline.sh` after each Python learn/promote cycle to keep the processor's view current.
