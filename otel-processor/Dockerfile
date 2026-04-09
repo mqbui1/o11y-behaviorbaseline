@@ -10,21 +10,19 @@ RUN curl -Lo /usr/local/bin/ocb \
 
 WORKDIR /build
 
-# Copy processor source
+# Copy processor source and builder manifest preserving relative paths
 COPY fingerprintprocessor/ ./fingerprintprocessor/
+COPY collector-builder/manifest.yaml ./collector-builder/manifest.yaml
 
-# Copy builder manifest
-COPY collector-builder/manifest.yaml ./manifest.yaml
-
-# Build
-RUN ocb --config=manifest.yaml
+# Build — run from collector-builder dir so ../fingerprintprocessor resolves correctly
+RUN cd collector-builder && ocb --config=manifest.yaml
 
 # Stage 2: minimal runtime image
 FROM alpine:3.19
 
 RUN apk add --no-cache ca-certificates tzdata
 
-COPY --from=builder /build/build/otelcol-fingerprint /otelcol-fingerprint
+COPY --from=builder /build/collector-builder/build/otelcol-fingerprint /otelcol-fingerprint
 
 # Baseline files will be mounted at /baseline/
 RUN mkdir /baseline
