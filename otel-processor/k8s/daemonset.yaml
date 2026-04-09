@@ -1,0 +1,170 @@
+# Custom OTel Collector DaemonSet with fingerprint processor.
+# Replaces (or runs alongside) the default splunk-otel-collector agent DaemonSet.
+#
+# Image must be built and pushed first:
+#   docker build -t <your-registry>/otelcol-fingerprint:latest otel-processor/
+#   docker push <your-registry>/otelcol-fingerprint:latest
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otelcol-fingerprint
+  namespace: default
+  labels:
+    app: otelcol-fingerprint
+spec:
+  selector:
+    matchLabels:
+      app: otelcol-fingerprint
+  template:
+    metadata:
+      labels:
+        app: otelcol-fingerprint
+    spec:
+      serviceAccountName: otelcol-fingerprint
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      containers:
+        - name: otelcol
+          image: ghcr.io/mqbui1/otelcol-fingerprint:latest   # update after build
+          imagePullPolicy: Always
+          args:
+            - --config=/etc/otelcol/config.yaml
+          env:
+            - name: WORKSHOP_ENVIRONMENT
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: env
+            - name: SPLUNK_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: splunk-otel-collector
+                  key: splunk_observability_access_token
+            - name: SPLUNK_INGEST_URL
+              value: "https://ingest.us1.signalfx.com"
+            - name: SPLUNK_API_URL
+              value: "https://api.us1.signalfx.com"
+          ports:
+            - containerPort: 4317   # OTLP gRPC
+            - containerPort: 4318   # OTLP HTTP
+            - containerPort: 13133  # health_check
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: 250m
+            requests:
+              memory: 128Mi
+              cpu: 50m
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+            - name: baseline
+              mountPath: /baseline
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otelcol-fingerprint-config
+        - name: baseline
+          configMap:
+            name: behavioral-baseline   # updated by baseline-sync CronJob
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otelcol-fingerprint-config
+  namespace: default
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 400
+        spike_limit_mib: 80
+
+      batch:
+        send_batch_size: 1000
+        timeout: 5s
+
+      resource/add_environment:
+        attributes:
+          - action: insert
+            key: deployment.environment
+            value: ${env:WORKSHOP_ENVIRONMENT}
+
+      fingerprintprocessor:
+        trace_buffer_timeout: 10s
+        baseline_path: /baseline/baseline.json
+        error_baseline_path: /baseline/error_baseline.json
+        environment: ${env:WORKSHOP_ENVIRONMENT}
+        splunk_ingest_url: ${env:SPLUNK_INGEST_URL}
+        splunk_access_token: ${env:SPLUNK_ACCESS_TOKEN}
+        min_spans: 2
+        min_baseline_occurrences: 2
+        baseline_reload_interval: 60s
+
+    exporters:
+      otlphttp/splunk:
+        traces_endpoint: ${env:SPLUNK_INGEST_URL}/v2/trace/otlp
+        headers:
+          x-sf-token: ${env:SPLUNK_ACCESS_TOKEN}
+
+      signalfx:
+        access_token: ${env:SPLUNK_ACCESS_TOKEN}
+        api_url: ${env:SPLUNK_API_URL}
+        ingest_url: ${env:SPLUNK_INGEST_URL}
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/add_environment, fingerprintprocessor, batch]
+          exporters: [otlphttp/splunk]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/add_environment, batch]
+          exporters: [signalfx]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otelcol-fingerprint
+  namespace: default
+---
+# Service so app pods can reach this collector at otelcol-fingerprint:4317/4318
+apiVersion: v1
+kind: Service
+metadata:
+  name: otelcol-fingerprint
+  namespace: default
+spec:
+  selector:
+    app: otelcol-fingerprint
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
