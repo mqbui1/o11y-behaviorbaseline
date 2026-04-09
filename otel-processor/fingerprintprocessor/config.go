@@ -40,6 +40,13 @@ type Config struct {
 	// BaselineReloadInterval controls how often the baseline file is re-read
 	// from disk (to pick up updates from the Python learn cycle). Default: 60s.
 	BaselineReloadInterval time.Duration `mapstructure:"baseline_reload_interval"`
+
+	// PartialTraceThreshold is the minimum fraction of the baseline's expected
+	// span count that must be present before a trace is fingerprinted. Traces
+	// below this fraction are silently skipped — they are likely incomplete
+	// because spans arrived at a different collector node.
+	// Range: 0.0–1.0. Default: 0.7. Set to 0.0 to disable.
+	PartialTraceThreshold float64 `mapstructure:"partial_trace_threshold"`
 }
 
 func createDefaultConfig() component.Config {
@@ -49,5 +56,6 @@ func createDefaultConfig() component.Config {
 		MinBaselineOccurrences: 2,
 		BaselineReloadInterval: 60 * time.Second,
 		SplunkIngestURL:        "https://ingest.us1.signalfx.com",
+		PartialTraceThreshold:  0.7,
 	}
 }
