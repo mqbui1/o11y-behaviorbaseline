@@ -31,36 +31,45 @@ func newEmitter(ingestURL, token string) *emitter {
 }
 
 func (e *emitter) emitTraceDrift(env, traceID string, fp *traceFingerprint) error {
+	// EventType matches what correlate.py queries: TIER_EVENT_MAP["trace.path.drift"] = "tier2"
 	return e.send(splunkEvent{
-		EventType: "behavioral_baseline.trace.drift",
+		EventType: "trace.path.drift",
 		Category:  "USER_DEFINED",
 		Dimensions: map[string]string{
 			"sf_environment": env,
 			"anomaly_type":   "NEW_FINGERPRINT",
+			// root_operation used by correlate.py._infer_service_from_event() to extract
+			// service name when no explicit "service" dimension is present.
+			"root_operation": fp.rootOp,
 			"service":        rootService(fp.rootOp),
+			"fp_hash":        fp.hash,
 		},
 		Properties: map[string]string{
-			"trace_id":   traceID,
-			"root_op":    fp.rootOp,
-			"hash":       fp.hash,
-			"path":       fp.path,
-			"services":   joinStrings(fp.services),
-			"span_count": fmt.Sprintf("%d", fp.spanCount),
-			"edge_count": fmt.Sprintf("%d", fp.edgeCount),
-			"detector":   "otel-collector-edge",
+			"trace_id":    traceID,
+			"root_op":     fp.rootOp,
+			"hash":        fp.hash,
+			"path":        fp.path,
+			"services":    joinStrings(fp.services),
+			"span_count":  fmt.Sprintf("%d", fp.spanCount),
+			"edge_count":  fmt.Sprintf("%d", fp.edgeCount),
+			"detector":    "otel-collector-edge",
+			"environment": env,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
 }
 
 func (e *emitter) emitErrorDrift(env, traceID string, sig errorSignature) error {
+	// EventType matches what correlate.py queries: TIER_EVENT_MAP["error.signature.drift"] = "tier3"
 	return e.send(splunkEvent{
-		EventType: "behavioral_baseline.error.drift",
+		EventType: "error.signature.drift",
 		Category:  "USER_DEFINED",
 		Dimensions: map[string]string{
 			"sf_environment": env,
 			"anomaly_type":   "NEW_ERROR_SIGNATURE",
 			"service":        sig.service,
+			"error_type":     sig.errorType,
+			"sig_hash":       sig.hash,
 		},
 		Properties: map[string]string{
 			"trace_id":    traceID,
@@ -71,6 +80,7 @@ func (e *emitter) emitErrorDrift(env, traceID string, sig errorSignature) error 
 			"call_path":   sig.callPath,
 			"hash":        sig.hash,
 			"detector":    "otel-collector-edge",
+			"environment": env,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
