@@ -37,7 +37,7 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		cfg:      cfg,
 		next:     next,
 		baseline: newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
-		emitter:  newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken),
+		emitter:  newEmitter(cfg.SplunkIngestURL, cfg.SplunkApiToken, cfg.SplunkAccessToken),
 		buffers:  make(map[string]*traceBuffer),
 		stopCh:   make(chan struct{}),
 	}
