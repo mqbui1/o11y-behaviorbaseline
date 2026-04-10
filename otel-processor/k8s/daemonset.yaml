@@ -42,6 +42,11 @@ spec:
                 secretKeyRef:
                   name: splunk-otel-collector
                   key: splunk_observability_access_token
+            - name: SPLUNK_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: splunk-api-token
+                  key: token
             - name: SPLUNK_INGEST_URL
               value: "https://ingest.us1.signalfx.com"
             - name: SPLUNK_API_URL
@@ -119,6 +124,7 @@ data:
         environment: ${env:WORKSHOP_ENVIRONMENT}
         splunk_ingest_url: ${env:SPLUNK_INGEST_URL}
         splunk_access_token: ${env:SPLUNK_ACCESS_TOKEN}
+        splunk_api_token: ${env:SPLUNK_API_TOKEN}
         min_spans: 2
         min_baseline_occurrences: 2
         baseline_reload_interval: 60s

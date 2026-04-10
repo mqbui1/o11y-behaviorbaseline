@@ -26,8 +26,12 @@ type Config struct {
 	// SplunkIngestURL is the Splunk ingest endpoint (e.g. https://ingest.us1.signalfx.com).
 	SplunkIngestURL string `mapstructure:"splunk_ingest_url"`
 
-	// SplunkAccessToken is the ingest token for emitting custom events.
+	// SplunkAccessToken is the ingest token for trace/metric forwarding.
 	SplunkAccessToken string `mapstructure:"splunk_access_token"`
+
+	// SplunkApiToken is the API token for emitting custom events to /v2/event.
+	// If unset, falls back to SplunkAccessToken.
+	SplunkApiToken string `mapstructure:"splunk_api_token"`
 
 	// MinSpans is the minimum number of spans required to fingerprint a trace.
 	// Traces with fewer spans are skipped. Default: 2.
