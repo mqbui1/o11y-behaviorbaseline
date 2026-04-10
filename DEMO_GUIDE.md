@@ -107,7 +107,7 @@ print(f'Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 source .env
 
 # Step 8 — Confirm 0 trace anomalies (wait 60s after restore before running this)
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 # If you get "Traces: 0 candidates" — services are still warming up, wait 30s and retry
 ```
@@ -150,7 +150,7 @@ echo "0   2 * * *  error_fingerprint learn    # relearn error baseline, daily"
 echo "*/30 * * * * onboard --auto             # discover new environments, every 30m"
 
 # Confirm 0 anomalies right now
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 ```
 
 **Expected output (trace show):**
@@ -198,15 +198,15 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
 k "kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 2 — Wait 1 minute (countdown for audience)
+### Step 2 — Wait 3 minutes (countdown for audience)
 ```bash
-for i in $(seq 60 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 1 minute elapsed. Run detection now.           "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.           "
 ```
-The loadgen hits owner/pet endpoints every ~5 seconds. After 1 minute the watch window will contain only DB-failure traces.
+The loadgen hits owner/pet endpoints every ~5 seconds. After 3 minutes the watch window will contain only DB-failure traces.
 
 ### Step 3 — Run detection + triage (one command)
 ```bash
-python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json \
+python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -334,23 +334,23 @@ for e in events:
 EOF'
 ```
 
-Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the visits-service path — before the Python watch window has even started filling.
+Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the visits-service path — well before the 3-minute Python watch window has filled.
 
 > **Talking point:** *"The OTel processor fires in ~10 seconds because it fingerprints every trace as it flows through the collector — no polling, no window to fill. The Python layer we're about to run gives you the correlated, AI-triaged view. These two layers work together: OTel for immediate signal, Python for context."*
 
-### Step 2 — Wait 1 minute (countdown for audience)
+### Step 2 — Wait 3 minutes (countdown for audience)
 ```bash
-for i in $(seq 60 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 1 minute elapsed. Run detection now.           "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.           "
 ```
-The loadgen hits owner detail pages every ~5 seconds, which calls visits-service for pet visit history. After 1 minute the watch window will contain only post-failure traces.
+The loadgen hits owner detail pages every ~5 seconds, which calls visits-service for pet visit history. After 3 minutes the watch window will contain only post-failure traces.
 
 ### Step 3 — Run detection + triage (one command)
 
 Both the trace tier and error tier are piped together — Claude sees the full picture from both signals simultaneously.
 
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json) \
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -438,13 +438,13 @@ python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petc
 
 ## Demo 3: Missing Service — Structural Trace Absence + AI Triage
 
-**Story:** *"vets-service goes down. The framework detects the structural absence from traces and calls Claude (via AWS Bedrock) to reason about it — producing an INCIDENT verdict with root cause and recommended action, written to a log file in under 1 minute."*
+**Story:** *"vets-service goes down. The framework detects the structural absence from traces and calls Claude (via AWS Bedrock) to reason about it — producing an INCIDENT verdict with root cause and recommended action, written to a log file in under 3 minutes."*
 
 ### Prerequisites
 ```bash
 # Clear alert log and verify 0 trace anomalies
 cat /dev/null > data/alerts.log
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
 
@@ -474,21 +474,21 @@ for e in events:
 EOF'
 ```
 
-Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the `api-gateway:GET vets-service` path — long before the Python 1-minute window has filled.
+Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the `api-gateway:GET vets-service` path — long before the Python 3-minute window has filled.
 
 > **Talking point:** *"This is the OTel processor running directly inside the collector — it fingerprints traces as they flow through, no polling interval. The event in Splunk right now was fired at the edge, ~10 seconds after the first truncated trace arrived. The Python layer we're about to run adds AI triage and cross-tier correlation on top of that fast signal."*
 
-### Step 2 — Wait 1 minute (countdown for audience)
-The watch window is 1 minute. Pre-kill traces stay in the window for up to 1 minute —
+### Step 2 — Wait 3 minutes (countdown for audience)
+The watch window is 3 minutes. Pre-kill traces stay in the window for up to 3 minutes —
 running detection before the window clears means healthy vets-service traces are still
 visible and MISSING_SERVICE will not fire.
 ```bash
-for i in $(seq 60 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run detection now.                              "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.           "
 ```
 
 ### Step 3 — Run detection + triage (one command)
 ```bash
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json \
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -500,7 +500,7 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 [!!] INCIDENT — Both api-gateway and vets-service have completely stopped producing
     traces, indicating they are down or unreachable right now.
     Root cause: api-gateway and/or vets-service are down or network-isolated — no
-    traces have been emitted for either service in the last 1 minute, suggesting a
+    traces have been emitted for either service in the last 3 minutes, suggesting a
     crash, failed deployment, or network partition affecting the vets service path.
     Confidence: HIGH | Affected: api-gateway, vets-service
     Recommended action: PAGE_ONCALL
@@ -521,7 +521,7 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
   environment          : petclinicmbtest
   service              : api-gateway
   message              : No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent: ['api-gateway', 'vets-service']
-  detail               : Root op silent (0 traces in 1m window)
+  detail               : Root op silent (0 traces in 3m window)
   root op              : api-gateway:GET vets-service
   missing services     : api-gateway, vets-service
 ────────────────────────────────────────────────────────────────────────
@@ -533,11 +533,11 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
   environment          : petclinicmbtest
   affected services    : api-gateway, vets-service
   root cause           : api-gateway and/or vets-service are down or network-isolated —
-                         no traces have been emitted for either service in the last 1 minute
+                         no traces have been emitted for either service in the last 3 minutes
   missing services     : api-gateway:GET vets-service → missing: api-gateway, vets-service
   action               : PAGE_ONCALL
   narrative            : As of 05:47 UTC, there have been zero traces for the 'GET
-                         vets-service' path through api-gateway for the entire 1-minute
+                         vets-service' path through api-gateway for the entire 3-minute
                          observation window. The on-call engineer should immediately check
                          the health and pod status of vets-service and review recent changes.
 ────────────────────────────────────────────────────────────────────────
@@ -547,17 +547,17 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 - *"No alert rules. No thresholds. The framework learned the normal call graph from traffic — api-gateway always calls vets-service on this path — and detected when that stopped."*
 - *"The detection uses structural trace analysis: the span for vets-service is missing from a path where it always appeared."*
 - *"Claude reads exactly what was detected — one clean anomaly — and reasons about it: INCIDENT, HIGH confidence, PAGE_ONCALL."*
-- *"Total time from kill to triage: 1 minute."*
+- *"Total time from kill to triage: 3 minutes."*
 
 ### Step 4 — Restore
 ```bash
 k "kubectl scale deployment vets-service --replicas=1"
 k "kubectl rollout status deployment/vets-service --timeout=60s"
 
-# Wait 1 full minute for outage traces to age out of the watch window
+# Wait for outage traces to age out of the watch window
 # before running Demo 4 prerequisites — otherwise trace watch will still
 # show vets-service MISSING_SERVICE from this demo
-for i in $(seq 60 -1 1); do printf "\r  Waiting for window to clear... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — proceed to Demo 4.                             "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for window to clear... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — proceed to Demo 4.                             "
 ```
 
 ---
@@ -593,7 +593,7 @@ python3 core/error_fingerprint.py --environment petclinicmbtest show
 # Expected: 0 signatures
 
 # Verify 0 trace anomalies (cluster must be fully healthy before this check)
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
 
@@ -602,12 +602,12 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 k "kubectl scale deployment vets-service --replicas=0 && kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 2 — Wait 1 minute (countdown for audience)
-The watch window is 1 minute. Pre-kill traces stay in the window for up to 1 minute — running
+### Step 2 — Wait 3 minutes (countdown for audience)
+The watch window is 3 minutes. Pre-kill traces stay in the window for up to 3 minutes — running
 detection before the window clears means healthy vets-service traces are still visible and
 MISSING_SERVICE will not fire.
 ```bash
-for i in $(seq 60 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run detection now.                              "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.           "
 ```
 The watch window will contain:
 - Trace tier: MISSING_SERVICE for vets-service and owner detail paths (DB down = no traces completing)
@@ -615,8 +615,8 @@ The watch window will contain:
 
 ### Step 3 — Run detection + triage (combined tiers)
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json) \
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -735,7 +735,7 @@ cat /dev/null > data/alerts.log
 python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
 
 # Verify 0 anomalies
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 # Expected: "All trace paths match baseline"
 ```
 
@@ -749,15 +749,15 @@ python3 notify_deployment.py --service vets-service --environment petclinicmbtes
 k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 2 — Wait 1 minute (countdown for audience)
+### Step 2 — Wait 3 minutes (countdown for audience)
 ```bash
-for i in $(seq 60 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 1 minute elapsed. Run detection now.           "
+for i in $(seq 180 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 3 minutes elapsed. Run detection now.           "
 ```
 
 ### Step 3 — Run detection + triage (agent sees INCIDENT, doesn't know about deploy)
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json) \
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -779,7 +779,7 @@ for i in $(seq 60 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d 
 
 ### Step 3b — Run correlate.py (sees the deployment event → downgrades severity)
 ```bash
-python3 core/correlate.py --environment petclinicmbtest --window-minutes 15
+python3 core/correlate.py --environment petclinicmbtest --window-minutes 35
 ```
 
 **Expected output:**
@@ -849,7 +849,7 @@ print(f'Removed {len(removed)} vets fingerprint(s) — simulating new deploy')
 
 #### Watch run 1 — NEW_FINGERPRINT fires, watch_hits=1
 ```bash
-AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 ```
 
 **Expected output:**
@@ -869,7 +869,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
 
 #### Watch run 2 — auto-promotes (watch_hits=2 ≥ threshold)
 ```bash
-AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 ```
 
 **Expected output:**
@@ -892,7 +892,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
 
 #### Watch run 3 — completely silent
 ```bash
-AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3
 ```
 
 **Expected output:**
@@ -954,7 +954,7 @@ if best:
 ### Restore
 ```bash
 # Relearn baseline to get vets fingerprint back properly
-python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 10
+python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 30
 ```
 
 ---
@@ -1066,7 +1066,7 @@ LEARN  →  Search each service independently (50 traces each, parallel)
           Build fingerprints: "api-gateway always calls vets-service on GET /vets"
           Build error signatures: "customers-service has no DB errors in healthy state"
 
-WATCH  →  Sample traces / error traces from the last 1 minute
+WATCH  →  Sample traces / error traces from the last 3 minutes
           Trace tier:  known root_op has zero traces → MISSING_SERVICE anomaly
           Error tier:  new error type seen → NEW_ERROR_SIGNATURE anomaly
           Output as JSON
@@ -1078,14 +1078,14 @@ TRIAGE →  Claude reads the JSON anomaly list
 
 Single tier (trace or error):
 ```bash
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json \
+python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json \
   | python3 agent.py --environment petclinicmbtest
 ```
 
 Both tiers combined (recommended — gives Claude the full picture):
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 1 --json) \
+(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json && \
+ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 3 --json) \
   | python3 agent.py --environment petclinicmbtest
 ```
 
@@ -1098,7 +1098,7 @@ Both tiers combined (recommended — gives Claude the full picture):
 k "kubectl scale deployment vets-service petclinic-db --replicas=1"
 
 # Relearn trace baseline after disruptions
-python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 15
+python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 35
 python3 core/trace_fingerprint.py --environment petclinicmbtest promote
 
 # Relearn error baseline after disruptions (wait for clean window first)
