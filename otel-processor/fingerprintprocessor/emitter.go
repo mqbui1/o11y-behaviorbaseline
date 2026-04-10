@@ -18,7 +18,7 @@ type splunkEvent struct {
 
 type emitter struct {
 	ingestURL string
-	token     string // API token for /v2/event
+	token     string // ingest token for /v2/event
 	client    *http.Client
 }
 
