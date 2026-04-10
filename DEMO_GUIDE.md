@@ -427,10 +427,8 @@ python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petc
 
 ### Prerequisites
 ```bash
-# Clear alert log and verify 0 trace anomalies
+# Clear alert log
 cat /dev/null > data/alerts.log
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
-# Expected: "All trace paths match baseline"
 ```
 
 ### Step 1 — Kill vets-service
@@ -446,20 +444,16 @@ python3 -u poll_drift_events.py
 
 Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event for `api-gateway:GET vets-service` printed to this terminal — the OTel Collector edge processor detected the structural change as the first truncated trace flowed through.
 
-> **Talking point:** *"This is the OTel processor running directly inside the collector — it fingerprints traces as they flow through, no polling interval. The event fires at the edge, ~10 seconds after the first truncated trace arrived. The Python layer we're about to run adds AI triage and cross-tier correlation on top of that fast signal."*
+> **Talking point:** *"The OTel processor fires in ~10 seconds — it fingerprints every trace as it flows through the collector, no polling interval. Those events land in Splunk immediately. The next step pulls them from Splunk and calls Claude for triage — no window to wait for."*
 
-### Step 2 — Wait 30 seconds (countdown for audience)
-The watch window is 5 minutes. We wait 30 seconds for failure traces to be indexed —
-the window is wide enough that healthy pre-kill traces don't mask the absence, because
-visible and MISSING_SERVICE will not fire.
+### Step 2 — Wait 30 seconds (for Splunk indexing lag)
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 30 seconds elapsed. Run detection now.          "
+for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
 ```
 
-### Step 3 — Run detection + triage (one command)
+### Step 3 — Run triage directly from OTel events (one command)
 ```bash
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json \
-  | python3 agent.py --environment petclinicmbtest
+python3 watch_otel_events.py --environment petclinicmbtest | python3 agent.py --environment petclinicmbtest
 ```
 
 **Expected terminal output:**
@@ -491,9 +485,9 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
   environment          : petclinicmbtest
   service              : api-gateway
   message              : No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent: ['api-gateway', 'vets-service']
-  detail               : Root op silent (0 traces in 5m window)
+  detail               : Trace path drift on 'api-gateway:GET vets-service' (OTel edge detector)
   root op              : api-gateway:GET vets-service
-  missing services     : api-gateway, vets-service
+  source               : otel-edge
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
@@ -503,19 +497,19 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
   environment          : petclinicmbtest
   affected services    : api-gateway, vets-service
   root cause           : api-gateway and/or vets-service are down or network-isolated —
-                         no traces have been emitted for either service in the last 5 minutes
+                         no traces have been emitted for either service in the last 2 minutes
   missing services     : api-gateway:GET vets-service → missing: api-gateway, vets-service
   action               : PAGE_ONCALL
   narrative            : As of 05:47 UTC, there have been zero traces for the 'GET
-                         vets-service' path through api-gateway for the entire 5-minute
+                         vets-service' path through api-gateway for the entire 2-minute
                          observation window. The on-call engineer should immediately check
                          the health and pod status of vets-service and review recent changes.
 ────────────────────────────────────────────────────────────────────────
 ```
 
 **Key talking points:**
-- *"No alert rules. No thresholds. The framework learned the normal call graph from traffic — api-gateway always calls vets-service on this path — and detected when that stopped."*
-- *"The detection uses structural trace analysis: the span for vets-service is missing from a path where it always appeared."*
+- *"No alert rules. No thresholds. The OTel processor learned the normal call graph at baseline time — api-gateway always calls vets-service on this path — and detected the deviation as the first affected trace flowed through."*
+- *"There's no poll interval. The event fired at the edge, inside the collector, within 10 seconds. We queried Splunk for it 30 seconds later — just to cover indexing lag."*
 - *"Claude reads exactly what was detected — one clean anomaly — and reasons about it: INCIDENT, HIGH confidence, PAGE_ONCALL."*
 - *"Total time from kill to triage: under 1 minute."*
 
@@ -523,11 +517,6 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 ```bash
 k "kubectl scale deployment vets-service --replicas=1"
 k "kubectl rollout status deployment/vets-service --timeout=60s"
-
-# Wait for outage traces to age out of the watch window
-# before running Demo 4 prerequisites — otherwise trace watch will still
-# show vets-service MISSING_SERVICE from this demo
-for i in $(seq 30 -1 1); do printf "\r  Waiting for window to clear... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — proceed to Demo 4.                             "
 ```
 
 ---
