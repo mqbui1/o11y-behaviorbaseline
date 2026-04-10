@@ -461,33 +461,31 @@ python3 watch_otel_events.py --environment petclinicmbtest | python3 agent.py --
 [agent] env=petclinicmbtest | 1 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — Both api-gateway and vets-service have completely stopped producing
-    traces, indicating they are down or unreachable right now.
-    Root cause: api-gateway and/or vets-service are down or network-isolated — no
-    traces have been emitted for either service in the last 5 minutes, suggesting a
-    crash, failed deployment, or network partition affecting the vets service path.
-    Confidence: HIGH | Affected: api-gateway, vets-service
+[!!] INCIDENT — The vets-service is unreachable, causing api-gateway to return
+    sustained errors on all GET vets-service calls.
+    Root cause: vets-service is down or network-isolated — the OTel edge processor
+    detected the trace path for 'api-gateway:GET vets-service' has changed,
+    indicating vets-service is no longer reachable.
+    Confidence: HIGH | Affected: vets-service, api-gateway
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
     [PAGE_ONCALL] event emitted to Splunk
 ```
 
-> Claude lists both api-gateway and vets-service as affected because when the root op
-> `api-gateway:GET vets-service` produces 0 traces, both the caller and callee are listed
-> as absent. The root cause still correctly points to the vets-service path being silent.
+> The anomaly comes from the OTel edge processor — it detected that the trace fingerprint
+> for `api-gateway:GET vets-service` changed (vets-service spans absent). Claude reasons
+> from that structural signal to INCIDENT + PAGE_ONCALL.
 
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
 [2026-04-01 05:47:30 UTC]  DETECTION
-  anomaly type         : MISSING_SERVICE
+  anomaly type         : NEW_FINGERPRINT
   environment          : petclinicmbtest
   service              : api-gateway
-  message              : No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent: ['api-gateway', 'vets-service']
-  detail               : Trace path drift on 'api-gateway:GET vets-service' (OTel edge detector)
-  root op              : api-gateway:GET vets-service
-  source               : otel-edge
+  message              : Trace path drift on 'api-gateway:GET vets-service' (OTel edge detector)
+  detail               : Path: api-gateway:GET vets-service
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
@@ -495,15 +493,14 @@ python3 watch_otel_events.py --environment petclinicmbtest | python3 agent.py --
   severity             : INCIDENT
   confidence           : HIGH
   environment          : petclinicmbtest
-  affected services    : api-gateway, vets-service
-  root cause           : api-gateway and/or vets-service are down or network-isolated —
-                         no traces have been emitted for either service in the last 2 minutes
-  missing services     : api-gateway:GET vets-service → missing: api-gateway, vets-service
+  affected services    : vets-service, api-gateway
+  root cause           : vets-service is down or network-isolated — trace path drift
+                         detected by OTel edge processor on 'api-gateway:GET vets-service'
   action               : PAGE_ONCALL
-  narrative            : As of 05:47 UTC, there have been zero traces for the 'GET
-                         vets-service' path through api-gateway for the entire 2-minute
-                         observation window. The on-call engineer should immediately check
-                         the health and pod status of vets-service and review recent changes.
+  narrative            : The OTel collector edge processor detected a structural change
+                         in the 'api-gateway:GET vets-service' trace path 10 seconds after
+                         vets-service became unreachable. The on-call engineer should
+                         immediately check the health and pod status of vets-service.
 ────────────────────────────────────────────────────────────────────────
 ```
 
@@ -1024,7 +1021,15 @@ LEARN  →  Search each service independently (50 traces each, parallel)
           Build fingerprints: "api-gateway always calls vets-service on GET /vets"
           Build error signatures: "customers-service has no DB errors in healthy state"
 
-WATCH  →  Sample traces / error traces from the last 5 minutes
+WATCH  →  Two paths:
+
+  Fast path (OTel edge, ~10s latency):
+          OTel Collector processor fingerprints every trace as it flows through
+          DRIFT → emits trace.path.drift / error.signature.drift event to Splunk
+          watch_otel_events.py pulls those events from Splunk SignalFlow → JSON
+
+  Slow path (Python APM polling, ~1-5 min):
+          Sample traces from the last N minutes via Splunk APM API
           Trace tier:  known root_op has zero traces → MISSING_SERVICE anomaly
           Error tier:  new error type seen → NEW_ERROR_SIGNATURE anomaly
           Output as JSON
@@ -1034,13 +1039,13 @@ TRIAGE →  Claude reads the JSON anomaly list
           Writes DETECTION + TRIAGE to alerts.log
 ```
 
-Single tier (trace or error):
+Fast path — triage OTel edge events directly (used in Demo 3):
 ```bash
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json \
+python3 watch_otel_events.py --environment petclinicmbtest \
   | python3 agent.py --environment petclinicmbtest
 ```
 
-Both tiers combined (recommended — gives Claude the full picture):
+Slow path — Python APM polling, both tiers combined:
 ```bash
 (python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json && \
  python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json) \
