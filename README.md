@@ -416,7 +416,7 @@ The OTel processor and `correlate.py` are **complementary layers, not alternativ
 | Multiple detectors for same application | ❌ unaware of detectors | ✅ joins all detector origins |
 | Spans split across multiple collector nodes | ⚠️ partial trace guard (see below) | ✅ queries full trace from backend |
 | Deployment-aware severity downgrade | ❌ | ✅ via `deployment.started` events |
-| Auto-promotion across watch runs | ❌ stateless | ✅ `dedup_state.<env>.json` |
+| Auto-promotion across watch runs | ✅ in-memory counter, writes back to disk | ✅ `dedup_state.<env>.json` |
 | Cross-environment correlation | ❌ | ✅ `multi_env_correlator.py` |
 
 **The edge processor is a fast-trigger early warning system.** Its `trace.path.drift` and `error.signature.drift` events feed directly into `correlate.py` (Tier 2 and Tier 3 respectively), where they are joined with Tier 1 AutoDetect incidents to produce high-confidence correlated alerts. The Python layer has the full picture; the edge layer has speed.
@@ -511,6 +511,8 @@ All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprin
 | `baseline_path` | `/baseline/baseline.json` | Mounted trace baseline file path |
 | `error_baseline_path` | `/baseline/error_baseline.json` | Mounted error baseline file path |
 | `partial_trace_threshold` | `0.7` | Min fraction of baseline span count required to fingerprint (0.0 = disabled). Guards against false positives when spans split across collector nodes. |
+| `promotion_threshold` | `10` | Number of detections before a new hash is auto-promoted into the baseline. Set to `0` to disable. |
+| `promotion_writeback` | `true` | Write the updated baseline back to disk after promotion so other pods pick it up on their next reload. Requires the baseline path to be writable (emptyDir, not a read-only ConfigMap). |
 
 ---
 
@@ -520,4 +522,4 @@ All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprin
 - **Trace search cap**: The Splunk APM trace search API returns at most 200 traces per query, regardless of `WATCH_SAMPLE_LIMIT`. Low-frequency paths may need multiple learn windows to achieve full coverage.
 - **AutoDetect parent detectors**: Tiers 1b, 3, and 4 create `AutoDetectCustomization` children. The org-wide parent detectors must exist in your org — they are created automatically by Splunk Observability in all orgs with APM enabled.
 - **Bedrock credentials**: `agent.py` and the Claude-calling standalone agents require ambient AWS credentials with Bedrock access.
-- **Edge processor baseline sync**: The OTel Collector processor detects against a static baseline snapshot. It does not auto-promote fingerprints — run `sync-baseline.sh` after each Python learn/promote cycle to keep the processor's view current.
+- **Edge processor baseline sync**: After auto-promotion, the updated baseline is written to the mounted path on that pod only. Other DaemonSet pods pick it up on their next `baseline_reload_interval` tick only if the path points to a shared volume. For ConfigMap-mounted baselines (read-only), set `promotion_writeback: false` and run `sync-baseline.sh` after each Python learn/promote cycle instead.
