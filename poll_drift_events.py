@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Poll Splunk for trace.path.drift and error.signature.drift events every 5s."""
-import os, time, json, sys
+"""Tail OTel collector logs on the cluster for real-time drift event detection."""
+import os, subprocess, sys, re, time
 from pathlib import Path
 
 # Load .env
@@ -12,44 +12,53 @@ if _env.exists():
             k, _, v = line.partition("=")
             os.environ.setdefault(k.strip(), v.strip())
 
-import urllib.request, urllib.parse
+EC2_IP   = os.environ.get("EC2_IP", "")
+EC2_PORT = os.environ.get("EC2_PORT", "2222")
+EC2_PASS = os.environ.get("EC2_PASS", os.environ.get("EC2_PASSWORD", ""))
 
-TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
-REALM = os.environ.get("SPLUNK_REALM", "us1")
-BASE  = f"https://api.{REALM}.signalfx.com"
-LOOKBACK_MS = int(os.environ.get("POLL_LOOKBACK_MS", 120000))  # 2 min default
+if not EC2_IP or not EC2_PASS:
+    print("ERROR: EC2_IP and EC2_PASS (or EC2_PASSWORD) must be set in .env")
+    sys.exit(1)
 
-def fetch_events(event_type: str, lookback_ms: int) -> list:
-    now = int(time.time() * 1000)
-    params = urllib.parse.urlencode({
-        "type": event_type,
-        "startTime": now - lookback_ms,
-        "limit": 10,
-    })
-    req = urllib.request.Request(
-        f"{BASE}/v2/event?{params}",
-        headers={"X-SF-TOKEN": TOKEN},
-    )
-    try:
-        with urllib.request.urlopen(req) as r:
-            return json.loads(r.read()).get("results", [])
-    except Exception as e:
-        return []
-
-print(f"Polling for drift events (every 5s, last {LOOKBACK_MS//1000}s window)...")
+print("Watching OTel collector for real-time drift events...")
 print("Press Ctrl+C to stop.\n")
 
-seen = set()
-while True:
-    for etype in ["trace.path.drift", "error.signature.drift"]:
-        events = fetch_events(etype, LOOKBACK_MS)
-        for e in events:
-            eid = e.get("id") or e.get("timestamp")
-            if eid in seen:
-                continue
-            seen.add(eid)
-            dims = e.get("dimensions", {})
-            ts = time.strftime("%H:%M:%S", time.localtime(e.get("timestamp", 0) / 1000))
-            print(f"[{ts}] {etype}")
-            print(f"  service={dims.get('service')}  anomaly={dims.get('anomaly_type')}  root_op={dims.get('root_operation')}")
-    time.sleep(5)
+cmd = [
+    "sshpass", f"-p{EC2_PASS}",
+    "ssh", "-p", EC2_PORT, "-o", "StrictHostKeyChecking=no",
+    f"splunk@{EC2_IP}",
+    "kubectl logs -f --since=5s daemonset/otelcol-fingerprint 2>&1"
+]
+
+drift_re = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected)')
+hash_re  = re.compile(r'"hash": "([^"]+)"')
+op_re    = re.compile(r'"root_op": "([^"]+)"')
+svc_re   = re.compile(r'"service": "([^"]+)"')
+tid_re   = re.compile(r'"trace_id": "([^"]+)"')
+env_re   = re.compile(r'"environment": "([^"]+)"')
+
+try:
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not drift_re.search(line):
+            continue
+        ts   = time.strftime("%H:%M:%S")
+        op   = op_re.search(line)
+        svc  = svc_re.search(line)
+        h    = hash_re.search(line)
+        tid  = tid_re.search(line)
+        env  = env_re.search(line)
+        etype = "error.signature.drift" if "error signature" in line else "trace.path.drift"
+        print(f"[{ts}] {etype}")
+        print(f"  root_op={op.group(1) if op else '?'}  hash={h.group(1) if h else '?'}")
+        if tid:
+            print(f"  trace_id={tid.group(1)}")
+        print()
+except KeyboardInterrupt:
+    pass
+finally:
+    try:
+        proc.terminate()
+    except Exception:
+        pass
