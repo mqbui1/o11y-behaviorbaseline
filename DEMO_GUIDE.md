@@ -314,12 +314,12 @@ k "kubectl scale deployment visits-service --replicas=0"
 ```
 
 ### Step 1b — Watch OTel real-time detection (while the countdown runs)
-In a third terminal tab, poll for drift events from the edge processor:
+In a third terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
-python3 poll_drift_events.py
+python3 -u poll_drift_events.py
 ```
 
-Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the visits-service path — long before the 30-second Python detection wait is up.
+Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event printed to this terminal — the OTel Collector edge processor detected the structural change as the first truncated trace flowed through.
 
 > **Talking point:** *"The OTel processor fires in ~10 seconds because it fingerprints every trace as it flows through the collector — no polling, no window to fill. The Python layer we're about to run gives you the correlated, AI-triaged view. These two layers work together: OTel for immediate signal, Python for context."*
 
@@ -439,14 +439,14 @@ k "kubectl scale deployment vets-service --replicas=0"
 ```
 
 ### Step 1b — Watch OTel real-time detection (while the countdown runs)
-In a third terminal tab, poll for drift events from the edge processor:
+In a third terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
-python3 poll_drift_events.py
+python3 -u poll_drift_events.py
 ```
 
-Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the `api-gateway:GET vets-service` path — long before the 30-second Python detection wait is up.
+Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event for `api-gateway:GET vets-service` printed to this terminal — the OTel Collector edge processor detected the structural change as the first truncated trace flowed through.
 
-> **Talking point:** *"This is the OTel processor running directly inside the collector — it fingerprints traces as they flow through, no polling interval. The event in Splunk right now was fired at the edge, ~10 seconds after the first truncated trace arrived. The Python layer we're about to run adds AI triage and cross-tier correlation on top of that fast signal."*
+> **Talking point:** *"This is the OTel processor running directly inside the collector — it fingerprints traces as they flow through, no polling interval. The event fires at the edge, ~10 seconds after the first truncated trace arrived. The Python layer we're about to run adds AI triage and cross-tier correlation on top of that fast signal."*
 
 ### Step 2 — Wait 30 seconds (countdown for audience)
 The watch window is 5 minutes. We wait 30 seconds for failure traces to be indexed —
