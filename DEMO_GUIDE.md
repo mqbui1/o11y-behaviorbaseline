@@ -313,6 +313,20 @@ python3 core/error_fingerprint.py --environment petclinicmbtest show
 k "kubectl scale deployment visits-service --replicas=0"
 ```
 
+### Step 1b — Watch OTel real-time detection (while the countdown runs)
+Open the Splunk Events feed in a browser tab:
+```
+Splunk UI → APM → Event Feed → filter: event type = trace.path.drift OR error.signature.drift
+```
+Or use the SignalFlow events search in the Splunk O11y UI:
+```
+Splunk UI → Alerts & Detectors → Events → search: "visits-service"
+```
+
+Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the visits-service path — before the Python watch window has even started filling.
+
+> **Talking point:** *"The OTel processor fires in ~10 seconds because it fingerprints every trace as it flows through the collector — no polling, no window to fill. The Python layer we're about to run gives you the correlated, AI-triaged view. These two layers work together: OTel for immediate signal, Python for context."*
+
 ### Step 2 — Wait 1 minute (countdown for audience)
 ```bash
 for i in $(seq 60 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 1 minute elapsed. Run detection now.           "
@@ -427,6 +441,20 @@ python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-m
 ```bash
 k "kubectl scale deployment vets-service --replicas=0"
 ```
+
+### Step 1b — Watch OTel real-time detection (while the countdown runs)
+Open the Splunk Events feed in a browser tab:
+```
+Splunk UI → APM → Event Feed → filter: event type = trace.path.drift OR error.signature.drift
+```
+Or use the SignalFlow events search in the Splunk O11y UI:
+```
+Splunk UI → Alerts & Detectors → Events → search: "vets-service"
+```
+
+Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the `api-gateway:GET vets-service` path — long before the Python 1-minute window has filled.
+
+> **Talking point:** *"This is the OTel processor running directly inside the collector — it fingerprints traces as they flow through, no polling interval. The event in Splunk right now was fired at the edge, ~10 seconds after the first truncated trace arrived. The Python layer we're about to run adds AI triage and cross-tier correlation on top of that fast signal."*
 
 ### Step 2 — Wait 1 minute (countdown for audience)
 The watch window is 1 minute. Pre-kill traces stay in the window for up to 1 minute —
