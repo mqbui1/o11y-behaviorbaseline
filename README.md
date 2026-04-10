@@ -15,25 +15,28 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 
 ```
 o11y-behaviorbaseline/
-├── agent.py              ← unified agent (primary entry point)
-├── collect.py            ← all data fetching (topology, anomalies, SLO, deployments)
-├── baseline.py           ← baseline data layer (load, summarize, health, learn, promote)
-├── onboard.py            ← provisioning + cron management
-├── notify_deployment.py  ← CI/CD hook (emits deployment.started events)
+├── agent.py                  ← unified agent (primary entry point)
+├── collect.py                ← all data fetching (topology, anomalies, SLO, deployments)
+├── baseline.py               ← baseline data layer (load, summarize, health, learn, promote)
+├── onboard.py                ← provisioning + cron management
+├── notify_deployment.py      ← CI/CD hook (emits deployment.started events)
+├── watch_otel_events.py      ← fast-path triage: queries OTel edge events from Splunk (~10s)
+├── poll_drift_events.py      ← live terminal display: tails OTel collector logs via SSH
 │
-├── core/                 ← detection engine (called by agent + onboard)
-│   ├── trace_fingerprint.py    ← Tier 2: trace path drift
-│   ├── error_fingerprint.py    ← Tier 3: error signature drift
-│   ├── correlate.py            ← Tier C: cross-tier correlation
-│   └── provision_detectors.py  ← Tiers 1b/3/4: SignalFlow detectors
+├── core/                     ← detection engine (called by agent + onboard)
+│   ├── trace_fingerprint.py        ← Tier 2: trace path drift
+│   ├── error_fingerprint.py        ← Tier 3: error signature drift
+│   ├── correlate.py                ← Tier C: cross-tier correlation
+│   └── provision_detectors.py      ← Tiers 1b/3/4: SignalFlow detectors
 │
-├── agents/               ← standalone agents (superseded by agent.py)
+├── agents/                   ← standalone agents (superseded by agent.py)
 │   └── triage_agent.py, baseline_healer.py, drift_explainer.py, ...
 │
-└── data/                 ← runtime state (gitignored)
+└── data/                     ← runtime state (gitignored)
     ├── baseline.<env>.json
     ├── error_baseline.<env>.json
     ├── dedup_state.<env>.json
+    ├── otel_dedup_state.<env>.json  ← dedup state for watch_otel_events.py
     └── thresholds.json
 ```
 
@@ -379,6 +382,25 @@ Detection latency: **~10 seconds** vs ~5 minutes with cron.
 Events emitted:
 - `trace.path.drift` — new/unknown trace structure (consumed by `correlate.py` as Tier 2)
 - `error.signature.drift` — new error signature never seen in baseline (consumed by `correlate.py` as Tier 3)
+
+### Fast-path triage from OTel events
+
+`watch_otel_events.py` queries Splunk SignalFlow for recent `trace.path.drift` and `error.signature.drift` events and formats them as `agent.py`-compatible JSON — skipping the slow APM polling path entirely. Kill-to-INCIDENT time: **~50 seconds** (15s OTel detection + 30s indexing lag + 5s triage).
+
+```bash
+# Watch for live drift events in a separate terminal (tails collector logs via SSH)
+python3 -u poll_drift_events.py
+
+# After an anomaly appears, triage immediately:
+python3 watch_otel_events.py --environment <env> | python3 agent.py --environment <env>
+
+# Options:
+#   --window-minutes N    how far back to query (default: 5)
+#   --dedup-ttl N         suppress re-alerts for same hash within N seconds (default: 120)
+#   --no-dedup            show all events in window regardless of dedup state
+```
+
+Hash deduplication is persisted to `data/otel_dedup_state.<env>.json` so repeated runs don't re-triage the same events within the TTL window.
 
 ### Detection boundary: edge processor vs. Python correlation layer
 
