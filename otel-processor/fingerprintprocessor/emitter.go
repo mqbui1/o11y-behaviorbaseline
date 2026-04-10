@@ -90,6 +90,27 @@ func (e *emitter) emitErrorDrift(env, traceID string, sig errorSignature) error 
 	})
 }
 
+func (e *emitter) emitPromotion(env, hash, rootOp, kind string, detections int) error {
+	return e.send(splunkEvent{
+		EventType: "trace.fingerprint.promoted",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"kind":           kind, // "trace" or "error"
+			"service":        rootService(rootOp),
+		},
+		Properties: map[string]string{
+			"hash":        hash,
+			"root_op":     rootOp,
+			"kind":        kind,
+			"detections":  fmt.Sprintf("%d", detections),
+			"detector":    "otel-collector-edge",
+			"environment": env,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func (e *emitter) send(evt splunkEvent) error {
 	payload, err := json.Marshal([]splunkEvent{evt})
 	if err != nil {

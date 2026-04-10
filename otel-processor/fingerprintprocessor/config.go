@@ -51,6 +51,20 @@ type Config struct {
 	// because spans arrived at a different collector node.
 	// Range: 0.0–1.0. Default: 0.7. Set to 0.0 to disable.
 	PartialTraceThreshold float64 `mapstructure:"partial_trace_threshold"`
+
+	// PromotionThreshold is how many times a new fingerprint or error signature
+	// must be detected (across all traces, since processor start) before it is
+	// automatically promoted into the baseline. Once promoted the processor stops
+	// alerting on that hash and writes the updated baseline back to disk so other
+	// collector pods pick it up on their next reload cycle.
+	// Default: 10. Set to 0 to disable auto-promotion.
+	PromotionThreshold int `mapstructure:"promotion_threshold"`
+
+	// PromotionWriteback controls whether the promoted baseline is written back
+	// to BaselinePath / ErrorBaselinePath on disk. Requires the paths to be
+	// writable by the collector process (e.g. an emptyDir volume, not a read-only
+	// ConfigMap mount). Default: true.
+	PromotionWriteback bool `mapstructure:"promotion_writeback"`
 }
 
 func createDefaultConfig() component.Config {
@@ -61,5 +75,7 @@ func createDefaultConfig() component.Config {
 		BaselineReloadInterval: 60 * time.Second,
 		SplunkIngestURL:        "https://ingest.us1.signalfx.com",
 		PartialTraceThreshold:  0.7,
+		PromotionThreshold:     10,
+		PromotionWriteback:     true,
 	}
 }

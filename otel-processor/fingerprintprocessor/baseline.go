@@ -7,6 +7,18 @@ import (
 	"time"
 )
 
+// traceBaselineFile is the on-disk format for the trace baseline JSON.
+type traceBaselineFile struct {
+	Fingerprints map[string]*fingerprintEntry `json:"fingerprints"`
+	Environment  string                       `json:"environment,omitempty"`
+}
+
+// errorBaselineFile is the on-disk format for the error baseline JSON.
+type errorBaselineFile struct {
+	Signatures  map[string]*errorSigEntry `json:"signatures"`
+	Environment string                    `json:"environment,omitempty"`
+}
+
 // fingerprintEntry mirrors the Python baseline fingerprint dict.
 type fingerprintEntry struct {
 	Hash         string   `json:"hash"`
@@ -86,9 +98,7 @@ func (bs *baselineStore) loadTraceBaseline() map[string]*fingerprintEntry {
 	if err != nil {
 		return nil
 	}
-	var raw struct {
-		Fingerprints map[string]*fingerprintEntry `json:"fingerprints"`
-	}
+	var raw traceBaselineFile
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil
 	}
@@ -103,13 +113,94 @@ func (bs *baselineStore) loadErrorBaseline() map[string]*errorSigEntry {
 	if err != nil {
 		return nil
 	}
-	var raw struct {
-		Signatures map[string]*errorSigEntry `json:"signatures"`
-	}
+	var raw errorBaselineFile
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil
 	}
 	return raw.Signatures
+}
+
+// promoteTrace adds a new fingerprint to the in-memory trace baseline and,
+// if writeback is enabled, persists the full baseline back to disk.
+// Returns true if the entry was newly added (not already present).
+func (bs *baselineStore) promoteTrace(fp *traceFingerprint, writeback bool) bool {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+
+	if _, exists := bs.traceFingerprints[fp.hash]; exists {
+		return false
+	}
+	bs.traceFingerprints[fp.hash] = &fingerprintEntry{
+		Hash:         fp.hash,
+		Path:         fp.path,
+		RootOp:       fp.rootOp,
+		Services:     fp.services,
+		SpanCount:    fp.spanCount,
+		EdgeCount:    fp.edgeCount,
+		Occurrences:  1,
+		AutoPromoted: true,
+	}
+	if writeback && bs.tracePath != "" {
+		_ = bs.writeTraceBaseline()
+	}
+	return true
+}
+
+// promoteError adds a new error signature to the in-memory error baseline and,
+// if writeback is enabled, persists the full baseline back to disk.
+// Returns true if the entry was newly added (not already present).
+func (bs *baselineStore) promoteError(sig errorSignature, writeback bool) bool {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+
+	if _, exists := bs.errorSignatures[sig.hash]; exists {
+		return false
+	}
+	bs.errorSignatures[sig.hash] = &errorSigEntry{
+		Hash:        sig.hash,
+		Service:     sig.service,
+		ErrorType:   sig.errorType,
+		HttpStatus:  sig.httpStatus,
+		Operation:   sig.operation,
+		CallPath:    sig.callPath,
+		Occurrences: 1,
+	}
+	if writeback && bs.errorPath != "" {
+		_ = bs.writeErrorBaseline()
+	}
+	return true
+}
+
+// writeTraceBaseline serialises traceFingerprints to disk atomically.
+// Caller must hold bs.mu (write lock).
+func (bs *baselineStore) writeTraceBaseline() error {
+	file := traceBaselineFile{Fingerprints: bs.traceFingerprints}
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(bs.tracePath, data)
+}
+
+// writeErrorBaseline serialises errorSignatures to disk atomically.
+// Caller must hold bs.mu (write lock).
+func (bs *baselineStore) writeErrorBaseline() error {
+	file := errorBaselineFile{Signatures: bs.errorSignatures}
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(bs.errorPath, data)
+}
+
+// atomicWrite writes data to path via a temp file + rename to avoid
+// partial writes being read by a concurrent reload.
+func atomicWrite(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // lookupTrace returns the baseline entry for a fingerprint hash, or nil if unknown.
