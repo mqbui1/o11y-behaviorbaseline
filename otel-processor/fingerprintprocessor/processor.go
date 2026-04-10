@@ -262,6 +262,7 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 
 		p.logger.Info("new error signature detected",
 			zap.String("trace_id", buf.traceID),
+			zap.String("root_op", sig.service+":"+sig.operation),
 			zap.String("service", sig.service),
 			zap.String("error_type", sig.errorType),
 			zap.String("operation", sig.operation),
