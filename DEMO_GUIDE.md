@@ -314,13 +314,24 @@ k "kubectl scale deployment visits-service --replicas=0"
 ```
 
 ### Step 1b — Watch OTel real-time detection (while the countdown runs)
-Open the Splunk Events feed in a browser tab:
-```
-Splunk UI → APM → Event Feed → filter: event type = trace.path.drift OR error.signature.drift
-```
-Or use the SignalFlow events search in the Splunk O11y UI:
-```
-Splunk UI → Alerts & Detectors → Events → search: "visits-service"
+Poll for `trace.path.drift` events from the edge processor:
+```bash
+# Run in a third terminal tab — watch for events arriving in real time
+watch -n 5 'python3 - <<EOF
+import requests, os, time, json
+token = os.environ["SPLUNK_ACCESS_TOKEN"]
+now = int(time.time() * 1000)
+r = requests.get(
+    "https://api.us1.signalfx.com/v2/event",
+    headers={"X-SF-TOKEN": token},
+    params={"type": "trace.path.drift", "startTime": now - 60000, "limit": 5}
+)
+events = r.json().get("results", [])
+print(f"{len(events)} trace.path.drift event(s) in last 60s")
+for e in events:
+    dims = e.get("dimensions", {})
+    print(f"  service={dims.get(\"service\")}  root_op={dims.get(\"root_operation\")}  ts={e.get(\"timestamp\")}")
+EOF'
 ```
 
 Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the visits-service path — before the Python watch window has even started filling.
@@ -443,13 +454,24 @@ k "kubectl scale deployment vets-service --replicas=0"
 ```
 
 ### Step 1b — Watch OTel real-time detection (while the countdown runs)
-Open the Splunk Events feed in a browser tab:
-```
-Splunk UI → APM → Event Feed → filter: event type = trace.path.drift OR error.signature.drift
-```
-Or use the SignalFlow events search in the Splunk O11y UI:
-```
-Splunk UI → Alerts & Detectors → Events → search: "vets-service"
+Poll for `trace.path.drift` events from the edge processor:
+```bash
+# Run in a third terminal tab — watch for events arriving in real time
+watch -n 5 'python3 - <<EOF
+import requests, os, time, json
+token = os.environ["SPLUNK_ACCESS_TOKEN"]
+now = int(time.time() * 1000)
+r = requests.get(
+    "https://api.us1.signalfx.com/v2/event",
+    headers={"X-SF-TOKEN": token},
+    params={"type": "trace.path.drift", "startTime": now - 60000, "limit": 5}
+)
+events = r.json().get("results", [])
+print(f"{len(events)} trace.path.drift event(s) in last 60s")
+for e in events:
+    dims = e.get("dimensions", {})
+    print(f"  service={dims.get(\"service\")}  root_op={dims.get(\"root_operation\")}  ts={e.get(\"timestamp\")}")
+EOF'
 ```
 
 Within **10–15 seconds** of the kill, the OTel Collector edge processor will emit a `trace.path.drift` event for the `api-gateway:GET vets-service` path — long before the Python 1-minute window has filled.
