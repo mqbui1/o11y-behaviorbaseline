@@ -18,11 +18,15 @@ type splunkEvent struct {
 
 type emitter struct {
 	ingestURL string
-	token     string
+	token     string // API token for /v2/event
 	client    *http.Client
 }
 
-func newEmitter(ingestURL, token string) *emitter {
+func newEmitter(ingestURL, apiToken, fallbackToken string) *emitter {
+	token := apiToken
+	if token == "" {
+		token = fallbackToken
+	}
 	return &emitter{
 		ingestURL: ingestURL,
 		token:     token,
