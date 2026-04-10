@@ -28,18 +28,30 @@ type fingerprintProcessor struct {
 	mu      sync.Mutex
 	buffers map[string]*traceBuffer // traceId -> buffer
 
+	// seenMu guards seenCounts independently of the trace buffer mutex so
+	// promotion counter updates don't contend with span ingestion.
+	seenMu     sync.Mutex
+	seenCounts map[string]int // hash -> detection count since startup
+
 	stopCh chan struct{}
 }
 
 func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Traces) (*fingerprintProcessor, error) {
 	p := &fingerprintProcessor{
-		logger:   logger,
-		cfg:      cfg,
-		next:     next,
-		baseline: newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
-		emitter:  newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken),
-		buffers:  make(map[string]*traceBuffer),
-		stopCh:   make(chan struct{}),
+		logger:     logger,
+		cfg:        cfg,
+		next:       next,
+		baseline:   newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
+		emitter:    newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken),
+		buffers:    make(map[string]*traceBuffer),
+		seenCounts: make(map[string]int),
+		stopCh:     make(chan struct{}),
+	}
+	if cfg.PromotionThreshold > 0 {
+		p.logger.Info("auto-promotion enabled",
+			zap.Int("threshold", cfg.PromotionThreshold),
+			zap.Bool("writeback", cfg.PromotionWriteback),
+		)
 	}
 	return p, nil
 }
@@ -235,6 +247,7 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 		if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
 			p.logger.Warn("failed to emit trace drift event", zap.Error(err))
 		}
+		p.maybePromoteTrace(fp)
 		return
 	}
 
@@ -249,6 +262,43 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 		if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
 			p.logger.Warn("failed to emit trace drift event", zap.Error(err))
 		}
+		p.maybePromoteTrace(fp)
+	}
+}
+
+// maybePromoteTrace increments the seen counter for fp.hash and promotes the
+// fingerprint into the baseline when the count reaches PromotionThreshold.
+func (p *fingerprintProcessor) maybePromoteTrace(fp *traceFingerprint) {
+	if p.cfg.PromotionThreshold <= 0 {
+		return
+	}
+	p.seenMu.Lock()
+	p.seenCounts[fp.hash]++
+	count := p.seenCounts[fp.hash]
+	p.seenMu.Unlock()
+
+	if count < p.cfg.PromotionThreshold {
+		return
+	}
+
+	promoted := p.baseline.promoteTrace(fp, p.cfg.PromotionWriteback)
+	if !promoted {
+		return // already in baseline (concurrent promotion or reload)
+	}
+
+	p.seenMu.Lock()
+	delete(p.seenCounts, fp.hash)
+	p.seenMu.Unlock()
+
+	p.logger.Info("trace fingerprint auto-promoted",
+		zap.String("hash", fp.hash),
+		zap.String("root_op", fp.rootOp),
+		zap.Int("after_detections", count),
+		zap.String("environment", p.cfg.Environment),
+		zap.Bool("writeback", p.cfg.PromotionWriteback),
+	)
+	if err := p.emitter.emitPromotion(p.cfg.Environment, fp.hash, fp.rootOp, "trace", count); err != nil {
+		p.logger.Warn("failed to emit promotion event", zap.Error(err))
 	}
 }
 
@@ -272,5 +322,43 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 		if err := p.emitter.emitErrorDrift(p.cfg.Environment, buf.traceID, sig); err != nil {
 			p.logger.Warn("failed to emit error drift event", zap.Error(err))
 		}
+		p.maybePromoteError(sig)
+	}
+}
+
+// maybePromoteError increments the seen counter for sig.hash and promotes the
+// error signature into the baseline when the count reaches PromotionThreshold.
+func (p *fingerprintProcessor) maybePromoteError(sig errorSignature) {
+	if p.cfg.PromotionThreshold <= 0 {
+		return
+	}
+	p.seenMu.Lock()
+	p.seenCounts[sig.hash]++
+	count := p.seenCounts[sig.hash]
+	p.seenMu.Unlock()
+
+	if count < p.cfg.PromotionThreshold {
+		return
+	}
+
+	promoted := p.baseline.promoteError(sig, p.cfg.PromotionWriteback)
+	if !promoted {
+		return
+	}
+
+	p.seenMu.Lock()
+	delete(p.seenCounts, sig.hash)
+	p.seenMu.Unlock()
+
+	p.logger.Info("error signature auto-promoted",
+		zap.String("hash", sig.hash),
+		zap.String("service", sig.service),
+		zap.String("error_type", sig.errorType),
+		zap.Int("after_detections", count),
+		zap.String("environment", p.cfg.Environment),
+		zap.Bool("writeback", p.cfg.PromotionWriteback),
+	)
+	if err := p.emitter.emitPromotion(p.cfg.Environment, sig.hash, sig.service+":"+sig.operation, "error", count); err != nil {
+		p.logger.Warn("failed to emit promotion event", zap.Error(err))
 	}
 }
