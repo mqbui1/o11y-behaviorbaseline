@@ -37,21 +37,34 @@ svc_re   = re.compile(r'"service": "([^"]+)"')
 tid_re   = re.compile(r'"trace_id": "([^"]+)"')
 env_re   = re.compile(r'"environment": "([^"]+)"')
 
+DEDUP_TTL = 90  # suppress repeated same-hash events for 90s
+
+# hash -> last_printed timestamp
+hash_last_seen: dict = {}
+
 try:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
         line = line.rstrip()
         if not drift_re.search(line):
             continue
-        ts   = time.strftime("%H:%M:%S")
-        op   = op_re.search(line)
-        svc  = svc_re.search(line)
-        h    = hash_re.search(line)
-        tid  = tid_re.search(line)
-        env  = env_re.search(line)
+        h     = hash_re.search(line)
+        h_val = h.group(1) if h else None
+
+        # Suppress if same hash fired recently
+        now = time.time()
+        if h_val:
+            last = hash_last_seen.get(h_val, 0)
+            if now - last < DEDUP_TTL:
+                continue
+            hash_last_seen[h_val] = now
+
+        ts    = time.strftime("%H:%M:%S")
+        op    = op_re.search(line)
+        tid   = tid_re.search(line)
         etype = "error.signature.drift" if "error signature" in line else "trace.path.drift"
         print(f"[{ts}] {etype}")
-        print(f"  root_op={op.group(1) if op else '?'}  hash={h.group(1) if h else '?'}")
+        print(f"  root_op={op.group(1) if op else '?'}  hash={h_val or '?'}")
         if tid:
             print(f"  trace_id={tid.group(1)}")
         print()
