@@ -7,9 +7,11 @@
 cd /Users/mbui/Documents/o11y-behaviorbaseline
 source .env
 
+# Set the target environment — update this for each workshop/demo session
+export ENV=bdf-7fdc-workshop
+
 # SSH alias for cluster commands
-# EC2_IP changes when the instance is restarted — check current IP before demo
-# Password is stored in your local .env file as EC2_PASSWORD
+# EC2_IP and EC2_PASSWORD are set in .env — update before each demo session
 alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@$EC2_IP'
 ```
 
@@ -32,7 +34,7 @@ source .env
 This writes the tokens into `.env` so all scripts pick them up automatically. Do NOT run `refresh_aws_creds.py` in the demo terminal — it will fail with "Missing AWS env vars".
 
 ### Splunk O11y URLs
-- **APM Service Map**: https://app.us1.signalfx.com/#/apm?environments=petclinicmbtest
+- **APM Service Map**: https://app.us1.signalfx.com/#/apm?environments=$ENV
 - **Behavioral Baseline Dashboard**: https://app.us1.signalfx.com/#/dashboard/HERM9jxA1po
 
 ### Verify cluster is healthy
@@ -42,22 +44,26 @@ k "kubectl get pods --no-headers | awk '{print \$1, \$3}'"
 
 **Expected output (all pods Running):**
 ```
-admin-server-586785575f-dr9n9                          Running
-api-gateway-765b86f689-5jldp                           Running
-config-server-694b6b694c-bfmgz                         Running
-customers-service-f688fbb85-xxcpj                      Running
-discovery-server-88d47ff57-dzktk                       Running
-petclinic-db-758f495756-nx7cn                          Running
-petclinic-loadgen-deployment-6954c49d9-qg58j           Running
-splunk-otel-collector-agent-m2csz                      Running
-splunk-otel-collector-agent-m8jqk                      Running
-splunk-otel-collector-agent-zdl5b                      Running
-splunk-otel-collector-k8s-cluster-receiver-658b69d995-xp6vj  Running
-splunk-otel-collector-operator-67ff5f79b8-zwfj6        Running
-vets-service-74885f446b-rgf72                          Running
-visits-service-787d65b9c9-q4h6k                        Running
+admin-server-746f7cf586-xxxxx                          Running
+api-gateway-77f9c8c45f-xxxxx                           Running
+config-server-84f46dc66c-xxxxx                         Running
+customers-service-665b5ff795-xxxxx                     Running
+discovery-server-5b597b57bc-xxxxx                      Running
+otelcol-fingerprint-xxxxx                              Running
+otelcol-fingerprint-xxxxx                              Running
+otelcol-fingerprint-xxxxx                              Running
+petclinic-db-758f495756-xxxxx                          Running
+petclinic-loadgen-deployment-6954c49d9-xxxxx           Running
+splunk-otel-collector-agent-xxxxx                      Running
+splunk-otel-collector-agent-xxxxx                      Running
+splunk-otel-collector-agent-xxxxx                      Running
+splunk-otel-collector-k8s-cluster-receiver-xxxxx       Running
+splunk-otel-collector-operator-67ff5f79b8-xxxxx        Running
+vets-service-54c99c9df4-xxxxx                          Running
+visits-service-569b6f8c77-xxxxx                        Running
 ```
 > Pod name suffixes will differ — focus on the deployment prefix and `Running` status. If any pod shows `CrashLoopBackOff` or `Pending`, resolve before proceeding.
+> The 3 `otelcol-fingerprint` pods are the custom OTel edge processor DaemonSet — one per node.
 
 ### Reset and verify baselines are clean
 
@@ -80,15 +86,16 @@ crontab -l | grep -v "behavioral-baseline-managed" | crontab -
 cat /dev/null > data/alerts.log
 
 # Step 5 — Hard-wipe the error baseline (cluster must be healthy before this step)
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
-python3 core/error_fingerprint.py --environment petclinicmbtest show
-# Expected: "Error baseline for environment 'petclinicmbtest' is empty"
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
+python3 core/error_fingerprint.py --environment $ENV show
+# Expected: "Error baseline for environment '<env>' is empty"
 
 # Step 6 — Strip stale watch-promoted fingerprints AND vets-service startup fingerprint
 # (vets-service:GET -> config-server fires MISSING_SERVICE noise on every pod restart)
 python3 -c "
-import json, pathlib
-p = pathlib.Path('data/baseline.petclinicmbtest.json')
+import json, pathlib, os
+e = os.environ['ENV']
+p = pathlib.Path(f'data/baseline.{e}.json')
 d = json.loads(p.read_text())
 before = len(d['fingerprints'])
 d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
@@ -107,7 +114,7 @@ print(f'Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 source .env
 
 # Step 8 — Confirm 0 trace anomalies (wait 60s after restore before running this)
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 # Expected: "All trace paths match baseline"
 # If you get "Traces: 0 candidates" — services are still warming up, wait 30s and retry
 ```
@@ -132,33 +139,26 @@ tail -f data/alerts.log
 # What environments are provisioned and their health
 python3 onboard.py --show-state
 
-# 6 known call patterns learned from real traffic
-python3 core/trace_fingerprint.py --environment petclinicmbtest show
+# Known call patterns learned from real traffic
+python3 core/trace_fingerprint.py --environment $ENV show
 
 # Known error signatures
-python3 core/error_fingerprint.py --environment petclinicmbtest show
+python3 core/error_fingerprint.py --environment $ENV show
 
 # Show what the autonomous cron schedule looks like in production
 # Cron jobs are disabled for this demo — talk through the output below instead
-echo "--- In production, these jobs run automatically: ---"
-echo "*/5 * * * *  trace_fingerprint watch    # structural drift, every 5m"
-echo "*/5 * * * *  error_fingerprint watch    # error signatures, every 5m"
-echo "*/5 * * * *  correlate                  # cross-tier correlation, every 5m"
-echo "*/5 * * * *  dedup_agent                # flood suppression, every 5m"
-echo "0   2 * * *  trace_fingerprint learn    # relearn baseline, daily"
-echo "0   2 * * *  error_fingerprint learn    # relearn error baseline, daily"
-echo "*/30 * * * * onboard --auto             # discover new environments, every 30m"
+crontab -l | grep "behavioral-baseline-managed"
 
 # Confirm 0 anomalies right now
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
 
 **Expected output (trace show):**
 ```
-Baseline (environment 'petclinicmbtest'): 6 fingerprints
+Baseline (environment '<env>'): 9 fingerprints
   Services: [api-gateway, customers-service, discovery-server, vets-service, visits-service, ...]
 
-  api-gateway:GET /api/gateway/owners/{ownerId}  (1 pattern)
+  api-gateway:GET /api/gateway/owners/{ownerId}  (4 patterns)
   api-gateway:GET customers-service              (3 patterns)
   api-gateway:GET vets-service                   (1 pattern)
   api-gateway:PUT customers-service              (1 pattern)
@@ -166,8 +166,8 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
 
 **Expected output (trace watch — 0 anomalies):**
 ```
-[watch] Discovering topology + searching traces in parallel (environment 'petclinicmbtest')...
-  Topology: 6 services | Traces: 200 candidates
+[watch] Discovering topology + searching traces in parallel (environment '<env>')...
+  Topology: 7 services | Traces: 200 candidates
   Fetching 200 traces (20 parallel)...
     40/200 fetched...
     80/200 fetched...
@@ -175,15 +175,15 @@ Baseline (environment 'petclinicmbtest'): 6 fingerprints
     160/200 fetched...
     200/200 fetched...
 
-  Checked 21 traces, 179 skipped, 0 anomalies detected
+  Checked 19 traces, 181 skipped, 0 anomalies detected
   Per-service breakdown:
-    api-gateway                          21 traces checked
+    api-gateway                          19 traces checked
   All trace paths match baseline
 ```
 
 **Key talking points:**
 - *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
-- *"6 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"9 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
 - *"8 cron jobs per environment run autonomously — trace watch, error watch, correlate, dedup every 5 minutes; relearn daily."*
 - *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
 
@@ -206,13 +206,13 @@ The loadgen hits owner/pet endpoints every ~5 seconds. After 30 seconds failure 
 
 ### Step 3 — Run detection + triage (one command)
 ```bash
-python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json \
-  | python3 agent.py --environment petclinicmbtest
+python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json \
+  | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 2 anomaly(s) from watch
+[agent] env=<env> | 2 anomaly(s) from watch
   Reasoning with Claude...
 
 [!] DEGRADED — The customers-service cannot create database transactions, causing 500
@@ -236,7 +236,7 @@ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-m
 ════════════════════════════════════════════════════════════════════════
 [2026-03-31 05:03:46 UTC]  DETECTION
   anomaly type         : NEW_ERROR_SIGNATURE
-  environment          : petclinicmbtest
+  environment          : <env>
   service              : customers-service
   message              : New error signature in customers-service: org.springframework
                          .transaction.CannotCreateTransactionException on OwnerRepository.findAll, GET /owners
@@ -248,7 +248,7 @@ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-m
 ════════════════════════════════════════════════════════════════════════
 [2026-03-31 05:03:46 UTC]  DETECTION
   anomaly type         : NEW_ERROR_SIGNATURE
-  environment          : petclinicmbtest
+  environment          : <env>
   service              : api-gateway
   message              : New error signature in api-gateway: 500 on GET, GET customers-service
   error type           : 500
@@ -260,7 +260,7 @@ python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-m
 [2026-03-31 05:03:46 UTC]  TRIAGE
   severity             : DEGRADED
   confidence           : HIGH
-  environment          : petclinicmbtest
+  environment          : <env>
   affected services    : customers-service, api-gateway
   root cause           : customers-service has lost connectivity to its database
   action               : PAGE_ONCALL
@@ -288,7 +288,7 @@ k "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-ga
 # Expected: JSON list of vets (not 404 or timeout)
 
 # Re-learn clean error baseline after DB recovery
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
 ```
 
 > **Critical:** Services (customers-service, visits-service) take ~30s to reconnect to the DB after it comes back. Don't start the next demo until the curl above returns data. If traces are missing from subsequent learn runs, regenerate traffic and relearn (see Restore/Reset section).
@@ -303,8 +303,8 @@ python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petc
 ```bash
 # Clear alert log and ensure clean error baseline
 cat /dev/null > data/alerts.log
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
-python3 core/error_fingerprint.py --environment petclinicmbtest show
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
+python3 core/error_fingerprint.py --environment $ENV show
 # Expected: 0 signatures (system is healthy)
 ```
 
@@ -334,14 +334,14 @@ The loadgen hits owner detail pages every ~5 seconds, which calls visits-service
 Both the trace tier and error tier are piped together — Claude sees the full picture from both signals simultaneously.
 
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json) \
-  | python3 agent.py --environment petclinicmbtest
+(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
+ python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
+  | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 3 anomaly(s) from watch
+[agent] env=<env> | 3 anomaly(s) from watch
   Reasoning with Claude...
 
 [!!] INCIDENT — The visits-service is completely absent from traces and the
@@ -366,7 +366,7 @@ The 3 anomalies:
 ════════════════════════════════════════════════════════════════════════
 [2026-04-01 05:28:07 UTC]  DETECTION
   anomaly type         : MISSING_SERVICE
-  environment          : petclinicmbtest
+  environment          : <env>
   service              : api-gateway
   root op              : api-gateway:GET /api/gateway/owners/{ownerId}
   message              : Expected service(s) absent from 'api-gateway:GET /api/gateway/owners/{ownerId}': ['visits-service']
@@ -377,7 +377,7 @@ The 3 anomalies:
 ════════════════════════════════════════════════════════════════════════
 [2026-04-01 05:28:07 UTC]  DETECTION
   anomaly type         : NEW_ERROR_SIGNATURE
-  environment          : petclinicmbtest
+  environment          : <env>
   service              : api-gateway
   message              : New error signature in api-gateway: org.springframework.web.reactive.function.client.WebClientRequestException on GET
   error type           : org.springframework.web.reactive.function.client.WebClientRequestException
@@ -389,7 +389,7 @@ The 3 anomalies:
 [2026-04-01 05:28:07 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
-  environment          : petclinicmbtest
+  environment          : <env>
   affected services    : visits-service, api-gateway
   root cause           : visits-service is down or unreachable, causing the
                          api-gateway to fail with a WebClientRequestException
@@ -416,7 +416,7 @@ k "kubectl rollout status deployment/visits-service --timeout=60s"
 sleep 60
 
 # Re-learn clean baseline after demo
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
 ```
 
 ---
@@ -453,12 +453,12 @@ for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d
 
 ### Step 3 — Run triage directly from OTel events (one command)
 ```bash
-python3 watch_otel_events.py --environment petclinicmbtest | python3 agent.py --environment petclinicmbtest
+python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 1 anomaly(s) from watch
+[agent] env=<env> | 1 anomaly(s) from watch
   Reasoning with Claude...
 
 [!!] INCIDENT — The vets-service is unreachable, causing api-gateway to return
@@ -482,7 +482,7 @@ python3 watch_otel_events.py --environment petclinicmbtest | python3 agent.py --
 ════════════════════════════════════════════════════════════════════════
 [2026-04-01 05:47:30 UTC]  DETECTION
   anomaly type         : NEW_FINGERPRINT
-  environment          : petclinicmbtest
+  environment          : <env>
   service              : api-gateway
   message              : Trace path drift on 'api-gateway:GET vets-service' (OTel edge detector)
   detail               : Path: api-gateway:GET vets-service
@@ -492,7 +492,7 @@ python3 watch_otel_events.py --environment petclinicmbtest | python3 agent.py --
 [2026-04-01 05:47:30 UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
-  environment          : petclinicmbtest
+  environment          : <env>
   affected services    : vets-service, api-gateway
   root cause           : vets-service is down or network-isolated — trace path drift
                          detected by OTel edge processor on 'api-gateway:GET vets-service'
@@ -530,8 +530,9 @@ cat /dev/null > data/alerts.log
 # Strip stale watch-promoted fingerprints AND vets-service startup fingerprint
 # (vets-service:GET -> config-server re-learns on every pod restart, causes noise)
 python3 -c "
-import json, pathlib
-p = pathlib.Path('data/baseline.petclinicmbtest.json')
+import json, pathlib, os
+e = os.environ['ENV']
+p = pathlib.Path(f'data/baseline.{e}.json')
 d = json.loads(p.read_text())
 before = len(d['fingerprints'])
 d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
@@ -544,12 +545,12 @@ print(f'Trace baseline: removed {before-after} stale entries, kept {after} clean
 "
 
 # Reset error baseline to 0
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
-python3 core/error_fingerprint.py --environment petclinicmbtest show
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
+python3 core/error_fingerprint.py --environment $ENV show
 # Expected: 0 signatures
 
 # Verify 0 trace anomalies (cluster must be fully healthy before this check)
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 # Expected: "All trace paths match baseline"
 ```
 
@@ -570,14 +571,14 @@ The watch window will contain:
 
 ### Step 3 — Run detection + triage (combined tiers)
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json) \
-  | python3 agent.py --environment petclinicmbtest
+(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
+ python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
+  | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 7 anomaly(s) from watch
+[agent] env=<env> | 7 anomaly(s) from watch
   Reasoning with Claude...
 
 [!!] INCIDENT — The database backing customers-service (and likely other services) is
@@ -607,7 +608,7 @@ AutoDetect needs sustained error rate before it fires. While the audience proces
 the triage output, watch the Splunk Alerts page for Critical alerts to appear.
 
 ```
-Splunk UI → Alerts → filter: APM, Any Service/Endpoint, petclinicmbtest environment
+Splunk UI → Alerts → filter: APM, Any Service/Endpoint, <env> environment
 ```
 
 **Don't use a fixed countdown** — run correlate as soon as you see 2 Critical alerts for
@@ -618,12 +619,12 @@ within 3-7 minutes of the outage starting.
 With AutoDetect now firing (Tier 1) + trace drift (Tier 2) + error signatures (Tier 3)
 all on the same service, correlate.py escalates to `[Critical] MULTI_TIER`.
 ```bash
-python3 core/correlate.py --environment petclinicmbtest --window-minutes 20
+python3 core/correlate.py --environment $ENV --window-minutes 20
 ```
 
 **Expected output:**
 ```
-[correlate] Fetching anomaly + deployment events in parallel (environment 'petclinicmbtest')...
+[correlate] Fetching anomaly + deployment events in parallel (environment '<env>')...
   Found 34 anomaly events across 3 tier(s)
     tier1: 8 event(s)
     tier2: 16 event(s)
@@ -687,17 +688,17 @@ k "kubectl rollout status deployment/vets-service deployment/petclinic-db --time
 ```bash
 # Clear alert log and reset error baseline
 cat /dev/null > data/alerts.log
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
 
 # Verify 0 anomalies
-python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 # Expected: "All trace paths match baseline"
 ```
 
 ### Step 1 — Announce the deployment, then immediately kill vets-service
 ```bash
 # Notify the framework that a deploy is happening
-python3 notify_deployment.py --service vets-service --environment petclinicmbtest \
+python3 notify_deployment.py --service vets-service --environment $ENV \
   --version v2.1.0 --description "Update vet specialties endpoint"
 
 # Simulate bad deploy (service crashes on startup)
@@ -711,14 +712,14 @@ for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d 
 
 ### Step 3 — Run detection + triage (agent sees INCIDENT, doesn't know about deploy)
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json) \
-  | python3 agent.py --environment petclinicmbtest
+(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
+ python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
+  | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
 ```
-[agent] env=petclinicmbtest | 2 anomaly(s) from watch
+[agent] env=<env> | 2 anomaly(s) from watch
   Reasoning with Claude...
 
 [!!] INCIDENT — The vets-service is completely unreachable, causing 503 errors at the
@@ -734,12 +735,12 @@ for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d 
 
 ### Step 3b — Run correlate.py (sees the deployment event → downgrades severity)
 ```bash
-python3 core/correlate.py --environment petclinicmbtest --window-minutes 55
+python3 core/correlate.py --environment $ENV --window-minutes 55
 ```
 
 **Expected output:**
 ```
-[correlate] Fetching anomaly + deployment events in parallel (environment 'petclinicmbtest')...
+[correlate] Fetching anomaly + deployment events in parallel (environment '<env>')...
   Found 9 anomaly events across 2 tiers
     tier2: 7 event(s)
     tier3: 2 event(s)
@@ -781,20 +782,21 @@ k "kubectl scale deployment vets-service --replicas=1"
 ### Prerequisites
 ```bash
 cat /dev/null > data/alerts.log
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
 
 # Simulate a deploy: remove vets-service fingerprint from baseline
 # (represents a deployment that changed the call path)
 # Also remove the vets-service startup fingerprint (config-server call on pod start)
 # — it only appears during restarts, causes MISSING_SERVICE noise during the demo
 python3 -c "
-import json
-with open('data/baseline.petclinicmbtest.json') as f:
+import json, os
+e = os.environ['ENV']
+with open(f'data/baseline.{e}.json') as f:
     b = json.load(f)
 fps = b['fingerprints']
 removed = [h for h, info in fps.items() if info.get('root_op','').startswith('vets-service:') or info.get('root_op','').startswith('api-gateway:GET vets')]
 for h in removed: del fps[h]
-with open('data/baseline.petclinicmbtest.json', 'w') as f:
+with open(f'data/baseline.{e}.json', 'w') as f:
     json.dump(b, f, indent=2)
 print(f'Removed {len(removed)} vets fingerprint(s) — simulating new deploy')
 "
@@ -804,7 +806,7 @@ print(f'Removed {len(removed)} vets fingerprint(s) — simulating new deploy')
 
 #### Watch run 1 — NEW_FINGERPRINT fires, watch_hits=1
 ```bash
-AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
 
 **Expected output:**
@@ -824,7 +826,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
 
 #### Watch run 2 — auto-promotes (watch_hits=2 ≥ threshold)
 ```bash
-AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
 
 **Expected output:**
@@ -837,7 +839,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
     Event sent (trace.path.drift)
 
   AUTO-PROMOTED: 31ddc9717bc4e16a... (seen 2 watch runs) root_op=api-gateway:GET vets-service
-  Baseline saved -> data/baseline.petclinicmbtest.json  (6 fingerprints)
+  Baseline saved -> data/baseline.<env>.json  (9 fingerprints)
 
   Checked 18 traces, 182 skipped, 1 anomalies detected, 1 auto-promoted
   Per-service breakdown:
@@ -847,7 +849,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclin
 
 #### Watch run 3 — completely silent
 ```bash
-AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
 
 **Expected output:**
@@ -871,9 +873,11 @@ from baseline_healer import pick_best_window, heal
 
 # Set incident_start_ms to when the outage began
 incident_start = int(time.time() * 1000) - 20 * 60 * 1000   # ~20 min ago
-best = pick_best_window(incident_start, 'petclinicmbtest')
+import os
+env = os.environ['ENV']
+best = pick_best_window(incident_start, env)
 if best:
-    heal(incident_start, 'petclinicmbtest', best, dry_run=True)
+    heal(incident_start, env, best, dry_run=True)
 "
 ```
 
@@ -891,10 +895,10 @@ if best:
 
   [healer] Best window: -30m to -90m (score=0.684, error_rate=3.3%, diversity=13)
 
-  [healer] Healing baseline for 'petclinicmbtest' using window -30m to -90m...
-    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn \
+  [healer] Healing baseline for '<env>' using window -30m to -90m...
+    $ python3 core/trace_fingerprint.py --environment <env> learn \
         --window-minutes 60 --window-offset-minutes 50 --reset
-    $ python3 core/error_fingerprint.py --environment petclinicmbtest learn \
+    $ python3 core/error_fingerprint.py --environment <env> learn \
         --window-minutes 60 --window-offset-minutes 50 --reset
     [dry-run] skipped
   [healer] Dry run complete — no changes written.
@@ -909,7 +913,7 @@ if best:
 ### Restore
 ```bash
 # Relearn baseline to get vets fingerprint back properly
-python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 50
+python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 50
 ```
 
 ---
@@ -927,13 +931,14 @@ cp data/onboarding_state.json data/onboarding_state.json.bak
 
 # Remove the environment from onboarding state to simulate a new environment
 python3 -c "
-import json
+import json, os
+e = os.environ['ENV']
 with open('data/onboarding_state.json') as f:
     state = json.load(f)
-del state['environments']['petclinicmbtest']
+del state['environments'][e]
 with open('data/onboarding_state.json', 'w') as f:
     json.dump(state, f, indent=2)
-print('Simulated: petclinicmbtest removed from known environments')
+print(f'Simulated: {e} removed from known environments')
 "
 ```
 
@@ -945,21 +950,21 @@ python3 onboard.py --auto --dry-run
 **Expected output:**
 ```
 [onboard] Discovering all active environments...
-  petclinicmbtest: 6 services — [api-gateway, customers-service, ...]
+  <env>: 7 services — [api-gateway, customers-service, ...]
 
 [onboard] Diff results:
-  New environments:     ['petclinicmbtest']
+  New environments:     ['<env>']
   Updated environments: —
 
 [onboard] [DRY RUN] Acting on changes...
 
-  [new] petclinicmbtest
-    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
+  [new] <env>
+    $ python3 core/trace_fingerprint.py --environment <env> learn --window-minutes=120
       [dry-run] skipped
-    Provisioning dashboard for environment 'petclinicmbtest'...
-      [dry-run] Would create dashboard: Behavioral Baseline — petclinicmbtest
+    Provisioning dashboard for environment '<env>'...
+      [dry-run] Would create dashboard: Behavioral Baseline — <env>
       [dry-run] skipped
-    [dry-run] Would add 8 cron job(s) for 'petclinicmbtest'
+    [dry-run] Would add 8 cron job(s) for '<env>'
     [dry-run] Would add 2 global cron job(s)
 
 [onboard] Dry run complete — no changes written.
@@ -973,23 +978,22 @@ python3 onboard.py --auto
 **Expected output:**
 ```
 [onboard] Discovering all active environments...
-  petclinicmbtest: 6 services — ['api-gateway', 'config-server', 'customers-service', 'discovery-server', 'vets-service', 'visits-service']
+  <env>: 7 services — ['api-gateway', 'config-server', 'customers-service', 'discovery-server', 'vets-service', 'visits-service']
   unknown: 1 services — ['admin-server']
 
 [onboard] Diff results:
-  New environments:     ['petclinicmbtest']
+  New environments:     ['<env>']
   Updated environments: —
-  Removed environments: ['mbtest-7043-workshop']
 
 [onboard] Acting on changes...
 
-  [new] petclinicmbtest
-    $ python3 core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
-    $ python3 core/error_fingerprint.py --environment petclinicmbtest learn --window-minutes=120
+  [new] <env>
+    $ python3 core/trace_fingerprint.py --environment <env> learn --window-minutes=120
+    $ python3 core/error_fingerprint.py --environment <env> learn --window-minutes=120
     Dashboard created: HEwtJd2A0As (group: HD0uRkOA0AE)
-    Added 8 cron job(s) for 'petclinicmbtest'
+    Added 8 cron job(s) for '<env>'
     Added 2 global cron job(s)
-    /Users/mbui/Documents/o11y-behaviorbaseline/agents/RUNBOOK.petclinicmbtest.md already exists. Use --force to regenerate.
+    /Users/mbui/Documents/o11y-behaviorbaseline/agents/RUNBOOK.<env>.md already exists. Use --force to regenerate.
     State saved -> data/onboarding_state.json
 
 [onboard] Done.
@@ -998,11 +1002,11 @@ python3 onboard.py --auto
 > The runbook line shows "already exists" because it was generated in a prior session. In a truly fresh environment it generates automatically. Use `--force` on `runbook_generator.py` to regenerate.
 
 **What was created in ~60 seconds:**
-- Trace fingerprint baseline: 7 structural call path patterns
+- Trace fingerprint baseline: 9 structural call path patterns
 - Error signature baseline: learned from last 120 minutes of live traffic
 - Dashboard: linked to the Behavioral Baseline dashboard group
 - Cron jobs: 8 per-environment + 2 global scheduled jobs
-- Runbook: `RUNBOOK.petclinicmbtest.md` generated by Claude with service topology context
+- Runbook: `RUNBOOK.<env>.md` generated by Claude with service topology context
 
 > **Note:** Error rate, latency, and request rate detectors are already live via Splunk APM AutoDetect — no provisioning needed. This framework adds the behavioral layer on top.
 
@@ -1041,15 +1045,15 @@ TRIAGE →  Claude reads the JSON anomaly list
 
 Fast path — triage OTel edge events directly (used in Demo 3):
 ```bash
-python3 watch_otel_events.py --environment petclinicmbtest \
-  | python3 agent.py --environment petclinicmbtest
+python3 watch_otel_events.py --environment $ENV \
+  | python3 agent.py --environment $ENV
 ```
 
 Slow path — Python APM polling, both tiers combined:
 ```bash
-(python3 core/trace_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment petclinicmbtest watch --window-minutes 5 --json) \
-  | python3 agent.py --environment petclinicmbtest
+(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
+ python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
+  | python3 agent.py --environment $ENV
 ```
 
 ---
@@ -1061,11 +1065,11 @@ Slow path — Python APM polling, both tiers combined:
 k "kubectl scale deployment vets-service petclinic-db --replicas=1"
 
 # Relearn trace baseline after disruptions
-python3 core/trace_fingerprint.py --environment petclinicmbtest learn --reset --window-minutes 55
-python3 core/trace_fingerprint.py --environment petclinicmbtest promote
+python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 55
+python3 core/trace_fingerprint.py --environment $ENV promote
 
 # Relearn error baseline after disruptions (wait for clean window first)
-python3 -c "import json,pathlib,datetime; pathlib.Path('data/error_baseline.petclinicmbtest.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':'petclinicmbtest'})); print('Error baseline wiped.')"
+python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
 
 # Clear alert log
 cat /dev/null > data/alerts.log
