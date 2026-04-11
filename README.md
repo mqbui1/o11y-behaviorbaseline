@@ -455,30 +455,33 @@ otel-processor/
 
 **Prerequisites:** Docker, kubectl, a k8s cluster with a local or remote registry.
 
-**Step 1 — Build and push the image**
-
-```bash
-docker build -t localhost:9999/otelcol-fingerprint:latest otel-processor/
-docker push localhost:9999/otelcol-fingerprint:latest
-```
-
-**Step 2 — Learn baseline and seed the ConfigMap**
+**Step 1 — Learn baseline**
 
 ```bash
 python3 core/trace_fingerprint.py --environment <env> learn
 python3 core/error_fingerprint.py --environment <env> learn
-
-./otel-processor/sync-baseline.sh <env>
 ```
 
-**Step 3 — Deploy**
+**Step 2 — Build, seed, and deploy (one command)**
 
 ```bash
-# Update image reference in daemonset.yaml if not using localhost:9999
-kubectl apply -f otel-processor/k8s/daemonset.yaml
+./otel-processor/deploy.sh <env>
+# Builds image → pushes to registry → seeds ConfigMap → applies RBAC → restarts DaemonSet
 ```
 
-**Step 4 — Redirect app spans through the processor**
+Or manually:
+```bash
+docker build -t localhost:9999/otelcol-fingerprint:latest otel-processor/
+docker push localhost:9999/otelcol-fingerprint:latest
+./otel-processor/sync-baseline.sh <env>
+kubectl create configmap baseline-sync-scripts \
+  --from-file=baseline-sync-sidecar.py=otel-processor/k8s/baseline-sync-sidecar.py \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f otel-processor/k8s/daemonset.yaml
+kubectl rollout restart daemonset/otelcol-fingerprint
+```
+
+**Step 3 — Redirect app spans through the processor**
 
 ```bash
 for svc in api-gateway customers-service vets-service visits-service; do
@@ -489,14 +492,28 @@ done
 
 ### Keeping the baseline in sync
 
-The processor reloads baseline files from the `behavioral-baseline` ConfigMap every 60 seconds. After each Python learn or promote cycle, push updated files:
+The baseline volume is an **emptyDir** seeded from the `behavioral-baseline` ConfigMap at pod startup (via init container). This makes it writable, so the processor can write back promoted entries.
 
+**Auto-promotion flow (fully automated):**
+```
+Processor detects drift N times (promotion_threshold=10)
+  → writes updated baseline.json to /baseline (emptyDir)
+  → emits trace.fingerprint.promoted event to Splunk
+  → baseline-sync sidecar detects the event (polls every 30s)
+  → sidecar patches behavioral-baseline ConfigMap
+  → all other pods reload the ConfigMap within 60s (baseline_reload_interval)
+```
+
+**After a manual Python learn/promote cycle:**
 ```bash
 ./otel-processor/sync-baseline.sh <env>
 # Pods pick up the new baseline within ~60 seconds
 ```
 
-The `baseline-sync` CronJob in `k8s/baseline-sync.yaml` can automate this if baseline files are on a shared PVC.
+**Full redeploy (image + baseline + RBAC):**
+```bash
+./otel-processor/deploy.sh <env>
+```
 
 ### Processor configuration
 
