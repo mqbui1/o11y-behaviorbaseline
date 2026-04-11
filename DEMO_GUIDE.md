@@ -198,29 +198,33 @@ Baseline (environment '<env>'): 9 fingerprints
 k "kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 2 — Wait 30 seconds (countdown for audience)
+### Step 1b — Watch OTel real-time detection (while the countdown runs)
+In a third terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 30 seconds elapsed. Run detection now.          "
+python3 -u poll_drift_events.py
 ```
-The loadgen hits owner/pet endpoints every ~5 seconds. After 30 seconds failure traces will be indexed and the 5-minute watch window will contain them.
 
-### Step 3 — Run detection + triage (one command)
+Within **10–15 seconds** of the kill, you'll see `error.signature.drift` events printed — the OTel processor detected new error signatures on the first affected trace.
+
+### Step 2 — Wait 30 seconds (for Splunk indexing lag)
 ```bash
-python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json \
-  | python3 agent.py --environment $ENV
+for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
+```
+
+### Step 3 — Run triage directly from OTel events (one command)
+```bash
+python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
 ```
-[agent] env=<env> | 2 anomaly(s) from watch
+[agent] env=<env> | 4 anomaly(s) from watch
   Reasoning with Claude...
 
-[!] DEGRADED — The customers-service cannot create database transactions, causing 500
-    errors to propagate back through the api-gateway on the GET /owners endpoint.
-    Root cause: The customers-service has lost connectivity to its database —
-    org.springframework.transaction.CannotCreateTransactionException on
-    OwnerRepository.findAll strongly indicates the database is unreachable or
-    refusing connections.
+[!] DEGRADED — customers-service is throwing CannotCreateTransactionException on every
+    DB call, cascading into 500 errors at the api-gateway on the GET /owners path.
+    Root cause: The database is down or unreachable — customers-service cannot open
+    a transaction, which propagates as 500s through the api-gateway.
     Confidence: HIGH | Affected: customers-service, api-gateway
     Recommended action: PAGE_ONCALL
 
@@ -234,47 +238,39 @@ python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-03-31 05:03:46 UTC]  DETECTION
+[TIMESTAMP UTC]  DETECTION
   anomaly type         : NEW_ERROR_SIGNATURE
   environment          : <env>
   service              : customers-service
-  message              : New error signature in customers-service: org.springframework
-                         .transaction.CannotCreateTransactionException on OwnerRepository.findAll, GET /owners
-  error type           : org.springframework.transaction.CannotCreateTransactionException
-  operation            : OwnerRepository.findAll, GET /owners
-  call path            : api-gateway:GET customers-service -> api-gateway:GET
+  message              : New error signature in customers-service:
+                         org.springframework.transaction.CannotCreateTransactionException
+                         on OwnerRepository.findAll
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-31 05:03:46 UTC]  DETECTION
+[TIMESTAMP UTC]  DETECTION
   anomaly type         : NEW_ERROR_SIGNATURE
   environment          : <env>
   service              : api-gateway
-  message              : New error signature in api-gateway: 500 on GET, GET customers-service
-  error type           : 500
-  operation            : GET, GET customers-service
-  call path            : api-gateway:GET customers-service
+  message              : New error signature in api-gateway: 500 on GET customers-service
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-03-31 05:03:46 UTC]  TRIAGE
+[TIMESTAMP UTC]  TRIAGE
   severity             : DEGRADED
   confidence           : HIGH
   environment          : <env>
   affected services    : customers-service, api-gateway
   root cause           : customers-service has lost connectivity to its database
   action               : PAGE_ONCALL
-  narrative            : customers-service is throwing CannotCreateTransactionException
-                         when attempting to query the owners table — the backing database
-                         is down or unreachable...
 ────────────────────────────────────────────────────────────────────────
 ```
 
 **Key talking points:**
-- *"A DB outage doesn't just spike existing errors — it creates brand new error signatures that have never appeared before."*
-- *"The framework fires on first occurrence. No threshold to set, no baseline rate to exceed."*
-- *"The cascade is visible: DB down → CannotCreateTransactionException in customers-service → 500 in api-gateway → 503 health checks across all DB-dependent services."*
-- *"Claude correctly identifies the shared database as the root cause from the error pattern alone — no metric thresholds triggered."*
+- *"The OTel processor fires in ~10 seconds — it sees the error span on the very first affected trace, before any metric threshold is crossed."*
+- *"A DB outage creates brand new error signatures that have never appeared before. The framework fires on first occurrence — no threshold to set."*
+- *"The cascade is visible: DB down → CannotCreateTransactionException in customers-service → 500 in api-gateway."*
+- *"Claude correctly identifies the shared database as the root cause from the error pattern alone."*
 
 ### Step 4 — Restore
 ```bash
@@ -319,24 +315,16 @@ In a third terminal tab, stream drift events directly from the OTel edge process
 python3 -u poll_drift_events.py
 ```
 
-Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event printed to this terminal — the OTel Collector edge processor detected the structural change as the first truncated trace flowed through.
+Within **10–15 seconds** of the kill, you'll see `trace.path.drift` and `error.signature.drift` events — the OTel processor detected both the structural absence of visits-service and the new connection error on the first affected trace.
 
-> **Talking point:** *"The OTel processor fires in ~10 seconds because it fingerprints every trace as it flows through the collector — no polling, no window to fill. The Python layer we're about to run gives you the correlated, AI-triaged view. These two layers work together: OTel for immediate signal, Python for context."*
-
-### Step 2 — Wait 30 seconds (countdown for audience)
+### Step 2 — Wait 30 seconds (for Splunk indexing lag)
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 30 seconds elapsed. Run detection now.          "
+for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
 ```
-The loadgen hits owner detail pages every ~5 seconds, which calls visits-service for pet visit history. After 30 seconds failure traces will be indexed and the 5-minute watch window will contain them.
 
-### Step 3 — Run detection + triage (one command)
-
-Both the trace tier and error tier are piped together — Claude sees the full picture from both signals simultaneously.
-
+### Step 3 — Run triage directly from OTel events (one command)
 ```bash
-(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
-  | python3 agent.py --environment $ENV
+python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
@@ -347,9 +335,9 @@ Both the trace tier and error tier are piped together — Claude sees the full p
 [!!] INCIDENT — The visits-service is completely absent from traces and the
     api-gateway is throwing WebClientRequestException errors when attempting
     to reach it via GET /api/gateway/owners/{ownerId}.
-    Root cause: visits-service is down or unreachable, causing the api-gateway
-    to fail with a WebClientRequestException when attempting to call it as part
-    of owner detail lookups.
+    Root cause: visits-service is down or unreachable — the OTel edge processor
+    detected both the structural trace absence and a new connection error on the
+    first affected request.
     Confidence: HIGH | Affected: visits-service, api-gateway
     Recommended action: PAGE_ONCALL
 
@@ -357,55 +345,46 @@ Both the trace tier and error tier are piped together — Claude sees the full p
     [PAGE_ONCALL] event emitted to Splunk
 ```
 
-The 3 anomalies:
-- `MISSING_SERVICE` ×2 — `api-gateway:GET /api/gateway/owners/{ownerId}` missing visits-service
-- `NEW_ERROR_SIGNATURE` ×1 — `WebClientRequestException` on GET in api-gateway
+The anomalies (from OTel edge):
+- `NEW_FINGERPRINT` — `api-gateway:GET /api/gateway/owners/{ownerId}` — truncated trace (visits-service absent)
+- `NEW_ERROR_SIGNATURE` ×2 — `WebClientRequestException` in api-gateway, `500` on GET
 
 **Expected alerts.log:**
 ```
 ════════════════════════════════════════════════════════════════════════
-[2026-04-01 05:28:07 UTC]  DETECTION
-  anomaly type         : MISSING_SERVICE
+[TIMESTAMP UTC]  DETECTION
+  anomaly type         : NEW_FINGERPRINT
   environment          : <env>
   service              : api-gateway
-  root op              : api-gateway:GET /api/gateway/owners/{ownerId}
-  message              : Expected service(s) absent from 'api-gateway:GET /api/gateway/owners/{ownerId}': ['visits-service']
-  missing services     : visits-service
-  services in trace    : api-gateway, customers-service
+  message              : Trace path drift on 'api-gateway:GET /api/gateway/owners/{ownerId}'
+                         (OTel edge detector)
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-04-01 05:28:07 UTC]  DETECTION
+[TIMESTAMP UTC]  DETECTION
   anomaly type         : NEW_ERROR_SIGNATURE
   environment          : <env>
   service              : api-gateway
-  message              : New error signature in api-gateway: org.springframework.web.reactive.function.client.WebClientRequestException on GET
-  error type           : org.springframework.web.reactive.function.client.WebClientRequestException
-  operation            : GET
-  call path            : api-gateway:GET /api/gateway/owners/{ownerId}
+  message              : New error signature in api-gateway:
+                         org.springframework.web.reactive.function.client.WebClientRequestException on GET
 ────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
-[2026-04-01 05:28:07 UTC]  TRIAGE
+[TIMESTAMP UTC]  TRIAGE
   severity             : INCIDENT
   confidence           : HIGH
   environment          : <env>
   affected services    : visits-service, api-gateway
-  root cause           : visits-service is down or unreachable, causing the
-                         api-gateway to fail with a WebClientRequestException
-  missing services     : api-gateway:GET /api/gateway/owners/{ownerId} → missing: visits-service
+  root cause           : visits-service is down — trace path drift and connection error
+                         detected by OTel edge processor on first affected request
   action               : PAGE_ONCALL
-  narrative            : The visits-service has completely disappeared from all
-                         traces — every owner detail request that normally fans out to
-                         visits-service is completing without it, and the api-gateway is
-                         surfacing WebClientRequestException errors on those GET calls.
 ────────────────────────────────────────────────────────────────────────
 ```
 
 **Key talking points:**
-- *"No threshold. The baseline had zero error signatures for this service — so the first occurrence fires immediately."*
-- *"Running both tiers together gives Claude the full picture: trace tier sees visits-service missing from the call graph, error tier sees the connection exception. Together they unambiguously point to visits-service."*
-- *"Notice the triage correctly notes customers-service is healthy — Claude can reason about what's working as well as what's broken."*
+- *"The OTel processor fires in ~10 seconds — no poll interval, no window to fill. It fingerprints every trace as it flows through the collector."*
+- *"Both the structural absence (trace path drift) and the new error signature arrive simultaneously — Claude sees the full picture from a single triage command."*
+- *"Total time from kill to triage: under 1 minute."*
 
 ### Step 4 — Restore
 ```bash
@@ -559,21 +538,22 @@ python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 k "kubectl scale deployment vets-service --replicas=0 && kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 2 — Wait 30 seconds (countdown for audience)
-The watch window is 5 minutes. We wait 30 seconds for failure traces to be indexed —
-MISSING_SERVICE fires because the root op has zero recent traces, not because the window is empty.
+### Step 1b — Watch OTel real-time detection (while the countdown runs)
+In a third terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 30 seconds elapsed. Run detection now.          "
+python3 -u poll_drift_events.py
 ```
-The watch window will contain:
-- Trace tier: MISSING_SERVICE for vets-service and owner detail paths (DB down = no traces completing)
-- Error tier: CannotCreateTransactionException from customers-service on every DB call
 
-### Step 3 — Run detection + triage (combined tiers)
+Within **10–15 seconds** you'll see both `trace.path.drift` (vets-service gone) and `error.signature.drift` (DB errors) events fire simultaneously.
+
+### Step 2 — Wait 30 seconds (for Splunk indexing lag)
 ```bash
-(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
-  | python3 agent.py --environment $ENV
+for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
+```
+
+### Step 3 — Run triage directly from OTel events (one command)
+```bash
+python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
@@ -710,11 +690,17 @@ k "kubectl scale deployment vets-service --replicas=0"
 for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 30 seconds elapsed. Run detection now.          "
 ```
 
-### Step 3 — Run detection + triage (agent sees INCIDENT, doesn't know about deploy)
+### Step 2b — Watch OTel real-time detection (while the countdown runs)
+In a third terminal tab:
 ```bash
-(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
-  | python3 agent.py --environment $ENV
+python3 -u poll_drift_events.py
+```
+
+Within 10–15 seconds you'll see drift events fire for vets-service.
+
+### Step 3 — Run triage from OTel events (agent sees INCIDENT, doesn't know about deploy)
+```bash
+python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
@@ -1043,13 +1029,13 @@ TRIAGE →  Claude reads the JSON anomaly list
           Writes DETECTION + TRIAGE to alerts.log
 ```
 
-Fast path — triage OTel edge events directly (used in Demo 3):
+Fast path — triage OTel edge events directly (used in all demos):
 ```bash
 python3 watch_otel_events.py --environment $ENV \
   | python3 agent.py --environment $ENV
 ```
 
-Slow path — Python APM polling, both tiers combined:
+Slow path — Python APM polling (used in Demo 6 auto-promotion only):
 ```bash
 (python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
  python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
