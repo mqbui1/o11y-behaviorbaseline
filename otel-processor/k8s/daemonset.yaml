@@ -25,6 +25,19 @@ spec:
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           effect: NoSchedule
+      # Copy baseline files from the ConfigMap into the writable emptyDir volume
+      # before the collector starts. The sidecar keeps the ConfigMap (and therefore
+      # this volume on the next pod restart) in sync after each auto-promotion.
+      initContainers:
+        - name: baseline-init
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /baseline-cm/* /baseline/"]
+          volumeMounts:
+            - name: baseline-cm
+              mountPath: /baseline-cm
+              readOnly: true
+            - name: baseline
+              mountPath: /baseline
       containers:
         - name: otelcol
           image: ghcr.io/mqbui1/otelcol-fingerprint:latest   # update after build
@@ -72,15 +85,56 @@ spec:
             - name: config
               mountPath: /etc/otelcol
             - name: baseline
-              mountPath: /baseline
-              readOnly: true
+              mountPath: /baseline   # writable emptyDir — auto-promotion writes here
+
+        # Sidecar: watches Splunk for trace.fingerprint.promoted events and patches
+        # the behavioral-baseline ConfigMap so all pods get the updated baseline
+        # on their next baseline_reload_interval tick.
+        - name: baseline-sync
+          image: python:3.11-alpine
+          command: ["python3", "/scripts/baseline-sync-sidecar.py"]
+          env:
+            - name: WORKSHOP_ENVIRONMENT
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: env
+            - name: SPLUNK_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: splunk-otel-collector
+                  key: splunk_observability_access_token
+            - name: SPLUNK_REALM
+              value: "us1"
+            - name: POLL_INTERVAL
+              value: "30"
+            - name: LOOKBACK_SECONDS
+              value: "120"
+          resources:
+            limits:
+              memory: 64Mi
+              cpu: 50m
+            requests:
+              memory: 32Mi
+              cpu: 10m
+          volumeMounts:
+            - name: baseline
+              mountPath: /baseline   # reads promoted baseline files written by collector
+            - name: sync-scripts
+              mountPath: /scripts
+
       volumes:
         - name: config
           configMap:
             name: otelcol-fingerprint-config
-        - name: baseline
+        - name: baseline-cm
           configMap:
-            name: behavioral-baseline   # updated by baseline-sync CronJob
+            name: behavioral-baseline   # source of truth — updated by sidecar after promotion
+        - name: baseline
+          emptyDir: {}               # writable copy — init container seeds it from baseline-cm
+        - name: sync-scripts
+          configMap:
+            name: baseline-sync-scripts
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -129,6 +183,11 @@ data:
         min_baseline_occurrences: 2
         baseline_reload_interval: 60s
         partial_trace_threshold: 0.7
+        # Auto-promote new fingerprints after 10 detections. The promoted
+        # baseline is written back to /baseline (emptyDir) and the
+        # baseline-sync sidecar patches the ConfigMap so all pods reload it.
+        promotion_threshold: 10
+        promotion_writeback: true
 
     exporters:
       otlphttp/splunk:
@@ -158,6 +217,38 @@ kind: ServiceAccount
 metadata:
   name: otelcol-fingerprint
   namespace: default
+---
+# Role: allow the baseline-sync sidecar to patch the behavioral-baseline ConfigMap
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: otelcol-fingerprint-baseline-sync
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["behavioral-baseline"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: otelcol-fingerprint-baseline-sync
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: otelcol-fingerprint
+    namespace: default
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: otelcol-fingerprint-baseline-sync
+---
+# NOTE: The baseline-sync-scripts ConfigMap is created by deploy.sh, not here,
+# because kubectl --from-file handles the script embedding correctly:
+#   kubectl create configmap baseline-sync-scripts \
+#     --from-file=baseline-sync-sidecar.py=k8s/baseline-sync-sidecar.py \
+#     --dry-run=client -o yaml | kubectl apply -f -
 ---
 # Service so app pods can reach this collector at otelcol-fingerprint:4317/4318
 apiVersion: v1
