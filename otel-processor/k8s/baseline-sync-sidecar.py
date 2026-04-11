@@ -34,7 +34,7 @@ Optional env vars:
 
 import json
 import os
-import subprocess
+import ssl
 import sys
 import time
 import urllib.error
@@ -146,24 +146,41 @@ def patch_configmap() -> bool:
               flush=True)
         return True
 
-    cmd = [
-        "kubectl", "create", "configmap", CONFIGMAP_NAME,
-        f"--from-literal=baseline.json={baseline_json}",
-        f"--from-literal=error_baseline.json={error_baseline_json}",
-        "--dry-run=client", "-o", "yaml",
-    ]
+    # Patch the ConfigMap directly via the Kubernetes API using the in-cluster
+    # service account token — no kubectl binary required.
     try:
-        manifest = subprocess.check_output(cmd, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        print(f"[error] kubectl create configmap failed: {e.stderr.decode()}", flush=True)
+        token = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        ca_cert = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    except Exception as e:
+        print(f"[error] Could not read service account credentials: {e}", flush=True)
         return False
 
-    apply_cmd = ["kubectl", "apply", "-n", CONFIGMAP_NS, "-f", "-"]
+    patch = {
+        "data": {
+            "baseline.json":       baseline_json,
+            "error_baseline.json": error_baseline_json,
+        }
+    }
+    url = (f"https://kubernetes.default.svc/api/v1/namespaces/{CONFIGMAP_NS}"
+           f"/configmaps/{CONFIGMAP_NAME}")
+    ctx = ssl.create_default_context(cafile=ca_cert)
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(patch).encode(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/strategic-merge-patch+json",
+        },
+        method="PATCH",
+    )
     try:
-        subprocess.run(apply_cmd, input=manifest, check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        print(f"[error] kubectl apply failed: {e.stderr.decode()}", flush=True)
+        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        print(f"[error] Kubernetes API patch failed {e.code}: {e.read().decode()}", flush=True)
+        return False
+    except Exception as e:
+        print(f"[error] Kubernetes API request failed: {e}", flush=True)
         return False
 
     print(f"[sync] ConfigMap {CONFIGMAP_NAME} patched: "

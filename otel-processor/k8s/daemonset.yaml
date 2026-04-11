@@ -40,7 +40,7 @@ spec:
               mountPath: /baseline
       containers:
         - name: otelcol
-          image: ghcr.io/mqbui1/otelcol-fingerprint:latest   # update after build
+          image: localhost:9999/otelcol-fingerprint:latest
           imagePullPolicy: Always
           args:
             - --config=/etc/otelcol/config.yaml
@@ -102,8 +102,8 @@ spec:
             - name: SPLUNK_ACCESS_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: splunk-otel-collector
-                  key: splunk_observability_access_token
+                  name: splunk-api-token
+                  key: token
             - name: SPLUNK_REALM
               value: "us1"
             - name: POLL_INTERVAL
