@@ -27,17 +27,22 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 │  │  fingerprintprocessor  (custom Go processor)                             │   │
 │  │                                                                          │   │
 │  │  1. Buffer spans per traceId (10s window)                                │   │
-│  │  2. On flush: build trace fingerprint + error signatures                 │   │
-│  │  3. Compare against baseline (emptyDir, seeded from ConfigMap)           │   │
+│  │  2. On flush:                                                            │   │
+│  │       ┌─ build trace fingerprint  (ordered parent→child edge hash)       │   │
+│  │       └─ build error signatures   (service + error_type + op hash)       │   │
+│  │  3. Compare each hash against baseline (emptyDir, seeded from ConfigMap) │   │
 │  │                                                                          │   │
-│  │  MATCH  ──▶  silent, pass through                                        │   │
-│  │  DRIFT  ──▶  emit event to Splunk  (~10s latency)                        │   │
-│  │              trace.path.drift  /  error.signature.drift                  │   │
+│  │  TRACE MATCH  ──▶  silent, pass through                                  │   │
+│  │  TRACE DRIFT  ──▶  emit trace.path.drift  (~10s latency)                 │   │
+│  │                    NEW HASH × 10  ──▶  promote into trace baseline        │   │
+│  │                                        write /baseline/baseline.json      │   │
+│  │                                        emit trace.fingerprint.promoted    │   │
 │  │                                                                          │   │
-│  │  NEW HASH seen N times (promotion_threshold=10):                         │   │
-│  │    ──▶  add to in-memory baseline                                        │   │
-│  │    ──▶  write /baseline/*.json  (emptyDir)                               │   │
-│  │    ──▶  emit trace.fingerprint.promoted                                  │   │
+│  │  ERROR MATCH  ──▶  silent, pass through                                  │   │
+│  │  ERROR DRIFT  ──▶  emit error.signature.drift  (~10s latency)            │   │
+│  │                    NEW HASH × 10  ──▶  promote into error baseline        │   │
+│  │                                        write /baseline/error_baseline.json│   │
+│  │                                        emit trace.fingerprint.promoted    │   │
 │  └──────────────────────────────────────────────────────────────────────────┘   │
 │                                                                                 │
 │  ┌─────────────────────────────────┐   ┌──────────────────────────────────┐    │
@@ -113,16 +118,29 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 ### Baseline lifecycle
 
 ```
-python3 core/trace_fingerprint.py learn   ←── daily cron (02:00 UTC)
-  └─▶ data/baseline.<env>.json
-        └─▶ sync-baseline.sh  ──▶  behavioral-baseline ConfigMap
-              └─▶ DaemonSet pods reload (init container on next restart)
+Manual / scheduled learn (Python)                  ←── daily cron (02:00 UTC)
+  python3 core/trace_fingerprint.py learn
+    └─▶ data/baseline.<env>.json
+  python3 core/error_fingerprint.py learn
+    └─▶ data/error_baseline.<env>.json
+          └─▶ sync-baseline.sh  ──▶  behavioral-baseline ConfigMap
+                └─▶ DaemonSet pods reload (init container on next restart)
 
-OTel processor auto-promotion  ←── continuous, threshold=10 detections
-  └─▶ /baseline/baseline.json  (emptyDir, this pod only)
-  └─▶ trace.fingerprint.promoted  (Splunk event)
-        └─▶ baseline-sync sidecar  ──▶  behavioral-baseline ConfigMap patch
-              └─▶ all pods reload within 60s
+OTel processor auto-promotion                      ←── continuous, threshold=10
+
+  Trace path drift:
+    NEW hash × 10  ──▶  /baseline/baseline.json  (emptyDir, this pod)
+                   ──▶  trace.fingerprint.promoted  (kind=trace)
+                           └─▶ baseline-sync sidecar
+                                 └─▶  ConfigMap patch (both files)
+                                       └─▶  all pods reload within 60s
+
+  Error signature drift:
+    NEW hash × 10  ──▶  /baseline/error_baseline.json  (emptyDir, this pod)
+                   ──▶  trace.fingerprint.promoted  (kind=error)
+                           └─▶ baseline-sync sidecar
+                                 └─▶  ConfigMap patch (both files)
+                                       └─▶  all pods reload within 60s
 ```
 
 ---
