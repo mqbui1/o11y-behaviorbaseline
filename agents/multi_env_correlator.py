@@ -45,6 +45,7 @@ import sys
 import time
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -155,8 +156,11 @@ def _parse_event(msg: dict) -> dict | None:
                    if ":" in dims.get("root_operation", "") else None)
                or (props.get("services", "").split(",")[0].strip() or None))
 
-    # Timestamp: try to get from message; fall back to now
-    ts_ms = props.get("timestamp") or dims.get("timestamp") or int(time.time() * 1000)
+    # Timestamp: use the SSE message-level timestampMs field (milliseconds epoch).
+    # props/dims "timestamp" is rarely populated and must not be used as fallback
+    # because silently defaulting to now() gives all events the same timestamp,
+    # breaking time-ordering detection entirely.
+    ts_ms = msg.get("timestampMs") or int(time.time() * 1000)
     if isinstance(ts_ms, str):
         try:
             ts_ms = int(ts_ms)
@@ -346,12 +350,14 @@ def run(lookback_hours: int = LOOKBACK_HOURS,
 
     print(f"[multi-env-correlator] Fetching anomaly events (last {lookback_hours}h)...")
     all_events: list[dict] = []
-    for et in ANOMALY_EVENT_TYPES:
-        raw = _fetch_anomaly_events(et, start_ms, now_ms)
-        for msg in raw:
-            ev = _parse_event(msg)
-            if ev:
-                all_events.append(ev)
+    with ThreadPoolExecutor(max_workers=len(ANOMALY_EVENT_TYPES)) as pool:
+        futures = {pool.submit(_fetch_anomaly_events, et, start_ms, now_ms): et
+                   for et in ANOMALY_EVENT_TYPES}
+        for future in as_completed(futures):
+            for msg in future.result():
+                ev = _parse_event(msg)
+                if ev:
+                    all_events.append(ev)
 
     # Deduplicate environments seen
     all_envs = {ev["environment"] for ev in all_events}
