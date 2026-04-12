@@ -49,9 +49,9 @@ from typing import Any
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 # Load .env file from script directory if present (fallback for cron/non-shell contexts)
-_env_file = os.path.join(os.path.dirname(__file__), ".env")
-if os.path.exists(_env_file):
-    for _line in open(_env_file).read().splitlines():
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
