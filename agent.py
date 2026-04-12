@@ -13,6 +13,10 @@ Usage:
   # dry-run: reason but don't act
   ... | python3 agent.py --environment petclinicmbtest --dry-run
 
+Exit codes:
+  0 — OK or DEGRADED (no immediate action required)
+  1 — INCIDENT (use in CI/CD pipelines to gate on incident severity)
+
 Required env vars:
   SPLUNK_ACCESS_TOKEN
   SPLUNK_REALM              (default: us1)
@@ -62,6 +66,9 @@ SYSTEM_PROMPT = """You are an observability triage agent for a microservices app
 
 You receive a list of anomalies detected RIGHT NOW by a trace path drift detector.
 Each anomaly has a type, the affected service, and a message describing what changed.
+The input may also include a "topology_context" field showing the live service dependency
+graph. Use it to assess blast radius: a shared dependency (many callers) failing is more
+severe than a leaf service failing.
 
 Your job:
 1. Determine what is actually wrong
@@ -149,7 +156,30 @@ def read_watch_output() -> dict:
 
 # ── 2. REASON ─────────────────────────────────────────────────────────────────
 
-def reason(watch_result: dict) -> dict:
+def _build_topology_context(env: str) -> str:
+    """Fetch live service topology and return a compact summary for the prompt."""
+    try:
+        import collect
+        topo = collect.fetch_topology(env, lookback_hours=2)
+        services = topo.get("services", [])
+        edges    = topo.get("edges", [])
+        if not services:
+            return ""
+        lines = [f"Service topology for {env}:"]
+        lines.append(f"  Services: {', '.join(sorted(services))}")
+        if edges:
+            # Group as callee: [callers] for compact representation
+            callers_of: dict[str, list] = {}
+            for src, dst in edges:
+                callers_of.setdefault(dst, []).append(src)
+            for svc, callers in sorted(callers_of.items()):
+                lines.append(f"  {svc} ← called by: {', '.join(sorted(callers))}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def reason(watch_result: dict, env: str = "") -> dict:
     """Single Claude call. Returns structured triage plan."""
     if _boto3 is None:
         raise RuntimeError("boto3 not available — install with: pip install boto3")
@@ -157,11 +187,18 @@ def reason(watch_result: dict) -> dict:
     # Create client at call time so it always picks up current AWS env vars
     bedrock = _boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
+    # Augment the watch result with live topology so Claude can reason about
+    # blast radius (shared dependencies vs. leaf services)
+    payload = dict(watch_result)
+    topo_ctx = _build_topology_context(env) if env else ""
+    if topo_ctx:
+        payload["topology_context"] = topo_ctx
+
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 1024,
         "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": json.dumps(watch_result, indent=2)}],
+        "messages": [{"role": "user", "content": json.dumps(payload, indent=2)}],
     })
 
     response = bedrock.invoke_model(modelId=BEDROCK_ARN, body=body)
@@ -282,13 +319,13 @@ def main() -> None:
 
     print("  Reasoning with Claude...")
     try:
-        plan = reason(watch_result)
+        plan = reason(watch_result, env=env)
     except Exception as e:
         print(f"  [error] Claude call failed: {e}", file=sys.stderr)
         # Retry once with a fresh client in case credentials rotated mid-flight
         try:
             print("  Retrying...", file=sys.stderr)
-            plan = reason(watch_result)
+            plan = reason(watch_result, env=env)
         except Exception as e2:
             print(f"  [error] Retry failed: {e2}", file=sys.stderr)
             sys.exit(1)

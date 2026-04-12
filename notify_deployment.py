@@ -31,7 +31,7 @@ severity and annotates the correlated anomaly with deployment context.
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
-  SPLUNK_REALM              (default: us0)
+  SPLUNK_REALM              (default: us1)
 """
 
 import argparse
@@ -59,7 +59,7 @@ if os.path.exists(_env_file):
 
 ACCESS_TOKEN  = os.environ.get("SPLUNK_ACCESS_TOKEN")
 INGEST_TOKEN  = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
-REALM        = os.environ.get("SPLUNK_REALM", "us0")
+REALM        = os.environ.get("SPLUNK_REALM", "us1")
 
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN environment variable is required.",

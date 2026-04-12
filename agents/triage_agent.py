@@ -25,7 +25,7 @@ Usage:
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
-  SPLUNK_REALM              (default: us0)
+  SPLUNK_REALM              (default: us1)
 
 Optional env vars:
   SPLUNK_INGEST_TOKEN       (default: ACCESS_TOKEN)
@@ -75,7 +75,7 @@ if _ENV_FILE.exists():
 
 ACCESS_TOKEN  = os.environ.get("SPLUNK_ACCESS_TOKEN")
 INGEST_TOKEN  = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
-REALM         = os.environ.get("SPLUNK_REALM", "us0")
+REALM         = os.environ.get("SPLUNK_REALM", "us1")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")  # optional: direct API fallback
 AWS_REGION    = os.environ.get("AWS_REGION", "us-west-2")
 
