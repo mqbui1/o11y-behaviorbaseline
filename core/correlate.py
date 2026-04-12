@@ -60,14 +60,15 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 # Load .env file from script directory if present (fallback for cron/non-shell contexts)
-_env_file = os.path.join(os.path.dirname(__file__), "..", ".env")
-if os.path.exists(_env_file):
-    for _line in open(_env_file).read().splitlines():
+_env_file = Path(__file__).parent.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
@@ -525,18 +526,18 @@ def correlate(events: list[dict],
             severity = _SEVERITY_DOWNGRADE.get(severity, severity)
 
         correlations.append({
-            "service":           service,
-            "corr_type":         corr_type,
-            "severity":          severity,
-            "tiers":             sorted(tiers_present),
-            "event_count":       len(svc_events),
-            "anomaly_types":     anomaly_types,
-            "messages":          messages,
-            "time_span_s":       time_span_s,
-            "sf_environment":       environment,
-            "earliest_ms":       earliest_ms,
-            "latest_ms":         max(timestamps) if timestamps else 0,
-            "deployment":        deployment_match,
+            "service":       service,
+            "corr_type":     corr_type,
+            "severity":      severity,
+            "tiers":         sorted(tiers_present),
+            "event_count":   len(svc_events),
+            "anomaly_types": anomaly_types,
+            "messages":      messages,
+            "time_span_s":   time_span_s,
+            "environment":   environment,
+            "earliest_ms":   earliest_ms,
+            "latest_ms":     max(timestamps) if timestamps else 0,
+            "deployment":    deployment_match,
         })
 
     # Sort by severity then event count
@@ -575,7 +576,7 @@ def send_correlated_event(corr: dict) -> None:
         "anomaly_types": ",".join(corr["anomaly_types"]),
         "event_count":   corr["event_count"],
         "time_span_s":   corr["time_span_s"],
-        "environment":   corr.get("sf_environment") or corr.get("environment", "all"),
+        "environment":   corr.get("environment", "all"),
         "details":       " | ".join(corr["messages"][:5]),
         "detector_tier": "correlation",
         "detector_name": "cross-tier-correlator",
@@ -592,7 +593,7 @@ def send_correlated_event(corr: dict) -> None:
         "service":        corr["service"],
         "corr_type":      corr["corr_type"],
         "severity":       corr["severity"],
-        "sf_environment": corr.get("sf_environment", corr.get("environment", "all")),
+        "sf_environment": corr.get("environment", "all"),
         "tiers":          ",".join(corr["tiers"]),
     }
     _request("POST", "/v2/event", [{
