@@ -49,6 +49,7 @@ Required env vars:
 """
 
 import argparse
+import bisect
 import json
 import os
 import sys
@@ -56,6 +57,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -206,13 +208,21 @@ def collect_signals(start_ms: int, end_ms: int,
       "correlations": [{service, timestamp_ms, severity}]
     }
     """
-    print(f"  Fetching trace.path.drift events...")
-    trace_raw  = _signalflow_events("trace.path.drift", start_ms, end_ms)
-    print(f"  Fetching error.signature.drift events...")
-    error_raw  = _signalflow_events("error.signature.drift", start_ms, end_ms)
-    print(f"  Fetching behavioral_baseline.correlated_anomaly events...")
-    corr_raw   = _signalflow_events("behavioral_baseline.correlated_anomaly",
-                                    start_ms, end_ms)
+    _event_types = [
+        "trace.path.drift",
+        "error.signature.drift",
+        "behavioral_baseline.correlated_anomaly",
+    ]
+    print(f"  Fetching {len(_event_types)} event streams in parallel...")
+    _raw: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_signalflow_events, et, start_ms, end_ms): et
+                   for et in _event_types}
+        for fut in as_completed(futures):
+            _raw[futures[fut]] = fut.result()
+    trace_raw = _raw["trace.path.drift"]
+    error_raw = _raw["error.signature.drift"]
+    corr_raw  = _raw["behavioral_baseline.correlated_anomaly"]
 
     anomalies = []
     for msg in trace_raw + error_raw:
@@ -253,10 +263,12 @@ def classify_signals(signals: dict) -> dict[str, dict]:
 
     Returns: {service: {tp, fp, total, fp_rate, anomaly_types}}
     """
-    # Index correlations by service → sorted list of timestamps
+    # Index correlations by service → sorted list of timestamps for bisect lookup
     corr_index: dict[str, list[int]] = defaultdict(list)
     for c in signals["correlations"]:
         corr_index[c["service"]].append(c["timestamp_ms"])
+    for lst in corr_index.values():
+        lst.sort()
 
     stats: dict[str, dict] = defaultdict(lambda: {
         "tp": 0, "fp": 0, "total": 0, "anomaly_types": defaultdict(int)
@@ -269,11 +281,11 @@ def classify_signals(signals: dict) -> dict[str, dict]:
         if ev["anomaly_type"]:
             stats[svc]["anomaly_types"][ev["anomaly_type"]] += 1
 
-        # Check if any correlation confirms this anomaly
-        confirmed = any(
-            abs(corr_ts - ts) <= CORRELATION_CONFIRM_WINDOW_MS
-            for corr_ts in corr_index.get(svc, [])
-        )
+        # O(log m) check: any correlation timestamp within the confirm window?
+        corr_ts_list = corr_index.get(svc, [])
+        lo = bisect.bisect_left(corr_ts_list, ts - CORRELATION_CONFIRM_WINDOW_MS)
+        hi = bisect.bisect_right(corr_ts_list, ts + CORRELATION_CONFIRM_WINDOW_MS)
+        confirmed = lo < hi
         if confirmed:
             stats[svc]["tp"] += 1
         else:
