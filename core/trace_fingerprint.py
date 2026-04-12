@@ -352,6 +352,15 @@ def _infer_parent_id(spans: list[dict]) -> dict[str, str | None]:
     most direct parent (tightest enclosing window).
 
     Returns: {spanID: parentSpanID or None}
+
+    Note: this heuristic breaks for async operations (fire-and-forget, Kafka
+    consumers, async HTTP) where a child span starts after its logical parent
+    ends — those spans get no parent and appear as roots. The resulting
+    fingerprint will differ from the baseline only at the edge level, not the
+    service level, so MISSING_SERVICE and NEW_SERVICE detection still work
+    correctly. False NEW_FINGERPRINT alerts on async-heavy services can be
+    reduced by increasing AUTO_PROMOTE_THRESHOLD or lowering
+    MISSING_SERVICE_DOMINANCE_THRESHOLD for those services.
     """
     parents: dict[str, str | None] = {}
     for span in spans:
@@ -561,6 +570,10 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
             "fp":      fp,
         }
 
+    # For established hashes: run SPAN_COUNT_SPIKE, NEW_SERVICE, MISSING_SERVICE
+    # checks even when the hash is known — these detect anomalies on familiar paths.
+    root_svc = root_op.split(":")[0] if ":" in root_op else root_op
+
     # NEW_SERVICE
     all_baseline_services: set[str] = set()
     for info in baseline_for_root.values():
@@ -574,12 +587,12 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
             "fp":      fp,
         }
 
-    # SPAN_COUNT_SPIKE
+    # SPAN_COUNT_SPIKE — checked for ALL hashes (known or unknown) so it fires
+    # even when the trace path hash matches a baseline entry exactly.
     baseline_max = max(
         (info.get("span_count", 0) for info in baseline_for_root.values()),
         default=0,
     )
-    root_svc = root_op.split(":")[0] if ":" in root_op else root_op
     span_multiplier = _svc_threshold(
         root_svc, "span_count_spike_multiplier", SPAN_COUNT_SPIKE_MULTIPLIER
     )

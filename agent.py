@@ -187,18 +187,13 @@ def reason(watch_result: dict, env: str = "") -> dict:
     # Create client at call time so it always picks up current AWS env vars
     bedrock = _boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
-    # Augment the watch result with live topology so Claude can reason about
-    # blast radius (shared dependencies vs. leaf services)
-    payload = dict(watch_result)
-    topo_ctx = _build_topology_context(env) if env else ""
-    if topo_ctx:
-        payload["topology_context"] = topo_ctx
-
+    # topology_context is pre-injected by main() via a concurrent fetch —
+    # watch_result already contains it when passed here.
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 1024,
         "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": json.dumps(payload, indent=2)}],
+        "messages": [{"role": "user", "content": json.dumps(watch_result, indent=2)}],
     })
 
     response = bedrock.invoke_model(modelId=BEDROCK_ARN, body=body)
@@ -307,15 +302,31 @@ def main() -> None:
                         help="Reason but don't write to alerts.log")
     args = parser.parse_args()
 
+    env = args.environment
+
+    # Start topology fetch concurrently while reading stdin — both are I/O bound
+    # and independent, so running them in parallel saves ~1-2s per cycle.
+    import threading
+    _topo_ctx: list[str] = []
+    def _fetch_topo():
+        _topo_ctx.append(_build_topology_context(env))
+    topo_thread = threading.Thread(target=_fetch_topo, daemon=True)
+    topo_thread.start()
+
     watch_result = read_watch_output()
     anomalies = watch_result.get("anomalies", [])
-    env = args.environment
+
+    topo_thread.join(timeout=10)  # don't block indefinitely if topology API is slow
 
     print(f"[agent] env={env} | {len(anomalies)} anomaly(s) from watch")
 
     if not anomalies:
         print("  No anomalies — system healthy.")
         sys.exit(0)
+
+    # Inject topology into the watch result before the Claude call
+    if _topo_ctx and _topo_ctx[0]:
+        watch_result["topology_context"] = _topo_ctx[0]
 
     print("  Reasoning with Claude...")
     try:

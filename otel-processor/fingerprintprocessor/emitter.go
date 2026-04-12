@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -135,43 +136,12 @@ func (e *emitter) send(evt splunkEvent) error {
 }
 
 func rootService(rootOp string) string {
-	parts := splitN(rootOp, ":", 2)
-	if len(parts) > 0 {
-		return parts[0]
+	if idx := strings.Index(rootOp, ":"); idx >= 0 {
+		return rootOp[:idx]
 	}
 	return rootOp
 }
 
 func joinStrings(ss []string) string {
-	out := ""
-	for i, s := range ss {
-		if i > 0 {
-			out += ","
-		}
-		out += s
-	}
-	return out
-}
-
-func splitN(s, sep string, n int) []string {
-	var parts []string
-	for len(parts) < n-1 {
-		idx := indexOf(s, sep)
-		if idx < 0 {
-			break
-		}
-		parts = append(parts, s[:idx])
-		s = s[idx+len(sep):]
-	}
-	parts = append(parts, s)
-	return parts
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
+	return strings.Join(ss, ",")
 }

@@ -30,6 +30,13 @@ type fingerprintProcessor struct {
 
 	// seenMu guards seenCounts independently of the trace buffer mutex so
 	// promotion counter updates don't contend with span ingestion.
+	// Note: seenCounts is in-memory only and resets on pod restart. In a
+	// DaemonSet where pods are evicted during rolling deploys, a hash seen
+	// 9/10 times may never reach PromotionThreshold if the pod restarts.
+	// Mitigation: set PromotionThreshold low (10 is ~2 min at typical trace
+	// rates) so the counter refills quickly after restart. For zero-loss
+	// promotion tracking, lower PromotionThreshold or rely on the Python
+	// auto-promotion path (AUTO_PROMOTE_THRESHOLD in trace_fingerprint.py).
 	seenMu     sync.Mutex
 	seenCounts map[string]int // hash -> detection count since startup
 
@@ -187,6 +194,14 @@ func (p *fingerprintProcessor) flushAll() {
 
 // analyzeTrace runs both trace structure and error signature detection on a
 // flushed trace buffer.
+//
+// Note: the OTel processor currently emits only NEW_FINGERPRINT (trace.path.drift)
+// and NEW_ERROR_SIGNATURE (error.signature.drift). MISSING_SERVICE detection
+// (service absent from a known root_op trace) requires comparing the current
+// service set against all baseline fingerprints for that root_op — this is
+// available via traceFingerprintsByRootOp() and the Python layer handles it
+// correctly. The Python correlate.py layer sees the full trace from the APM
+// backend and performs MISSING_SERVICE detection reliably (~1-5 min latency).
 func (p *fingerprintProcessor) analyzeTrace(buf *traceBuffer) {
 	p.analyzeTraceStructure(buf)
 	p.analyzeErrorSignatures(buf)

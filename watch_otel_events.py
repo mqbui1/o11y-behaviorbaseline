@@ -181,6 +181,10 @@ def main() -> None:
                         help="Splunk APM environment filter")
     parser.add_argument("--window-minutes", type=int, default=5,
                         help="How far back to query (default: 5)")
+    parser.add_argument("--overlap-seconds", type=int, default=45,
+                        help="Extra seconds added to the start of the window to cover "
+                             "Splunk indexing lag (~30s). Prevents missing events that "
+                             "arrived just before the window opened. (default: 45)")
     parser.add_argument("--dedup-ttl", type=int, default=120,
                         help="Suppress events whose hash was seen within this many seconds (default: 120)")
     parser.add_argument("--no-dedup", action="store_true",
@@ -192,7 +196,10 @@ def main() -> None:
     env          = args.environment
     window_ms    = args.window_minutes * 60 * 1000
     now_ms       = int(time.time() * 1000)
-    start_ms     = now_ms - window_ms
+    # Extend window start by overlap_seconds to cover Splunk indexing lag (~30s).
+    # Events that arrived at the edge of the previous window may not be indexed
+    # until slightly after the window boundary — the overlap ensures they're caught.
+    start_ms     = now_ms - window_ms - args.overlap_seconds * 1000
     dedup_ttl_ms = args.dedup_ttl * 1000
 
     # Load dedup state
