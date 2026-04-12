@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -208,7 +209,6 @@ def main() -> None:
     dedup_state = {h: ts for h, ts in dedup_state.items() if now_ms - ts < dedup_ttl_ms}
 
     # Fetch both event types in parallel
-    import threading
     trace_events: list[dict] = []
     error_events: list[dict] = []
 
