@@ -34,6 +34,7 @@ import os
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -129,24 +130,31 @@ def compute_coverage(environment: str | None,
 
     print(f"  Sampling {len(services)} service(s) over last {window_minutes}m...")
 
-    # Sample traces for each service
+    # Sample traces for each service — fetch full traces in parallel
     live_by_root: dict[str, list[str]] = defaultdict(list)   # root_op → [hash, ...]
     total_traces = 0
+    per_svc_limit = sample_limit // max(1, len(services))
 
+    # Collect all trace IDs first (search_traces is fast)
+    trace_ids: list[str] = []
     for svc in services:
-        raw = search_traces([svc], start_ms, now_ms, limit=sample_limit // max(1, len(services)))
+        raw = search_traces([svc], start_ms, now_ms, limit=per_svc_limit)
         for t in raw:
-            trace_id = t.get("traceId") or t.get("id")
-            if not trace_id:
-                continue
-            full = get_trace_full(trace_id)
-            if not full:
-                continue
-            fp = build_fingerprint(full)
-            if not fp:
-                continue
-            live_by_root[fp["root_op"]].append(fp["hash"])
-            total_traces += 1
+            tid = t.get("traceId") or t.get("id")
+            if tid:
+                trace_ids.append(tid)
+
+    def _fetch_fp(trace_id: str) -> dict | None:
+        full = get_trace_full(trace_id)
+        if not full:
+            return None
+        return build_fingerprint(full)
+
+    with ThreadPoolExecutor(max_workers=min(len(trace_ids), 10)) as pool:
+        for fp in pool.map(_fetch_fp, trace_ids):
+            if fp:
+                live_by_root[fp["root_op"]].append(fp["hash"])
+                total_traces += 1
 
     print(f"  {total_traces} live traces sampled across {len(live_by_root)} root op(s)")
 
