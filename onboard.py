@@ -140,6 +140,10 @@ def _daily_relearn_cron_lines(env: str) -> list[str]:
         (f"0 */6 * * * cd {base} && {PYTHON} {base}/agents/baseline_healer.py "
          f"--environment {env} "
          f">> {log_base}_healer.log 2>&1 {CRON_TAG} env={env}"),
+        # Baseline monitor: alert on stale, empty, or corrupted baselines
+        (f"0 */6 * * * cd {base} && {PYTHON} {base}/agents/baseline_monitor.py "
+         f"--environment {env} "
+         f">> {log_base}_monitor.log 2>&1 {CRON_TAG} env={env}"),
     ]
 
 
@@ -515,13 +519,14 @@ def _create_chart(name: str, program_text: str, chart_type: str = "Event",
 
 def provision_dashboard(env: str, dry_run: bool = False) -> str | None:
     """
-    Create a 4-panel Behavioral Baseline dashboard for the given environment
+    Create a 5-panel Behavioral Baseline dashboard for the given environment
     in Splunk Observability. Returns the dashboard ID, or None on failure.
 
     Panels:
       - Trace Path Drift event feed
       - Error Signature Drift event feed
-      - Correlated Anomalies event feed
+      - Correlated Anomalies event feed (with severity dimension visible)
+      - Critical/Major correlated anomaly count by severity over time
       - Anomaly event count over time (column chart)
     """
     label = env or "all"
@@ -538,8 +543,10 @@ def provision_dashboard(env: str, dry_run: bool = False) -> str | None:
               file=sys.stderr)
         return None
 
-    # Create the 4 charts
+    # Create the 5 charts
     env_filter = f", filter=filter('sf_environment', '{env}')" if env else ""
+    sev_filter_critical = f", filter=filter('severity', 'Critical')" if not env else f", filter=filter('sf_environment', '{env}') and filter('severity', 'Critical')"
+    sev_filter_major    = f", filter=filter('severity', 'Major')" if not env else f", filter=filter('sf_environment', '{env}') and filter('severity', 'Major')"
     charts = [
         _create_chart(
             "Trace Path Drift",
@@ -552,6 +559,15 @@ def provision_dashboard(env: str, dry_run: bool = False) -> str | None:
         _create_chart(
             "Correlated Anomalies",
             f"E = events(eventType='behavioral_baseline.correlated_anomaly'{env_filter}).publish('Correlated Anomaly')",
+        ),
+        _create_chart(
+            "Critical & Major Correlated Anomalies (24h)",
+            (
+                f"A = events(eventType='behavioral_baseline.correlated_anomaly'{sev_filter_critical}).count().publish('[Critical] MULTI_TIER')\n"
+                f"B = events(eventType='behavioral_baseline.correlated_anomaly'{sev_filter_major}).count().publish('[Major] TIER2_TIER3')"
+            ),
+            chart_type="TimeSeriesChart",
+            extra_options={"defaultPlotType": "ColumnChart"},
         ),
         _create_chart(
             "Anomaly Event Count (24h)",
@@ -571,11 +587,14 @@ def provision_dashboard(env: str, dry_run: bool = False) -> str | None:
               file=sys.stderr)
         return None
 
-    # Layout: 2×2 grid, each chart 6 wide × 3 tall
-    positions = [(0, 0), (0, 6), (3, 0), (3, 6)]
+    # Layout: row 0 — 3 event feeds (4-wide each); row 3 — 2 time series (6-wide each)
+    positions_and_sizes = [
+        (0, 0, 4, 3), (0, 4, 4, 3), (0, 8, 4, 3),  # event feeds
+        (3, 0, 6, 3), (3, 6, 6, 3),                  # time series
+    ]
     chart_specs = [
-        {"chartId": cid, "row": row, "column": col, "width": 6, "height": 3}
-        for cid, (row, col) in zip(chart_ids, positions)
+        {"chartId": cid, "row": row, "column": col, "width": w, "height": h}
+        for cid, (row, col, w, h) in zip(chart_ids, positions_and_sizes)
     ]
 
     try:
