@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -360,7 +361,6 @@ def generate_hypotheses(service: str, graph: dict, signals: dict[str, dict],
     for msg in corr.get("messages", []):
         if "absent" in msg.lower() or "missing" in msg.lower():
             # Extract service names from "Expected service(s) absent from ...: ['x']"
-            import re
             found = re.findall(r"'([a-z0-9_\-]+)'", msg)
             missing_svcs.update(found)
 
@@ -531,9 +531,14 @@ def analyze(service: str, corr: dict, environment: str | None,
     hypotheses = generate_hypotheses(service, graph, signals, corr)
     print(f"  [hypothesis] Generated {len(hypotheses)} hypotheses")
 
+    unique_services = set()
+    for caller, callee in topology["edges"]:
+        unique_services.add(caller)
+        unique_services.add(callee)
+
     return {
         "topology_summary": {
-            "total_services": len(topology["edges"]),
+            "total_services": len(unique_services),
             "upstream":       graph["affected_upstream"],
             "downstream":     graph["affected_downstream"],
             "shared_deps":    list(graph["shared_deps_in_blast_radius"].keys()),
