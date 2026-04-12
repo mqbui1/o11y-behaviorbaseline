@@ -51,6 +51,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,7 +134,6 @@ def fetch_topology(environment: str | None) -> dict:
                       if e["fromNode"] != e["toNode"]]
 
         # Shared deps: called by 2+ services
-        from collections import defaultdict
         callers_of: dict[str, set] = defaultdict(set)
         for src, dst in edges:
             callers_of[dst].add(src)
