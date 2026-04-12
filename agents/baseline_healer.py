@@ -41,6 +41,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -108,10 +109,11 @@ MIN_TRACES_FOR_SCORING = int(os.environ.get("HEALER_MIN_TRACES", "10"))
 # Parallel workers for trace fetching within a scoring window
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
 
-# Script paths
+# Script paths (trace_fingerprint.py and error_fingerprint.py live in core/, not agents/)
 _SCRIPT_DIR = Path(__file__).parent
-TRACE_FP    = str(_SCRIPT_DIR / "trace_fingerprint.py")
-ERROR_FP    = str(_SCRIPT_DIR / "error_fingerprint.py")
+_CORE_DIR   = _SCRIPT_DIR.parent / "core"
+TRACE_FP    = str(_CORE_DIR / "trace_fingerprint.py")
+ERROR_FP    = str(_CORE_DIR / "error_fingerprint.py")
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -173,12 +175,23 @@ def measure_anomaly_rate(start_ms: int, end_ms: int,
                           environment: str | None) -> float:
     """
     Count anomaly events in the window and return events/minute.
-    Queries all ANOMALY_EVENT_TYPES in parallel (sequentially here for simplicity).
+    Queries all ANOMALY_EVENT_TYPES in parallel.
     """
+    buckets: list[list[dict]] = [[] for _ in ANOMALY_EVENT_TYPES]
+
+    def _fetch(idx: int, et: str) -> None:
+        buckets[idx].extend(_signalflow_events(et, start_ms, end_ms))
+
+    threads = [threading.Thread(target=_fetch, args=(i, et), daemon=True)
+               for i, et in enumerate(ANOMALY_EVENT_TYPES)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
     total = 0
-    for et in ANOMALY_EVENT_TYPES:
-        events = _signalflow_events(et, start_ms, end_ms)
-        for msg in events:
+    for msgs in buckets:
+        for msg in msgs:
             dims      = msg.get("metadata", {})
             event_env = dims.get("environment") or msg.get("properties", {}).get("environment")
             if environment and event_env and event_env not in (environment, "all"):
@@ -296,14 +309,15 @@ def score_window(start_ms: int, end_ms: int, environment: str | None,
         spans = trace.get("spans", [])
         has_error = False
         path_sigs = []
-        for span in spans:
+        for span in sorted(spans, key=lambda s: s.get("startTime", 0)):
             tags = {t["key"]: t["value"] for t in span.get("tags", [])}
             if (tags.get("error") in ("true", True)
                     or tags.get("otel.status_code") == "ERROR"
                     or str(tags.get("http.status_code", "200")).startswith(("4", "5"))):
                 has_error = True
             path_sigs.append(f"{span.get('serviceName')}:{span.get('operationName')}")
-        return has_error, "|".join(sorted(path_sigs)) if path_sigs else ""
+        # Preserve span order — sorting would make different call orders look identical
+        return has_error, "|".join(path_sigs) if path_sigs else ""
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         for has_error, path_sig in pool.map(_score_trace, sample_ids):

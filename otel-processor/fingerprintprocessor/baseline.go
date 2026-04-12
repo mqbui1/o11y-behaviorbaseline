@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// timeNow is a test hook; defaults to time.Now.
+var timeNow = time.Now
+
 // traceBaselineFile is the on-disk format for the trace baseline JSON.
 type traceBaselineFile struct {
 	Fingerprints map[string]*fingerprintEntry `json:"fingerprints"`
@@ -29,6 +32,8 @@ type fingerprintEntry struct {
 	EdgeCount    int      `json:"edge_count"`
 	Occurrences  int      `json:"occurrences"`
 	AutoPromoted bool     `json:"auto_promoted"`
+	FirstSeen    string   `json:"first_seen,omitempty"`
+	UpdatedAt    string   `json:"updated_at,omitempty"`
 }
 
 // errorSigEntry mirrors the Python error_baseline signature dict.
@@ -40,6 +45,8 @@ type errorSigEntry struct {
 	Operation   string `json:"operation"`
 	CallPath    string `json:"call_path"`
 	Occurrences int    `json:"occurrences"`
+	FirstSeen   string `json:"first_seen,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
 // baselineStore holds the in-memory view of baseline.json and error_baseline.json.
@@ -130,6 +137,7 @@ func (bs *baselineStore) promoteTrace(fp *traceFingerprint, writeback bool) bool
 	if _, exists := bs.traceFingerprints[fp.hash]; exists {
 		return false
 	}
+	now := timeNow().UTC().Format(time.RFC3339)
 	bs.traceFingerprints[fp.hash] = &fingerprintEntry{
 		Hash:         fp.hash,
 		Path:         fp.path,
@@ -139,6 +147,8 @@ func (bs *baselineStore) promoteTrace(fp *traceFingerprint, writeback bool) bool
 		EdgeCount:    fp.edgeCount,
 		Occurrences:  1,
 		AutoPromoted: true,
+		FirstSeen:    now,
+		UpdatedAt:    now,
 	}
 	if writeback && bs.tracePath != "" {
 		_ = bs.writeTraceBaseline()
@@ -156,6 +166,7 @@ func (bs *baselineStore) promoteError(sig errorSignature, writeback bool) bool {
 	if _, exists := bs.errorSignatures[sig.hash]; exists {
 		return false
 	}
+	now := timeNow().UTC().Format(time.RFC3339)
 	bs.errorSignatures[sig.hash] = &errorSigEntry{
 		Hash:        sig.hash,
 		Service:     sig.service,
@@ -164,6 +175,8 @@ func (bs *baselineStore) promoteError(sig errorSignature, writeback bool) bool {
 		Operation:   sig.operation,
 		CallPath:    sig.callPath,
 		Occurrences: 1,
+		FirstSeen:   now,
+		UpdatedAt:   now,
 	}
 	if writeback && bs.errorPath != "" {
 		_ = bs.writeErrorBaseline()

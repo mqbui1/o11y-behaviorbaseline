@@ -320,8 +320,26 @@ def search_traces(services: list[str], start_ms: int, end_ms: int,
 def get_trace_full(trace_id: str) -> dict | None:
     """
     Fetch full span details for a single trace via GraphQL.
-    parentSpanID is not available in this API; parent relationships are
-    inferred in build_fingerprint() from span timing.
+
+    NOTE on hash compatibility with the OTel Go processor:
+    The Splunk APM GraphQL API does not expose parentSpanId in span results,
+    so this function omits it from the query and build_fingerprint() falls back
+    to timing-containment parent inference for every span.
+
+    The OTel Go processor (fingerprintprocessor/fingerprint.go) reads actual
+    parentSpanID from the OTLP wire format and uses it directly, falling back
+    to timing containment only for spans whose parent is not in the local buffer.
+
+    For synchronous call chains (the common case) the two approaches produce
+    the same parent assignments and thus identical hashes. For async operations
+    (Kafka consumers, fire-and-forget HTTP) parentSpanID may cross a buffer
+    boundary or point outside the trace window, causing the Go processor to
+    fall back to timing containment too — so both paths converge on the same
+    heuristic. Hash divergence is therefore rare in practice.
+
+    If you observe frequent NEW_FINGERPRINT false positives only on the Python
+    slow path for an async-heavy service, set AUTO_PROMOTE_THRESHOLD lower or
+    use the OTel fast path exclusively for that environment.
     """
     query = (
         "query TraceFullDetailsLessValidation($id: ID!) {"
