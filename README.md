@@ -563,6 +563,32 @@ The processor automatically skips detection when the local span count is below `
 
 Set `partial_trace_threshold: 0.0` in the collector config to disable the guard (e.g. if all services send to a single collector).
 
+### baseline-sync sidecar
+
+Each DaemonSet pod runs a `python:3.11-alpine` sidecar container alongside the collector. The sidecar:
+
+1. Polls Splunk SignalFlow every 30 seconds for `trace.fingerprint.promoted` events
+2. When a promotion event arrives, reads the updated `baseline.json` / `error_baseline.json` from the shared `emptyDir` volume (written there by the processor)
+3. PATCHes the `behavioral-baseline` ConfigMap via the Kubernetes API
+
+This propagates a promotion made on one DaemonSet pod to all other pods within ~60 seconds (`baseline_reload_interval`), without requiring a pod restart.
+
+The sidecar requires a `ServiceAccount` with `get/patch/update` on the `behavioral-baseline` ConfigMap — this RBAC is included in `k8s/daemonset.yaml`.
+
+### sync-baseline.sh
+
+`otel-processor/sync-baseline.sh <environment>` is the **manual equivalent** of the sidecar's auto-promotion flow. Run it after any `python3 core/trace_fingerprint.py learn` or `python3 core/error_fingerprint.py learn` cycle to push the updated baseline files into the `behavioral-baseline` ConfigMap:
+
+```bash
+./otel-processor/sync-baseline.sh petclinicmbtest
+# Syncing baseline for environment: petclinicmbtest
+#   Trace baseline:  data/baseline.petclinicmbtest.json
+#   Error baseline:  data/error_baseline.petclinicmbtest.json
+# Done. Collector pods will reload within 60 seconds.
+```
+
+It uses `kubectl create configmap --dry-run=client -o yaml | kubectl apply -f -` so it is safe to run repeatedly (creates or updates idempotently).
+
 ### Directory layout
 
 ```
@@ -578,11 +604,11 @@ otel-processor/
 ├── collector-builder/
 │   └── manifest.yaml         ← ocb manifest (compiles custom collector binary)
 ├── k8s/
-│   ├── daemonset.yaml        ← DaemonSet + ConfigMap + Service + ServiceAccount
-│   ├── baseline-sync.yaml    ← CronJob: pushes baseline JSON into ConfigMap every 5m
+│   ├── daemonset.yaml        ← DaemonSet + ConfigMap + Service + ServiceAccount + RBAC
+│   ├── baseline-sync-sidecar.py  ← sidecar script (embedded into baseline-sync-scripts ConfigMap)
 │   └── otelcol-config.yaml   ← collector pipeline config (reference)
 ├── Dockerfile                ← multi-stage: ocb build + alpine runtime
-└── sync-baseline.sh          ← helper: push baseline files into ConfigMap
+└── sync-baseline.sh          ← push local baseline JSON files into behavioral-baseline ConfigMap
 ```
 
 ### Deploy
