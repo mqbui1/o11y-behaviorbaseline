@@ -44,7 +44,7 @@ Usage:
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
-  SPLUNK_REALM              (default: us0)
+  SPLUNK_REALM              (default: us1)
   BASELINE_PATH             (default: ./baseline.json)
   TOPOLOGY_LOOKBACK_HOURS   (default: 48)
 """
@@ -77,7 +77,7 @@ if _ENV_FILE.exists():
 
 ACCESS_TOKEN            = os.environ.get("SPLUNK_ACCESS_TOKEN")
 INGEST_TOKEN            = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
-REALM                   = os.environ.get("SPLUNK_REALM", "us0")
+REALM                   = os.environ.get("SPLUNK_REALM", "us1")
 _DATA_DIR               = Path(__file__).parent.parent / "data"
 BASELINE_PATH           = Path(os.environ.get("BASELINE_PATH", str(_DATA_DIR / "baseline.json")))
 TOPOLOGY_LOOKBACK_HOURS = int(os.environ.get("TOPOLOGY_LOOKBACK_HOURS", "48"))

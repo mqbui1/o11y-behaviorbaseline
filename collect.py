@@ -34,7 +34,7 @@ if _ENV_FILE.exists():
 
 ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
 INGEST_TOKEN = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
-REALM        = os.environ.get("SPLUNK_REALM", "us0")
+REALM        = os.environ.get("SPLUNK_REALM", "us1")
 
 BASE_URL   = f"https://api.{REALM}.signalfx.com"
 APP_URL    = f"https://app.{REALM}.signalfx.com"
