@@ -50,8 +50,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import sys as _sys
-    _sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+    sys.path.insert(0, str(Path(__file__).parent.parent))
     from agents.hypothesis_engine import analyze as hypothesis_analyze, format_for_prompt
     _HYPOTHESIS_AVAILABLE = True
 except ImportError:
@@ -652,7 +651,7 @@ def run_triage(window_minutes: int, environment: str | None,
         # Fetch full trace details in parallel
         traces = []
         if trace_ids:
-            with ThreadPoolExecutor(max_workers=len(trace_ids)) as pool:
+            with ThreadPoolExecutor(max_workers=min(len(trace_ids), 10)) as pool:
                 futures = {pool.submit(get_trace_full, tid): tid
                            for tid in trace_ids}
                 for future in as_completed(futures):

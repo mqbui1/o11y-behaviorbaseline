@@ -41,7 +41,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -177,26 +176,21 @@ def measure_anomaly_rate(start_ms: int, end_ms: int,
     Count anomaly events in the window and return events/minute.
     Queries all ANOMALY_EVENT_TYPES in parallel.
     """
-    buckets: list[list[dict]] = [[] for _ in ANOMALY_EVENT_TYPES]
-
-    def _fetch(idx: int, et: str) -> None:
-        buckets[idx].extend(_signalflow_events(et, start_ms, end_ms))
-
-    threads = [threading.Thread(target=_fetch, args=(i, et), daemon=True)
-               for i, et in enumerate(ANOMALY_EVENT_TYPES)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    with ThreadPoolExecutor(max_workers=len(ANOMALY_EVENT_TYPES)) as pool:
+        all_msgs = []
+        for msgs in pool.map(
+            lambda et: _signalflow_events(et, start_ms, end_ms),
+            ANOMALY_EVENT_TYPES,
+        ):
+            all_msgs.extend(msgs)
 
     total = 0
-    for msgs in buckets:
-        for msg in msgs:
-            dims      = msg.get("metadata", {})
-            event_env = dims.get("environment") or msg.get("properties", {}).get("environment")
-            if environment and event_env and event_env not in (environment, "all"):
-                continue
-            total += 1
+    for msg in all_msgs:
+        dims      = msg.get("metadata", {})
+        event_env = dims.get("environment") or msg.get("properties", {}).get("environment")
+        if environment and event_env and event_env not in (environment, "all"):
+            continue
+        total += 1
     duration_minutes = (end_ms - start_ms) / 60000
     return total / duration_minutes if duration_minutes > 0 else 0.0
 
