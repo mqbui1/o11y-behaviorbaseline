@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -97,8 +98,8 @@ def _signalflow(program: str, start_ms: int, end_ms: int,
                         results.append(msg)
                     if msg.get("event") in ("STREAM_STOP", "END_OF_CHANNEL"):
                         break
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [warn] SignalFlow query failed: {e}", file=sys.stderr)
     return results
 
 
@@ -152,19 +153,19 @@ def fetch_anomaly_events(environment: str | None,
                          window_minutes: int = 30) -> list[dict]:
     """
     Fetch trace.path.drift and error.signature.drift events from SignalFlow.
-    Returns a simplified list of anomaly dicts.
+    Returns a simplified list of anomaly dicts. Both event types are fetched
+    in parallel to halve latency.
     """
     now_ms   = int(time.time() * 1000)
     start_ms = now_ms - window_minutes * 60 * 1000
 
-    events = []
-    for event_type in ("trace.path.drift", "error.signature.drift"):
+    def _fetch_one(event_type: str) -> list[dict]:
         if environment:
             program = (f"events(eventType='{event_type}', "
                        f"filter=filter('sf_environment', '{environment}')).publish()")
         else:
             program = f"events(eventType='{event_type}').publish()"
-
+        results = []
         for msg in _signalflow(program, start_ms, now_ms):
             dims  = msg.get("metadata", {})
             props = msg.get("properties", {})
@@ -172,7 +173,7 @@ def fetch_anomaly_events(environment: str | None,
             service = (dims.get("service") or props.get("service")
                        or (root_op.split(":")[0] if ":" in root_op else None)
                        or "unknown")
-            events.append({
+            results.append({
                 "event_type":   event_type,
                 "anomaly_type": dims.get("anomaly_type", ""),
                 "service":      service,
@@ -182,8 +183,18 @@ def fetch_anomaly_events(environment: str | None,
                 "fp_hash":      dims.get("fp_hash") or props.get("fp_hash", ""),
                 "timestamp_ms": props.get("timestamp") or now_ms,
             })
+        return results
 
-    # Sort oldest first
+    events = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_fetch_one, et)
+                   for et in ("trace.path.drift", "error.signature.drift")]
+        for fut in as_completed(futures):
+            try:
+                events.extend(fut.result())
+            except Exception as e:
+                print(f"  [warn] fetch_anomaly_events: {e}", file=sys.stderr)
+
     events.sort(key=lambda e: e["timestamp_ms"])
     return events
 
@@ -235,7 +246,7 @@ def fetch_slo_status(services: list[str], environment: str | None,
     TARGET_ERROR_RATE = 0.005   # 0.5% SLO — reasonable default
     results: dict[str, dict] = {}
 
-    for svc in services:
+    def _fetch_svc(svc: str) -> tuple[str, dict]:
         try:
             env_filter = (f"filter('sf_environment', '{environment}') and "
                           if environment else "")
@@ -257,16 +268,19 @@ def fetch_slo_status(services: list[str], environment: str | None,
                     errors = max(errors, val)
                 elif label == "total":
                     total  = max(total,  val)
-
             error_rate = (errors / total) if total > 0 else 0.0
             burn_rate  = error_rate / TARGET_ERROR_RATE if TARGET_ERROR_RATE > 0 else 0.0
-            results[svc] = {
+            return svc, {
                 "error_rate": round(error_rate, 4),
                 "burn_rate":  round(burn_rate, 2),
                 "p99_ms":     None,  # requires histogram metric; omit for now
             }
         except Exception:
-            results[svc] = {"error_rate": None, "burn_rate": None, "p99_ms": None}
+            return svc, {"error_rate": None, "burn_rate": None, "p99_ms": None}
+
+    with ThreadPoolExecutor(max_workers=min(len(services), 10)) as pool:
+        for svc, slo in pool.map(_fetch_svc, services):
+            results[svc] = slo
 
     return results
 
