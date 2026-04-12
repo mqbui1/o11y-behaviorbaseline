@@ -66,9 +66,8 @@ TF_PATH             = Path(__file__).parent.parent / "core" / "trace_fingerprint
 # ── Baseline loading ──────────────────────────────────────────────────────────
 
 def _load_baseline(environment: str | None) -> dict:
-    data_dir = Path(__file__).parent.parent / "data"
     for pattern in [f"baseline.{environment}.json", "baseline.json"]:
-        fp = data_dir / pattern
+        fp = _DATA_DIR / pattern
         if fp.exists():
             try:
                 return json.loads(fp.read_text())
@@ -88,9 +87,11 @@ def _load_existing_noise_patterns() -> list[str]:
     return []
 
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
 def _load_builtin_noise_patterns() -> list[str]:
     """Read the hardcoded NOISE_PATTERNS from trace_fingerprint.py."""
-    sys.path.insert(0, str(Path(__file__).parent.parent))
     try:
         from core.trace_fingerprint import NOISE_PATTERNS
         return list(NOISE_PATTERNS)
