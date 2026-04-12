@@ -185,6 +185,8 @@ def main() -> None:
                         help="Suppress events whose hash was seen within this many seconds (default: 120)")
     parser.add_argument("--no-dedup", action="store_true",
                         help="Disable hash deduplication (show all events in window)")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print debug info (dedup counts, raw event counts) to stderr")
     args = parser.parse_args()
 
     env          = args.environment
@@ -214,24 +216,40 @@ def main() -> None:
     t1.start(); t2.start()
     t1.join();  t2.join()
 
+    if args.verbose:
+        print(f"  [verbose] trace.path.drift: {len(trace_events)} raw event(s), "
+              f"error.signature.drift: {len(error_events)} raw event(s)", file=sys.stderr)
+
+    # Use id() set for O(1) membership test instead of O(n) `msg in list`
+    trace_ids = {id(m) for m in trace_events}
+
     # Convert to anomaly dicts, apply dedup
     anomalies = []
     new_dedup  = dict(dedup_state)
+    skipped_dedup = 0
 
     for msg in sorted(trace_events + error_events, key=lambda m: m.get("timestampMs", 0)):
-        is_trace = msg in trace_events
+        is_trace = id(msg) in trace_ids
         anomaly = (_trace_drift_to_anomaly if is_trace else _error_drift_to_anomaly)(msg, env)
         if anomaly is None:
             continue
 
         h = anomaly.get("hash", "")
-        if h and not args.no_dedup:
-            last_seen = dedup_state.get(h, 0)
+        if not args.no_dedup:
+            # Use hash if available; fall back to a content key so empty-hash
+            # events don't all collapse into the same dedup bucket or bypass dedup
+            dedup_key = h if h else f"{anomaly.get('anomaly_type')}:{anomaly.get('service')}:{anomaly.get('root_op') or anomaly.get('error_type')}"
+            last_seen = dedup_state.get(dedup_key, 0)
             if now_ms - last_seen < dedup_ttl_ms:
+                skipped_dedup += 1
                 continue
-            new_dedup[h] = now_ms
+            new_dedup[dedup_key] = now_ms
 
         anomalies.append(anomaly)
+
+    if args.verbose and skipped_dedup:
+        print(f"  [dedup] Suppressed {skipped_dedup} already-seen event(s) "
+              f"(ttl={args.dedup_ttl}s)", file=sys.stderr)
 
     # Save updated dedup state
     if not args.no_dedup:

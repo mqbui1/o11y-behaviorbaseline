@@ -20,7 +20,7 @@ Usage:
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
-  SPLUNK_REALM              (default: us0)
+  SPLUNK_REALM              (default: us1)
 
 Optional:
   AWS_REGION    (default: us-west-2)
@@ -46,7 +46,7 @@ if _ENV_FILE.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN")
-REALM        = os.environ.get("SPLUNK_REALM", "us0")
+REALM        = os.environ.get("SPLUNK_REALM", "us1")
 AWS_REGION   = os.environ.get("AWS_REGION", "us-west-2")
 
 if not ACCESS_TOKEN:

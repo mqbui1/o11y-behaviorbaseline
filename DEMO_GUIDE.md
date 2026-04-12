@@ -42,6 +42,14 @@ This writes the tokens into `.env` so all scripts pick them up automatically. Do
 k "kubectl get pods --no-headers | awk '{print \$1, \$3}'"
 ```
 
+> If any `otelcol-fingerprint` pod shows `CrashLoopBackOff`, the OTel edge processor is not running and Demos 1–5 will produce 0 drift events. Fix before proceeding:
+> ```bash
+> k "kubectl logs daemonset/otelcol-fingerprint --tail=20"
+> # Most common cause: baseline ConfigMap missing. Recreate it:
+> ./otel-processor/sync-baseline.sh $ENV
+> k "kubectl rollout restart daemonset/otelcol-fingerprint"
+> ```
+
 **Expected output (all pods Running):**
 ```
 admin-server-746f7cf586-xxxxx                          Running

@@ -33,7 +33,7 @@ Usage:
 
 Required env vars:
   SPLUNK_ACCESS_TOKEN
-  SPLUNK_REALM          (default: us0)
+  SPLUNK_REALM          (default: us1)
 """
 
 import argparse
@@ -51,7 +51,7 @@ from typing import Any
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN")
-REALM        = os.environ.get("SPLUNK_REALM", "us0")
+REALM        = os.environ.get("SPLUNK_REALM", "us1")
 
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN environment variable is required.", file=sys.stderr)
