@@ -52,6 +52,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -167,9 +168,9 @@ def load_trace_baseline(service: str, environment: str | None) -> dict | None:
 
 
 def load_error_baseline(service: str, environment: str | None) -> dict | None:
-    script_dir = Path(__file__).parent
+    data_dir = Path(__file__).parent.parent / "data"
     for pattern in [f"error_baseline.{environment}.json", "error_baseline.json"]:
-        fp = script_dir / pattern
+        fp = data_dir / pattern
         if fp.exists():
             try:
                 return json.loads(fp.read_text())
@@ -316,9 +317,10 @@ def score_recent_anomaly_rate(service: str, environment: str | None) -> tuple[in
     now_ms   = int(time.time() * 1000)
     start_ms = now_ms - ANOMALY_LOOKBACK_HOURS * 3600 * 1000
 
-    trace_count = _signalflow_events("trace.path.drift", start_ms, now_ms, environment)
-    error_count = _signalflow_events("error.signature.drift", start_ms, now_ms, environment)
-    total = trace_count + error_count
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tf = pool.submit(_signalflow_events, "trace.path.drift", start_ms, now_ms, environment)
+        ef = pool.submit(_signalflow_events, "error.signature.drift", start_ms, now_ms, environment)
+        total = tf.result() + ef.result()
 
     # Per-hour rate
     rate = total / ANOMALY_LOOKBACK_HOURS
@@ -348,8 +350,6 @@ def compute_risk(service: str, environment: str | None,
     """
     print(f"[risk-scorer] Assessing deployment risk for '{service}' "
           f"(env={environment or 'all'})...")
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         tb_future   = pool.submit(load_trace_baseline, service, environment)
