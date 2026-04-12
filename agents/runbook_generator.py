@@ -31,6 +31,8 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,9 +82,12 @@ def _bedrock(messages: list[dict], system: str = "") -> str:
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
+_DATA_DIR = Path(__file__).parent.parent / "data"
+
+
 def _load_baseline(environment: str | None) -> dict:
     for pattern in [f"baseline.{environment}.json", "baseline.json"]:
-        fp = Path(__file__).parent / pattern
+        fp = _DATA_DIR / pattern
         if fp.exists():
             try:
                 return json.loads(fp.read_text())
@@ -93,7 +98,7 @@ def _load_baseline(environment: str | None) -> dict:
 
 def _load_error_baseline(environment: str | None) -> dict:
     for pattern in [f"error_baseline.{environment}.json", "error_baseline.json"]:
-        fp = Path(__file__).parent / pattern
+        fp = _DATA_DIR / pattern
         if fp.exists():
             try:
                 return json.loads(fp.read_text())
@@ -102,18 +107,18 @@ def _load_error_baseline(environment: str | None) -> dict:
     return {"signatures": {}}
 
 
-def _load_thresholds(service: str) -> dict:
-    p = Path(__file__).parent.parent / "data" / "thresholds.json"
+def _load_all_thresholds() -> dict:
+    """Load the full services block from thresholds.json once."""
+    p = _DATA_DIR / "thresholds.json"
     if p.exists():
         try:
-            return json.loads(p.read_text()).get("services", {}).get(service, {})
+            return json.loads(p.read_text()).get("services", {})
         except Exception:
             pass
     return {}
 
 
 def _fetch_topology(environment: str | None) -> dict:
-    import urllib.request, urllib.error
     now  = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     then = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 48 * 3600))
     body: dict = {"timeRange": f"{then}/{now}"}
@@ -147,7 +152,8 @@ def _fetch_topology(environment: str | None) -> dict:
 
 # ── Context assembly ──────────────────────────────────────────────────────────
 
-def _service_summary(svc: str, topo: dict, baseline: dict, err_baseline: dict) -> dict:
+def _service_summary(svc: str, topo: dict, baseline: dict, err_baseline: dict,
+                     all_thresholds: dict) -> dict:
     """Summarize one service for the Claude prompt."""
     callers  = topo["callers_of"].get(svc, [])
     callees  = topo["callees_of"].get(svc, [])
@@ -155,7 +161,7 @@ def _service_summary(svc: str, topo: dict, baseline: dict, err_baseline: dict) -
                 if svc in v.get("services", []) or v.get("root_op", "").startswith(svc + ":")}
     err_sigs = {h: v for h, v in err_baseline.get("signatures", {}).items()
                 if v.get("service") == svc}
-    thresholds = _load_thresholds(svc)
+    thresholds = all_thresholds.get(svc, {})
 
     # Fingerprint stats
     root_ops = sorted({v["root_op"] for v in fps.values()})
@@ -254,7 +260,8 @@ def generate_runbook(environment: str, force: bool = False) -> Path:
 
     print(f"  {len(services)} services: {', '.join(services)}")
 
-    summaries = [_service_summary(s, topo, baseline, err_baseline)
+    all_thresholds = _load_all_thresholds()
+    summaries = [_service_summary(s, topo, baseline, err_baseline, all_thresholds)
                  for s in services]
 
     prompt = _build_prompt(environment, topo, summaries)
