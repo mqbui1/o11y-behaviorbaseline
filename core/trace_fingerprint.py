@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -675,8 +676,7 @@ def _baseline_path(environment: str | None) -> Path:
 def load_baseline(environment: str | None = None) -> dict:
     path = _baseline_path(environment)
     if path.exists():
-        with open(path) as f:
-            return json.load(f)
+        return json.loads(path.read_text())
     return {"fingerprints": {}, "topology": None,
             "created_at": None, "updated_at": None,
             "sf_environment": environment}
@@ -686,8 +686,7 @@ def save_baseline(baseline: dict, environment: str | None = None) -> None:
     path = _baseline_path(environment)
     baseline["updated_at"] = datetime.now(timezone.utc).isoformat()
     baseline["environment"] = environment
-    with open(path, "w") as f:
-        json.dump(baseline, f, indent=2)
+    path.write_text(json.dumps(baseline, indent=2))
     print(f"  Baseline saved -> {path}  "
           f"({len(baseline['fingerprints'])} fingerprints)")
 
@@ -969,6 +968,7 @@ def cmd_watch(window_minutes: int = 10,
         if v.get("root_op")
     }
 
+    seen_root_ops: set[str] = set()
     for trace_id, trace in fetched:
         fp = build_fingerprint(trace, known_root_ops=known_root_ops)
         if fp is None:
@@ -979,6 +979,7 @@ def cmd_watch(window_minutes: int = 10,
         root_svc_key = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
         svc_checked[root_svc_key] += 1
         all_downstream.update(fp.get("services", []))
+        seen_root_ops.add(fp["root_op"])
         if fp["hash"] in alerted_hashes:
             continue
 
@@ -1009,8 +1010,7 @@ def cmd_watch(window_minutes: int = 10,
             # Extract missing services from the message for MISSING_SERVICE anomalies
             _missing = []
             if anomaly["type"] == "MISSING_SERVICE":
-                import re as _re
-                _m = _re.search(r"absent from '[^']+': (\[.*?\])", anomaly["message"])
+                _m = re.search(r"absent from '[^']+': (\[.*?\])", anomaly["message"])
                 if _m:
                     try:
                         _missing = json.loads(_m.group(1).replace("'", '"'))
@@ -1075,9 +1075,6 @@ def cmd_watch(window_minutes: int = 10,
     # is returning a circuit-breaker fallback (generating no downstream span),
     # or traffic to that path has stopped entirely. Fire MISSING_SERVICE for
     # every dominant service in each silent root_op.
-    seen_root_ops = {fp_obj["root_op"] for _, trace in fetched
-                     for fp_obj in [build_fingerprint(trace, known_root_ops=known_root_ops)]
-                     if fp_obj is not None}
     # For silent detection, sum occurrences across all patterns for a root_op
     # and require a minimum total. This filters infrequent ops (e.g. user-triggered
     # edits) that don't appear in every watch window and would cause false positives.
@@ -1212,7 +1209,6 @@ def cmd_watch(window_minutes: int = 10,
         print("  All trace paths match baseline")
 
     if json_output:
-        import sys as _sys
         result = {
             "environment":    environment or "all",
             "timestamp":      datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1220,7 +1216,7 @@ def cmd_watch(window_minutes: int = 10,
             "checked":        checked,
             "anomalies":      anomaly_list,
         }
-        _sys.stdout.write(json.dumps(result) + "\n")
+        sys.stdout.write(json.dumps(result) + "\n")
 
     return anomaly_list
 
