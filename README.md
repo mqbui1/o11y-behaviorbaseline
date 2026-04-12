@@ -289,6 +289,7 @@ python onboard.py --auto
 0   2 * * *   core/error_fingerprint.py --environment <env> learn
 30  2 * * *   agents/noise_learner.py --environment <env> --apply
 0 */6 * * *   agents/baseline_healer.py --environment <env>
+0 */6 * * *   agents/baseline_monitor.py --environment <env>
 
 # Global (every 30 min)
 */30 * * * *  agents/multi_env_correlator.py
