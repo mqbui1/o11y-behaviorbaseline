@@ -46,9 +46,18 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
+
+_env_file = Path(__file__).parent.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN")
 REALM        = os.environ.get("SPLUNK_REALM", "us1")
