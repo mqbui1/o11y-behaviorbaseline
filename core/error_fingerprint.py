@@ -255,8 +255,12 @@ def search_error_traces(services: list[str], start_ms: int, end_ms: int,
 
 
 def get_trace_full(trace_id: str) -> dict | None:
-    # parentSpanID is not available in this API; parent relationships are
-    # inferred in build_error_signatures() from span timing containment.
+    # parentSpanId is not exposed by the Splunk APM GraphQL API; parent
+    # relationships are inferred in build_error_signatures() from timing
+    # containment. The OTel Go processor uses real parentSpanID from OTLP wire
+    # format. For synchronous call chains the two produce identical hashes;
+    # for async spans both paths fall back to timing containment anyway.
+    # See trace_fingerprint.py:get_trace_full() for full analysis.
     query = (
         "query TraceFullDetailsLessValidation($id: ID!) {"
         " trace(id: $id) {"
