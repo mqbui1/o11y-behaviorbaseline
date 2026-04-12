@@ -41,11 +41,11 @@ import argparse
 import json
 import os
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -379,21 +379,13 @@ def run(window_minutes: int, environment: str | None,
     env_desc = environment or "all"
 
     print(f"[dedup] Fetching anomaly events ({window_minutes}m, env={env_desc})...")
-    # Fetch both event types in parallel — independent I/O
     raw_events: list[dict] = []
-    _buckets: list[list[dict]] = [[] for _ in ANOMALY_EVENT_TYPES]
-
-    def _fetch(idx: int, et: str) -> None:
-        _buckets[idx].extend(_signalflow_events(et, start_ms, now_ms))
-
-    _threads = [threading.Thread(target=_fetch, args=(i, et), daemon=True)
-                for i, et in enumerate(ANOMALY_EVENT_TYPES)]
-    for t in _threads:
-        t.start()
-    for t in _threads:
-        t.join()
-    for bucket in _buckets:
-        raw_events.extend(bucket)
+    with ThreadPoolExecutor(max_workers=len(ANOMALY_EVENT_TYPES)) as pool:
+        for msgs in pool.map(
+            lambda et: _signalflow_events(et, start_ms, now_ms),
+            ANOMALY_EVENT_TYPES,
+        ):
+            raw_events.extend(msgs)
     print(f"  {len(raw_events)} raw event(s) received")
 
     state  = load_state(environment)
