@@ -423,8 +423,7 @@ def _baseline_path(environment: str | None) -> Path:
 def load_baseline(environment: str | None = None) -> dict:
     path = _baseline_path(environment)
     if path.exists():
-        with open(path) as f:
-            return json.load(f)
+        return json.loads(path.read_text())
     return {"signatures": {}, "learn_runs": 0, "created_at": None,
             "updated_at": None, "sf_environment": environment}
 
@@ -433,8 +432,7 @@ def save_baseline(baseline: dict, environment: str | None = None) -> None:
     path = _baseline_path(environment)
     baseline["updated_at"] = datetime.now(timezone.utc).isoformat()
     baseline["environment"] = environment
-    with open(path, "w") as f:
-        json.dump(baseline, f, indent=2)
+    path.write_text(json.dumps(baseline, indent=2))
     print(f"  Baseline saved -> {path}  "
           f"({len(baseline['signatures'])} signatures)")
 
@@ -986,8 +984,7 @@ def cmd_watch(window_minutes: int = 10,
             "checked":        checked,
             "anomalies":      anomaly_list,
         }
-        import sys as _sys
-        _sys.stdout.write(json.dumps(result) + "\n")
+        sys.stdout.write(json.dumps(result) + "\n")
 
 
 def cmd_promote(hashes: list[str] | None, environment: str | None = None) -> None:
