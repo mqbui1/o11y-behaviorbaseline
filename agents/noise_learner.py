@@ -57,7 +57,9 @@ MIN_WATCH_HITS = 3
 # Minimum number of fingerprints sharing a pattern to suggest it
 MIN_PATTERN_SUPPORT = 1
 
-NOISE_PATTERNS_PATH = Path(os.environ.get("NOISE_PATTERNS_PATH", "./noise_patterns.json"))
+_DATA_DIR           = Path(__file__).parent.parent / "data"
+NOISE_PATTERNS_PATH = Path(os.environ.get("NOISE_PATTERNS_PATH",
+                                          str(_DATA_DIR / "noise_patterns.json")))
 TF_PATH             = Path(__file__).parent.parent / "core" / "trace_fingerprint.py"
 
 

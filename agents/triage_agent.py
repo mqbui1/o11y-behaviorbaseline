@@ -102,8 +102,37 @@ MAX_TRACES_PER_SERVICE = 3
 # Max spans to include in the Claude prompt (keep tokens manageable)
 MAX_SPANS_IN_PROMPT = 30
 
-# Track which correlated anomaly events we've already triaged (in-memory, per run)
-_triaged_event_keys: set[str] = set()
+# ── Triage dedup state (persisted across cron restarts) ───────────────────────
+# Keys are "service:corr_type:timestamp_ms". Stored in data/ so once-mode cron
+# runs don't re-triage the same correlated event every 5 minutes.
+
+_DATA_DIR = Path(__file__).parent.parent / "data"
+_TRIAGE_SEEN_TTL_S = 3600  # forget seen keys after 1 hour
+
+
+def _triage_seen_path(environment: str | None) -> Path:
+    env = environment or "all"
+    return _DATA_DIR / f"triage_seen.{env}.json"
+
+
+def _load_triage_seen(environment: str | None) -> dict[str, float]:
+    """Load {key: seen_epoch_s} from disk, expiring entries older than TTL."""
+    p = _triage_seen_path(environment)
+    if not p.exists():
+        return {}
+    try:
+        raw: dict[str, float] = json.loads(p.read_text())
+        cutoff = time.time() - _TRIAGE_SEEN_TTL_S
+        return {k: v for k, v in raw.items() if v > cutoff}
+    except Exception:
+        return {}
+
+
+def _save_triage_seen(environment: str | None, seen: dict[str, float]) -> None:
+    try:
+        _triage_seen_path(environment).write_text(json.dumps(seen))
+    except Exception as e:
+        print(f"  [warn] Could not save triage seen state: {e}", file=sys.stderr)
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -584,11 +613,13 @@ def run_triage(window_minutes: int, environment: str | None,
         print("  No correlated anomaly events found.")
         return 0
 
-    # Deduplicate: skip events we already triaged this session
+    # Deduplicate: skip events already triaged (persisted to disk so once-mode
+    # cron runs don't re-triage the same event every cycle).
+    seen = _load_triage_seen(environment)
     new_events = []
     for c in correlated:
         key = f"{c['service']}:{c['corr_type']}:{c['timestamp_ms']}"
-        if key not in _triaged_event_keys:
+        if key not in seen:
             new_events.append((key, c))
 
     if not new_events:
@@ -599,7 +630,7 @@ def run_triage(window_minutes: int, environment: str | None,
 
     triaged = 0
     for key, corr in new_events:
-        _triaged_event_keys.add(key)
+        seen[key] = time.time()
         ts = datetime.fromtimestamp(corr["timestamp_ms"] / 1000, tz=timezone.utc)
         print(f"[{corr['severity']}] {corr['corr_type']} — {corr['service']} "
               f"@ {ts.strftime('%H:%M:%S UTC')}")
@@ -655,6 +686,7 @@ def run_triage(window_minutes: int, environment: str | None,
 
         triaged += 1
 
+    _save_triage_seen(environment, seen)
     return triaged
 
 
