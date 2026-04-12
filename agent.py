@@ -29,7 +29,10 @@ import argparse
 import json
 import os
 import sys
+import threading
 from pathlib import Path
+
+import collect
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -199,7 +202,8 @@ def reason(watch_result: dict, env: str = "") -> dict:
     response = bedrock.invoke_model(modelId=BEDROCK_ARN, body=body)
     text = json.loads(response["body"].read())["content"][0]["text"].strip()
 
-    if text.startswith("```"):
+    if "```" in text:
+        # Strip ```json ... ``` or ``` ... ``` fences
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
@@ -213,8 +217,6 @@ def reason(watch_result: dict, env: str = "") -> dict:
 
 def act(plan: dict, watch_result: dict, env: str, dry_run: bool = False) -> None:
     """Print triage result and write to alerts.log."""
-    import collect
-
     severity_icon = {"OK": "✓", "DEGRADED": "!", "INCIDENT": "!!"}
     icon = severity_icon.get(plan.get("severity", "OK"), "?")
 
@@ -306,7 +308,6 @@ def main() -> None:
 
     # Start topology fetch concurrently while reading stdin — both are I/O bound
     # and independent, so running them in parallel saves ~1-2s per cycle.
-    import threading
     _topo_ctx: list[str] = []
     def _fetch_topo():
         _topo_ctx.append(_build_topology_context(env))
