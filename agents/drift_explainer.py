@@ -50,6 +50,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -201,17 +202,23 @@ def sample_live_fingerprints(service: str, environment: str | None,
         [service], start_ms, now_ms, limit=TRACES_SAMPLE_LIMIT,
     )
 
-    live_fps: dict[str, dict] = {}
-    for t_summary in raw_traces:
-        trace_id = t_summary.get("traceId") or t_summary.get("id")
-        if not trace_id:
-            continue
+    trace_ids = [
+        t.get("traceId") or t.get("id")
+        for t in raw_traces
+        if t.get("traceId") or t.get("id")
+    ]
+
+    def _fetch_and_fingerprint(trace_id: str) -> dict | None:
         full = get_trace_full(trace_id)
         if not full:
-            continue
-        fp = build_fingerprint(full, known_root_ops)
-        if fp:
-            live_fps[fp["hash"]] = fp
+            return None
+        return build_fingerprint(full, known_root_ops)
+
+    live_fps: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(len(trace_ids), 10)) as pool:
+        for fp in pool.map(_fetch_and_fingerprint, trace_ids):
+            if fp:
+                live_fps[fp["hash"]] = fp
 
     return live_fps
 

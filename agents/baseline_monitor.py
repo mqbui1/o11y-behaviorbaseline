@@ -63,6 +63,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -547,14 +548,18 @@ def run_health_check(target_env: str | None = None,
     print(f"  Detecting incident windows (last {INCIDENT_DETECTION_WINDOW_HOURS}h)...")
     all_issues: dict[str, list[dict]] = defaultdict(list)
 
-    # Collect unique environments to query
+    # Collect unique environments to query — detect incident windows in parallel
     envs_to_check = sorted({b["env"] for b in baselines if b["env"]})
     incident_windows_by_env: dict[str | None, list] = {}
-    for env in envs_to_check:
-        windows = detect_incident_windows(env)
-        incident_windows_by_env[env] = windows
-        if windows:
-            print(f"    {env}: {len(windows)} incident window(s) detected")
+    with ThreadPoolExecutor(max_workers=min(len(envs_to_check), 6)) as pool:
+        future_to_env = {pool.submit(detect_incident_windows, env): env
+                         for env in envs_to_check}
+        for future in as_completed(future_to_env):
+            env = future_to_env[future]
+            windows = future.result()
+            incident_windows_by_env[env] = windows
+            if windows:
+                print(f"    {env}: {len(windows)} incident window(s) detected")
 
     print(f"  Running health checks on {len(baselines)} baseline file(s)...")
     for baseline in baselines:
@@ -623,8 +628,6 @@ def auto_fix(all_issues: dict[str, list[dict]], dry_run: bool = True) -> None:
         (safe — just removes unreliable data, doesn't change structure)
     Other issues require human review and are left for manual action.
     """
-    import subprocess
-
     for env, issues in all_issues.items():
         for issue in issues:
             if issue["check"] != "LOW_CONFIDENCE":
