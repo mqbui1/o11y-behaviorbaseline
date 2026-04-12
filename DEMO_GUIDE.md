@@ -583,17 +583,31 @@ The 7 anomalies:
 - `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` on `GET /owners, OwnerRepository.findAll` in customers-service
 - `NEW_ERROR_SIGNATURE` — `500 on GET, GET customers-service` in api-gateway
 
-### Step 3b — Wait for AutoDetect to fire (~3-5 minutes)
-AutoDetect needs sustained error rate before it fires. While the audience processes
-the triage output, watch the Splunk Alerts page for Critical alerts to appear.
+### Step 3b — Wait for AutoDetect to fire (poll loop)
+AutoDetect needs sustained error rate before it fires (~3–7 minutes). Use this loop to
+proceed automatically as soon as Tier 1 incidents appear — no manual watching required:
 
+```bash
+# Poll until at least 2 active incidents appear for this environment, then proceed
+until python3 -c "
+import os, sys, requests
+token = os.environ['SPLUNK_ACCESS_TOKEN']
+realm = os.environ.get('SPLUNK_REALM', 'us1')
+env   = os.environ['ENV']
+r = requests.get(
+    f'https://api.{realm}.signalfx.com/v2/incident',
+    headers={'X-SF-Token': token},
+    params={'limit': 100, 'includeResolved': 'false'}
+)
+incidents = [i for i in r.json().get('results', [])
+             if any(env in str(v) for v in i.get('inputs', {}).values())]
+print(f'  Active incidents for {env}: {len(incidents)}')
+sys.exit(0 if len(incidents) >= 2 else 1)
+"; do
+  sleep 30
+done
+echo "AutoDetect has fired — run correlate now."
 ```
-Splunk UI → Alerts → filter: APM, Any Service/Endpoint, <env> environment
-```
-
-**Don't use a fixed countdown** — run correlate as soon as you see 2 Critical alerts for
-`api-gateway` and `customers-service` on the Alerts page. In practice AutoDetect fires
-within 3-7 minutes of the outage starting.
 
 ### Step 3c — Run correlate.py to see MULTI_TIER / Critical
 With AutoDetect now firing (Tier 1) + trace drift (Tier 2) + error signatures (Tier 3)
@@ -987,6 +1001,16 @@ python3 onboard.py --auto
 
 > The runbook line shows "already exists" because it was generated in a prior session. In a truly fresh environment it generates automatically. Use `--force` on `runbook_generator.py` to regenerate.
 
+### Step 3 — Restore (remove cron jobs added by --auto)
+```bash
+# Remove the behavioral-baseline-managed cron jobs added by onboard.py --auto
+crontab -l | grep -v "behavioral-baseline-managed" | crontab -
+
+# Restore onboarding state from backup
+cp data/onboarding_state.json.bak data/onboarding_state.json
+echo "Onboarding state restored."
+```
+
 **What was created in ~60 seconds:**
 - Trace fingerprint baseline: 9 structural call path patterns
 - Error signature baseline: learned from last 120 minutes of live traffic
@@ -1047,12 +1071,19 @@ Slow path — Python APM polling (used in Demo 6 auto-promotion only):
 ## Restore / Reset
 
 ```bash
-# Restore all services
-k "kubectl scale deployment vets-service petclinic-db --replicas=1"
+# Restore all services (including visits-service)
+k "kubectl scale deployment vets-service petclinic-db visits-service --replicas=1"
+k "kubectl rollout status deployment/vets-service deployment/petclinic-db deployment/visits-service --timeout=90s"
+
+# Wait for services to reconnect to DB
+sleep 30
 
 # Relearn trace baseline after disruptions
 python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 55
 python3 core/trace_fingerprint.py --environment $ENV promote
+
+# Push the updated baseline into the ConfigMap so OTel pods reload it
+./otel-processor/sync-baseline.sh $ENV
 
 # Relearn error baseline after disruptions (wait for clean window first)
 python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
