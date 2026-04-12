@@ -36,6 +36,7 @@ import os
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -298,9 +299,13 @@ def estimate_impact(service: str, environment: str | None,
     print(f"  [slo] Querying metrics for '{service}' "
           f"(SLO: {avail_slo*100:.1f}%, p99<{p99_target}ms)...", file=sys.stderr)
 
-    error_rate = query_error_rate(service, environment, start_ms, now_ms)
-    p99_ms     = query_p99_latency(service, environment, start_ms, now_ms)
-    req_rate   = query_request_rate(service, environment, start_ms, now_ms)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        err_f = pool.submit(query_error_rate,   service, environment, start_ms, now_ms)
+        p99_f = pool.submit(query_p99_latency,  service, environment, start_ms, now_ms)
+        req_f = pool.submit(query_request_rate, service, environment, start_ms, now_ms)
+        error_rate = err_f.result()
+        p99_ms     = p99_f.result()
+        req_rate   = req_f.result()
 
     budget = compute_budget(error_rate or 0.0, avail_slo) if error_rate is not None else None
 
