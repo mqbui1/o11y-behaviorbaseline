@@ -285,11 +285,15 @@ def fetch_autodetect_incidents(start_ms: int, end_ms: int,
          Native AutoDetect detectors (detectorOrigin=AutoDetect) are always included
          since they are APM-scoped by construction.
     """
-    # Step 1: fetch all recent incidents (active + recently resolved).
-    # includeResolved=true so we catch incidents that triggered within the window
-    # but already resolved by the time correlate.py runs.
+    # Step 1: fetch recent incidents (active + recently resolved) scoped to the
+    # correlation window. startTime/endTime bound the anomalyStateUpdateTimestamp
+    # so we don't retrieve thousands of unrelated historical incidents.
+    # Add a 10-minute buffer on each end to avoid edge-case clock skew.
+    buffer_ms = 10 * 60 * 1000
+    qs = (f"?includeResolved=true&limit=200"
+          f"&startTime={start_ms - buffer_ms}&endTime={end_ms + buffer_ms}")
     try:
-        resp = _request("GET", "/v2/incident?includeResolved=true&limit=200")
+        resp = _request("GET", f"/v2/incident{qs}")
     except Exception as e:
         print(f"  [warn] Could not fetch Tier 1 incidents: {e}", file=sys.stderr)
         return []
@@ -479,11 +483,9 @@ def correlate(events: list[dict],
         elif has1 and has2:
             corr_type = "TIER1_TIER2"
             severity  = "Major"
-        elif has1 and has3:
-            corr_type = "TIER1_TIER3"
-            severity  = "Major"
         else:
-            corr_type = "MULTI_TIER"
+            # has1 and has3 (the only remaining 2-tier combination)
+            corr_type = "TIER1_TIER3"
             severity  = "Major"
 
         # Collect all anomaly messages for context
@@ -682,9 +684,9 @@ def run(window_minutes: int = 30, environment: str | None = None,
         print(f"  Dry run complete — no events sent.")
         return
 
-    # Send all correlated events in parallel
+    # Send all correlated events in parallel (bounded to avoid thread explosion)
     if correlations:
-        with ThreadPoolExecutor(max_workers=len(correlations)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(correlations), 8)) as pool:
             futures = {pool.submit(send_correlated_event, c): c["service"]
                        for c in correlations}
             for future in as_completed(futures):
