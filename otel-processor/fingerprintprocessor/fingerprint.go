@@ -210,6 +210,13 @@ func buildTraceFingerprint(spans []spanInfo, minSpans int) *traceFingerprint {
 // inferParents returns a map of spanID -> parentSpanID.
 // Uses actual parentSpanID from the span if present, otherwise falls back to
 // timing containment (mirrors _infer_parent_id in trace_fingerprint.py).
+//
+// Hash compatibility with the Python slow path:
+// The Splunk APM GraphQL API does not expose parentSpanId, so trace_fingerprint.py
+// always uses timing containment. For synchronous call chains the results are
+// identical — a parent span always contains its child. For async spans
+// (cross-buffer parentSpanID) this processor also falls back to timing
+// containment, so both paths converge. Hash divergence is rare in practice.
 func inferParents(spans []spanInfo, byID map[string]*spanInfo) map[string]string {
 	parents := make(map[string]string, len(spans))
 	for _, s := range spans {

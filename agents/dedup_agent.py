@@ -41,6 +41,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -77,8 +78,10 @@ RESOLVE_AFTER_MINUTES = int(os.environ.get("DEDUP_RESOLVE_MINUTES", "15"))
 # Anomaly event types to watch
 ANOMALY_EVENT_TYPES = ["trace.path.drift", "error.signature.drift"]
 
-# Dedup state file path template
-DEDUP_STATE_PATH = Path(os.environ.get("DEDUP_STATE_PATH", "./dedup_state.{env}.json"))
+# Dedup state file path template (default to data/ dir alongside other state files)
+_DATA_DIR = Path(__file__).parent.parent / "data"
+DEDUP_STATE_PATH = Path(os.environ.get("DEDUP_STATE_PATH",
+                                       str(_DATA_DIR / "dedup_state.{env}.json")))
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -376,9 +379,21 @@ def run(window_minutes: int, environment: str | None,
     env_desc = environment or "all"
 
     print(f"[dedup] Fetching anomaly events ({window_minutes}m, env={env_desc})...")
+    # Fetch both event types in parallel — independent I/O
     raw_events: list[dict] = []
-    for et in ANOMALY_EVENT_TYPES:
-        raw_events.extend(_signalflow_events(et, start_ms, now_ms))
+    _buckets: list[list[dict]] = [[] for _ in ANOMALY_EVENT_TYPES]
+
+    def _fetch(idx: int, et: str) -> None:
+        _buckets[idx].extend(_signalflow_events(et, start_ms, now_ms))
+
+    _threads = [threading.Thread(target=_fetch, args=(i, et), daemon=True)
+                for i, et in enumerate(ANOMALY_EVENT_TYPES)]
+    for t in _threads:
+        t.start()
+    for t in _threads:
+        t.join()
+    for bucket in _buckets:
+        raw_events.extend(bucket)
     print(f"  {len(raw_events)} raw event(s) received")
 
     state  = load_state(environment)
