@@ -291,8 +291,20 @@ k "kubectl rollout status deployment/petclinic-db --timeout=60s"
 k "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-gateway:82/api/vet/vets --max-time 8 | head -c 50"
 # Expected: JSON list of vets (not 404 or timeout)
 
-# Re-learn clean error baseline after DB recovery
+# Wipe error baseline locally
 python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
+
+# Push wiped error baseline to cluster and restart OTel processor
+# (The OTel processor auto-promotes after 10 detections — without this step,
+#  re-running Demo 1 will show 0 anomalies because signatures are already known)
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password \
+  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.json
+k "kubectl create configmap behavioral-baseline \
+  --from-file=baseline.json=/tmp/baseline.json \
+  --from-file=error_baseline.json=/tmp/error_baseline.json \
+  --dry-run=client -o yaml | kubectl apply -f -"
+k "kubectl rollout restart daemonset/otelcol-fingerprint"
+k "kubectl rollout status daemonset/otelcol-fingerprint --timeout=90s"
 ```
 
 > **Critical:** Services (customers-service, visits-service) take ~30s to reconnect to the DB after it comes back. Don't start the next demo until the curl above returns data. If traces are missing from subsequent learn runs, regenerate traffic and relearn (see Restore/Reset section).

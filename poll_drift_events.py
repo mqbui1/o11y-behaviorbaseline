@@ -23,11 +23,27 @@ if not EC2_IP or not EC2_PASS:
 print("Watching OTel collector for real-time drift events...")
 print("Press Ctrl+C to stop.\n")
 
+DAEMONSET_LABEL = os.environ.get("OTEL_POD_LABEL", "app=otelcol-fingerprint")
+OTEL_CONTAINER  = os.environ.get("OTEL_CONTAINER", "otelcol")
+
+# Tail all pods matching the label in parallel and merge stdout.
+# "kubectl logs -f daemonset/..." only follows one pod; using xargs ensures
+# all nodes' collectors are monitored (traffic is node-local in DaemonSet).
+# "exec" replaces the login shell before it can print the SSH banner,
+# then launches all pod log-followers in parallel via a bash subshell.
+_ssh_cmd = (
+    "exec bash -c '"
+    "for p in $(kubectl get pods -l " + DAEMONSET_LABEL + " -o jsonpath=\"{.items[*].metadata.name}\");"
+    " do kubectl logs -f --since=5s $p -c " + OTEL_CONTAINER + " 2>/dev/null & done;"
+    " tail -f /dev/null'"
+)
 cmd = [
     "sshpass", f"-p{EC2_PASS}",
-    "ssh", "-p", EC2_PORT, "-o", "StrictHostKeyChecking=no",
+    "ssh", "-T", "-p", EC2_PORT,
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "RequestTTY=no",
     f"splunk@{EC2_IP}",
-    "kubectl logs -f --since=5s daemonset/otelcol-fingerprint 2>&1"
+    _ssh_cmd,
 ]
 
 drift_re = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected)')
@@ -43,9 +59,9 @@ DEDUP_TTL = 90  # suppress repeated same-hash events for 90s
 hash_last_seen: dict = {}
 
 try:
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in proc.stdout:
-        line = line.rstrip()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    for raw in proc.stdout:
+        line = raw.decode("utf-8", errors="replace").rstrip()
         if not drift_re.search(line):
             continue
         h     = hash_re.search(line)
