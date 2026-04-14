@@ -274,6 +274,10 @@ python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment
 ────────────────────────────────────────────────────────────────────────
 ```
 
+**The demo story lands in two acts:**
+1. **OTel edge processor fires in ~15s** — structural signal at the collector, no AI needed, no poll interval
+2. **Python agent correlates + triages with Claude in seconds** — root cause identified, blast radius mapped
+
 **Key talking points:**
 - *"The OTel processor fires in ~10 seconds — it sees the error span on the very first affected trace, before any metric threshold is crossed."*
 - *"A DB outage creates brand new error signatures that have never appeared before. The framework fires on first occurrence — no threshold to set."*
