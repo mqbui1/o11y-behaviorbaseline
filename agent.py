@@ -30,6 +30,7 @@ import json
 import os
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import collect
@@ -51,6 +52,10 @@ BEDROCK_ARN  = os.environ.get(
     "arn:aws:bedrock:us-west-2:387769110234:application-inference-profile/fky19kpnw2m7",
 )
 
+_DATA_DIR = Path(__file__).parent / "data"
+# Stores resolved-incident context for the feedback loop
+_FEEDBACK_FILE = _DATA_DIR / "incident_feedback.json"
+
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN is required.", file=sys.stderr)
     sys.exit(1)
@@ -68,14 +73,19 @@ except ImportError:
 SYSTEM_PROMPT = """You are an observability triage agent for a microservices application.
 
 You receive a list of anomalies detected RIGHT NOW by a trace path drift detector.
-Each anomaly has a type, the affected service, and a message describing what changed.
-The input may also include a "topology_context" field showing the live service dependency
-graph. Use it to assess blast radius: a shared dependency (many callers) failing is more
-severe than a leaf service failing.
+The input may include several enrichment fields — use all of them:
+  - "topology_context": live service dependency graph. Use it to assess blast radius.
+    A shared dependency (many callers) failing is more severe than a leaf service failing.
+  - "hypothesis_context": ranked root cause hypotheses from graph analysis.
+    Use the highest-confidence hypothesis as your starting point for root_cause.
+  - "recent_incidents": past incidents with similar anomaly patterns and their confirmed causes.
+    If a similar past incident was resolved as "deployment" or "database outage", factor that in.
+  - "recent_deployments": services deployed recently. If the affected service was deployed
+    within the last hour, downgrade severity unless symptoms are severe.
 
 Your job:
 1. Determine what is actually wrong
-2. Identify the most likely root cause
+2. Identify the most likely root cause (use hypothesis_context when available)
 3. Recommend the minimum necessary action
 
 Respond ONLY with valid JSON matching this schema:
@@ -157,6 +167,63 @@ def read_watch_output() -> dict:
     return merged
 
 
+# ── Feedback loop helpers ──────────────────────────────────────────────────────
+
+def load_similar_past_incidents(anomalies: list[dict], top_n: int = 5) -> list[dict]:
+    """
+    Load the top_n most similar past resolved incidents from data/incident_feedback.json.
+    Similarity is based on overlapping anomaly_type + service combinations.
+    Returns a list of dicts with {anomaly_types, services, confirmed_cause, resolved_at}.
+    """
+    if not _FEEDBACK_FILE.exists():
+        return []
+    try:
+        records = json.loads(_FEEDBACK_FILE.read_text())
+    except Exception:
+        return []
+
+    current_types = {a.get("anomaly_type", "") for a in anomalies}
+    current_svcs  = {a.get("service", a.get("root_op", "")).split(":")[0] for a in anomalies}
+
+    scored = []
+    for rec in records:
+        past_types = set(rec.get("anomaly_types", []))
+        past_svcs  = set(rec.get("services", []))
+        overlap = len(current_types & past_types) + len(current_svcs & past_svcs)
+        if overlap > 0:
+            scored.append((overlap, rec))
+    scored.sort(key=lambda x: -x[0])
+    return [r for _, r in scored[:top_n]]
+
+
+def record_incident_feedback(plan: dict, watch_result: dict, env: str) -> None:
+    """
+    Append a resolved-incident record to data/incident_feedback.json.
+    Called after Claude produces a triage plan so future incidents can learn from it.
+    Only records INCIDENT or DEGRADED severity (OK has no learning value).
+    """
+    if plan.get("severity") == "OK":
+        return
+    anomalies = watch_result.get("anomalies", [])
+    record = {
+        "anomaly_types": sorted({a.get("anomaly_type", "") for a in anomalies}),
+        "services":      sorted({a.get("service", a.get("root_op", "")).split(":")[0]
+                                 for a in anomalies}),
+        "environment":   env,
+        "severity":      plan.get("severity"),
+        "confirmed_cause": plan.get("root_cause") or "",
+        "resolved_at":   "",  # filled in manually or by a resolve hook
+        "triage_action": plan.get("action", ""),
+    }
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        existing = json.loads(_FEEDBACK_FILE.read_text()) if _FEEDBACK_FILE.exists() else []
+        existing.append(record)
+        _FEEDBACK_FILE.write_text(json.dumps(existing, indent=2))
+    except Exception:
+        pass  # feedback is best-effort — never fail the main flow
+
+
 # ── 2. REASON ─────────────────────────────────────────────────────────────────
 
 def _build_topology_context(env: str) -> str:
@@ -178,6 +245,47 @@ def _build_topology_context(env: str) -> str:
             for svc, callers in sorted(callers_of.items()):
                 lines.append(f"  {svc} ← called by: {', '.join(sorted(callers))}")
         return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _build_hypothesis_context(anomalies: list[dict], env: str) -> str:
+    """
+    Run hypothesis_engine.analyze() for the primary affected service and return
+    a formatted context block for the Claude prompt.
+    Returns empty string if hypothesis engine is unavailable or anomalies are empty.
+    """
+    if not anomalies:
+        return ""
+    # Determine primary service from the first MISSING_SERVICE or any anomaly
+    primary_service = None
+    for a in anomalies:
+        if a.get("anomaly_type") == "MISSING_SERVICE":
+            primary_service = a.get("root_op", "").split(":")[0]
+            break
+    if not primary_service:
+        svc = anomalies[0].get("service") or anomalies[0].get("root_op", "")
+        primary_service = svc.split(":")[0] if ":" in svc else svc
+    if not primary_service:
+        return ""
+
+    try:
+        import sys as _sys
+        import importlib
+        _agents_dir = str(Path(__file__).parent / "agents")
+        if _agents_dir not in _sys.path:
+            _sys.path.insert(0, _agents_dir)
+        hyp = importlib.import_module("hypothesis_engine")
+
+        # Build a minimal corr dict from anomalies
+        corr = {
+            "service":       primary_service,
+            "anomaly_types": [a.get("anomaly_type", "") for a in anomalies],
+            "messages":      [a.get("message", "") for a in anomalies],
+            "deployment":    None,
+        }
+        result = hyp.analyze(primary_service, corr, env, window_minutes=30)
+        return hyp.format_for_prompt(result)
     except Exception:
         return ""
 
@@ -306,8 +414,8 @@ def main() -> None:
 
     env = args.environment
 
-    # Start topology fetch concurrently while reading stdin — both are I/O bound
-    # and independent, so running them in parallel saves ~1-2s per cycle.
+    # Read stdin first (required to know which services are affected before
+    # we can run hypothesis engine). Topology can still start concurrently.
     _topo_ctx: list[str] = []
     def _fetch_topo():
         _topo_ctx.append(_build_topology_context(env))
@@ -317,7 +425,7 @@ def main() -> None:
     watch_result = read_watch_output()
     anomalies = watch_result.get("anomalies", [])
 
-    topo_thread.join(timeout=10)  # don't block indefinitely if topology API is slow
+    topo_thread.join(timeout=10)
 
     print(f"[agent] env={env} | {len(anomalies)} anomaly(s) from watch")
 
@@ -325,9 +433,23 @@ def main() -> None:
         print("  No anomalies — system healthy.")
         sys.exit(0)
 
-    # Inject topology into the watch result before the Claude call
+    # Inject topology context (already fetched)
     if _topo_ctx and _topo_ctx[0]:
         watch_result["topology_context"] = _topo_ctx[0]
+
+    # Fetch hypothesis context and past incidents in parallel —
+    # both are I/O bound (API calls + disk read) and independent.
+    print("  Building enriched context (hypothesis engine + feedback loop)...")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        hyp_future  = pool.submit(_build_hypothesis_context, anomalies, env)
+        past_future = pool.submit(load_similar_past_incidents, anomalies)
+        hyp_ctx   = hyp_future.result()
+        past_incs = past_future.result()
+
+    if hyp_ctx:
+        watch_result["hypothesis_context"] = hyp_ctx
+    if past_incs:
+        watch_result["recent_incidents"] = past_incs
 
     print("  Reasoning with Claude...")
     try:
@@ -343,6 +465,11 @@ def main() -> None:
             sys.exit(1)
 
     act(plan, watch_result, env, dry_run=args.dry_run)
+
+    # Record this incident in the feedback loop for future correlation
+    if not args.dry_run:
+        record_incident_feedback(plan, watch_result, env)
+
     sys.exit(0 if plan.get("severity") != "INCIDENT" else 1)
 
 
