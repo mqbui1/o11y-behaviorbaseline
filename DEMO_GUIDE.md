@@ -1,5 +1,111 @@
 # Behavioral Anomaly Framework — Demo Guide
 
+---
+
+## New Cluster Setup (run once per workshop instance)
+
+Use this section when deploying to a brand-new EC2/k3d cluster. Skip to **Prerequisites** if the cluster is already set up.
+
+### What you need
+- New EC2 instance running k3d with petclinic + splunk-otel-collector already deployed
+- Splunk workshop environment name, ingest token, and user API token
+
+### Step 1 — Update `.env` (local Mac)
+```bash
+# Edit .env:
+EC2_IP=<new-ec2-ip>
+EC2_PASSWORD=Sp1unkH00di3
+ENVIRONMENT=<env-name>              # e.g. mbtest-45a9-workshop
+SPLUNK_INGEST_TOKEN=<ingest-token>
+SPLUNK_ACCESS_TOKEN=<user-api-token>
+```
+
+### Step 2 — Create required K8s secrets (on EC2)
+```bash
+source .env  # or paste values directly
+
+# SSH alias
+alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no splunk@$EC2_IP'
+
+# workshop-secret — env name + Splunk endpoints + ingest token
+k "kubectl create secret generic workshop-secret \
+  --from-literal=env=$ENVIRONMENT \
+  --from-literal=ingest-url=https://ingest.us1.signalfx.com \
+  --from-literal=api-url=https://api.us1.signalfx.com \
+  --from-literal=access-token=$SPLUNK_INGEST_TOKEN"
+
+# splunk-api-token — user API token (used by fingerprint processor emitter)
+k "kubectl create secret generic splunk-api-token \
+  --from-literal=token=$SPLUNK_ACCESS_TOKEN"
+
+# splunk-otel-collector — ingest token for the Helm-deployed agent
+k "kubectl create secret generic splunk-otel-collector \
+  --from-literal=splunk_observability_access_token=$SPLUNK_INGEST_TOKEN"
+```
+
+### Step 3 — Build and push the OTel processor image (on EC2)
+```bash
+# Copy otel-processor source to EC2
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -r otel-processor/ splunk@$EC2_IP:/home/splunk/otel-processor/
+
+# Build and push to local k3d registry
+k "cd /home/splunk/otel-processor && \
+   docker build -t localhost:9999/otelcol-fingerprint:latest . && \
+   docker push localhost:9999/otelcol-fingerprint:latest"
+```
+
+### Step 4 — Learn baseline (local Mac)
+Wait ~5 minutes for petclinic loadgen to generate APM data, then:
+```bash
+source .env
+python3 core/trace_fingerprint.py --environment $ENVIRONMENT learn --window-minutes 30
+python3 core/trace_fingerprint.py --environment $ENVIRONMENT promote
+
+# Copy baseline to EC2
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/baseline.$ENVIRONMENT.json splunk@$EC2_IP:/tmp/baseline.json
+```
+
+### Step 5 — Deploy (on EC2)
+```bash
+# Copy full repo to EC2 (for deploy.sh + data/ directory)
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -r . splunk@$EC2_IP:/home/splunk/repo/
+
+# On EC2:
+k "cd /home/splunk/repo && \
+   ./otel-processor/deploy.sh $ENVIRONMENT --skip-learn --skip-build"
+```
+
+`--skip-learn` — baseline was already learned locally in Step 4.
+`--skip-build` — image was already built in Step 3.
+
+**What `deploy.sh` does:**
+1. Seeds the `behavioral-baseline` ConfigMap (delete+create, not apply)
+2. Patches the `splunk-otel-collector-agent` relay to forward traces to the fingerprint processor
+3. Applies daemonset.yaml (DaemonSet, RBAC, Service)
+4. Restarts the DaemonSet
+5. Injects the baseline directly into running pods (active immediately, no 60s wait)
+
+### Step 6 — Verify (local Mac)
+```bash
+# Should be silent (no false positives):
+python3 -u poll_drift_events.py
+
+# Kill visits-service to confirm Demo 1 fires within ~20s:
+k "kubectl scale deployment visits-service --replicas=0"
+# Expected: trace.path.drift + error.signature.drift events appear
+# Restore:
+k "kubectl scale deployment visits-service --replicas=1"
+```
+
+### Re-deploy (subsequent sessions, image already built)
+```bash
+# On EC2 — config-only re-deploy:
+k "cd /home/splunk/repo && ./otel-processor/deploy.sh $ENVIRONMENT --skip-learn --skip-build"
+```
+
+---
+
 ## Prerequisites
 
 ### Terminal setup (run once before demo)
@@ -301,12 +407,12 @@ python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f
 # Push wiped error baseline to cluster and restart OTel processor
 # (The OTel processor auto-promotes after 10 detections — without this step,
 #  re-running Demo 1 will show 0 anomalies because signatures are already known)
-sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password \
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
   data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.json
-k "kubectl create configmap behavioral-baseline \
-  --from-file=baseline.json=/tmp/baseline.json \
-  --from-file=error_baseline.json=/tmp/error_baseline.json \
-  --dry-run=client -o yaml | kubectl apply -f -"
+k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
+   kubectl create configmap behavioral-baseline \
+     --from-file=baseline.json=/tmp/baseline.json \
+     --from-file=error_baseline.json=/tmp/error_baseline.json"
 k "kubectl rollout restart daemonset/otelcol-fingerprint"
 k "kubectl rollout status daemonset/otelcol-fingerprint --timeout=90s"
 ```
@@ -1106,8 +1212,16 @@ sleep 30
 python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 55
 python3 core/trace_fingerprint.py --environment $ENV promote
 
-# Push the updated baseline into the ConfigMap so OTel pods reload it
-./otel-processor/sync-baseline.sh $ENV
+# Push the updated baseline into the ConfigMap and inject into running pods
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
+k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
+   kubectl create configmap behavioral-baseline \
+     --from-file=baseline.json=/tmp/baseline.json && \
+   B64=\$(base64 -w 0 /tmp/baseline.json); \
+   for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
+     kubectl exec \$pod -c otelcol -- sh -c \"echo '\$B64' | base64 -d > /baseline/baseline.json\"; \
+   done && echo 'Baseline pushed to all pods'"
 
 # Relearn error baseline after disruptions (wait for clean window first)
 python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
