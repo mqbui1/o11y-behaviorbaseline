@@ -3,6 +3,7 @@ package fingerprintprocessor
 import (
 	"encoding/json"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -49,6 +50,16 @@ type errorSigEntry struct {
 	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
+// errorRateWindow tracks recent fire timestamps for a known error signature.
+type errorRateWindow struct {
+	// timestamps of recent occurrences (monotonically increasing)
+	times []time.Time
+	// baselineRate is occurrences/min computed from the first `windowSize` events
+	// after initial promotion. Frozen once we have enough data.
+	baselineRate float64
+	frozen       bool
+}
+
 // baselineStore holds the in-memory view of baseline.json and error_baseline.json.
 // It reloads from disk at BaselineReloadInterval.
 type baselineStore struct {
@@ -57,10 +68,14 @@ type baselineStore struct {
 	traceFingerprints map[string]*fingerprintEntry // hash -> entry
 	errorSignatures   map[string]*errorSigEntry    // hash -> entry
 
-	tracePath  string
-	errorPath  string
+	// errorRates tracks recent fire times for known error signatures.
+	errorRatesMu sync.Mutex
+	errorRates   map[string]*errorRateWindow // hash -> rate window
+
+	tracePath   string
+	errorPath   string
 	reloadEvery time.Duration
-	lastLoaded time.Time
+	lastLoaded  time.Time
 }
 
 func newBaselineStore(tracePath, errorPath string, reloadEvery time.Duration) *baselineStore {
@@ -70,6 +85,7 @@ func newBaselineStore(tracePath, errorPath string, reloadEvery time.Duration) *b
 		reloadEvery:       reloadEvery,
 		traceFingerprints: make(map[string]*fingerprintEntry),
 		errorSignatures:   make(map[string]*errorSigEntry),
+		errorRates:        make(map[string]*errorRateWindow),
 	}
 	bs.reload()
 	return bs
@@ -265,4 +281,89 @@ func (bs *baselineStore) maxBaselineSpanCount(rootOp string, minOccurrences int)
 		}
 	}
 	return max
+}
+
+// p10BaselineSpanCount returns the 10th-percentile span_count across all
+// established baseline fingerprints for the given root_op. Using the 10th
+// percentile rather than a fixed ratio of the max is more robust when a
+// root_op has fingerprints with very different span counts (e.g. cached vs
+// uncached code paths). Returns 0 if no established fingerprints exist.
+func (bs *baselineStore) p10BaselineSpanCount(rootOp string, minOccurrences int) int {
+	bs.mu.RLock()
+	var counts []int
+	for _, e := range bs.traceFingerprints {
+		if e.RootOp == rootOp && (e.Occurrences >= minOccurrences || e.AutoPromoted) && e.SpanCount > 0 {
+			counts = append(counts, e.SpanCount)
+		}
+	}
+	bs.mu.RUnlock()
+
+	if len(counts) == 0 {
+		return 0
+	}
+	sort.Ints(counts)
+	// 10th percentile index (floor)
+	idx := int(float64(len(counts)-1) * 0.10)
+	return counts[idx]
+}
+
+// recordErrorAndCheckSpike records a new occurrence of a known error signature
+// and returns (spiked, currentRatePerMin, baselineRatePerMin).
+// spiked is true when the current rate exceeds baselineRate * multiplier.
+func (bs *baselineStore) recordErrorAndCheckSpike(hash string, window time.Duration, multiplier float64) (bool, float64, float64) {
+	now := time.Now()
+
+	bs.errorRatesMu.Lock()
+	defer bs.errorRatesMu.Unlock()
+
+	rw, ok := bs.errorRates[hash]
+	if !ok {
+		rw = &errorRateWindow{}
+		bs.errorRates[hash] = rw
+	}
+
+	rw.times = append(rw.times, now)
+
+	// Prune events older than 2x the window (keep some history for baseline calc)
+	cutoff := now.Add(-2 * window)
+	keep := 0
+	for _, t := range rw.times {
+		if t.After(cutoff) {
+			break
+		}
+		keep++
+	}
+	rw.times = rw.times[keep:]
+
+	// Count events within the current window
+	windowCutoff := now.Add(-window)
+	windowCount := 0
+	for _, t := range rw.times {
+		if t.After(windowCutoff) {
+			windowCount++
+		}
+	}
+	windowMins := window.Minutes()
+	currentRate := float64(windowCount) / windowMins
+
+	// Freeze baseline after we have at least 10 events in the long history
+	if !rw.frozen && len(rw.times) >= 10 {
+		// Use the oldest half of the stored events as a "quiet baseline"
+		half := len(rw.times) / 2
+		oldestHalf := rw.times[:half]
+		if len(oldestHalf) >= 2 {
+			dur := oldestHalf[len(oldestHalf)-1].Sub(oldestHalf[0]).Minutes()
+			if dur > 0 {
+				rw.baselineRate = float64(len(oldestHalf)) / dur
+				rw.frozen = true
+			}
+		}
+	}
+
+	if rw.baselineRate <= 0 || !rw.frozen {
+		return false, currentRate, 0
+	}
+
+	spiked := currentRate >= rw.baselineRate*multiplier
+	return spiked, currentRate, rw.baselineRate
 }

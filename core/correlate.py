@@ -102,7 +102,11 @@ DEPLOYMENT_CORRELATION_WINDOW_MINUTES = int(
 TIER_EVENT_MAP = {
     "trace.path.drift":       "tier2",
     "error.signature.drift":  "tier3",
+    "error.signature.spike":  "tier3",  # known sig firing at spike rate
 }
+
+# Event types that cancel out a previous drift — used to suppress stale alerts
+RECOVERY_EVENT_TYPES = {"trace.path.restored"}
 
 # Only consider Tier 1 incidents from detectors carrying this tag.
 # Prevents generic infra alerts from polluting APM service correlation.
@@ -224,20 +228,55 @@ def fetch_anomaly_events(start_ms: int, end_ms: int,
     Fetch all behavioral baseline anomaly events from Splunk within the window.
     Returns a flat list of event dicts, each with injected 'tier' and 'service'
     fields derived from the event dimensions.
-    All tier fetches run in parallel.
+    All tier fetches run in parallel. Recovery events (trace.path.restored) are
+    used to suppress drift events for hashes that have already recovered.
     """
     all_events: list[dict] = []
-    with ThreadPoolExecutor(max_workers=len(TIER_EVENT_MAP)) as pool:
+    recovered_hashes: set[str] = set()
+
+    event_types_to_fetch = dict(TIER_EVENT_MAP)
+    for et in RECOVERY_EVENT_TYPES:
+        event_types_to_fetch[et] = "_recovery"
+
+    with ThreadPoolExecutor(max_workers=len(event_types_to_fetch)) as pool:
         futures = {
             pool.submit(_fetch_events_for_type, et, tier, start_ms, end_ms,
                         environment): et
-            for et, tier in TIER_EVENT_MAP.items()
+            for et, tier in event_types_to_fetch.items()
         }
         for future in as_completed(futures):
+            et = futures[future]
             try:
-                all_events.extend(future.result())
+                events = future.result()
+                if et in RECOVERY_EVENT_TYPES:
+                    for e in events:
+                        h = (e.get("raw", {}).get("metadata", {}).get("fp_hash")
+                             or e.get("raw", {}).get("properties", {}).get("hash"))
+                        if h:
+                            recovered_hashes.add(h)
+                else:
+                    all_events.extend(events)
             except Exception as e:
                 print(f"  [warn] fetch error: {e}", file=sys.stderr)
+
+    # Filter out drift events whose hash has a corresponding recovery event
+    if recovered_hashes:
+        before = len(all_events)
+        all_events = [
+            e for e in all_events
+            if not (
+                e.get("event_type") == "trace.path.drift"
+                and (
+                    e.get("raw", {}).get("metadata", {}).get("fp_hash")
+                    or e.get("raw", {}).get("properties", {}).get("hash")
+                ) in recovered_hashes
+            )
+        ]
+        suppressed = before - len(all_events)
+        if suppressed:
+            print(f"  [correlate] Suppressed {suppressed} drift event(s) that have recovered.",
+                  file=sys.stderr)
+
     return all_events
 
 
