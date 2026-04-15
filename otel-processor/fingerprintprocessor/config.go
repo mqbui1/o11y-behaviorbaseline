@@ -65,17 +65,43 @@ type Config struct {
 	// writable by the collector process (e.g. an emptyDir volume, not a read-only
 	// ConfigMap mount). Default: true.
 	PromotionWriteback bool `mapstructure:"promotion_writeback"`
+
+	// WarmupDuration is how long after startup the processor suppresses drift
+	// events. During warm-up, new root ops are logged and auto-promoted but no
+	// events are emitted to Splunk. Prevents false positives while spans from
+	// a fresh deploy finish arriving. Default: 2m. Set to 0 to disable.
+	WarmupDuration time.Duration `mapstructure:"warmup_duration"`
+
+	// SpanCountPercentileGuard enables a smarter partial-trace filter: instead
+	// of a fixed PartialTraceThreshold ratio, uses the 10th percentile of
+	// observed span counts for each root op stored in the baseline.
+	// Default: true.
+	SpanCountPercentileGuard bool `mapstructure:"span_count_percentile_guard"`
+
+	// ErrorRateWindow is the rolling window for tracking known error-signature
+	// fire rates. Used to detect sudden spikes in recurring error patterns.
+	// Default: 5m. Set to 0 to disable error rate tracking.
+	ErrorRateWindow time.Duration `mapstructure:"error_rate_window"`
+
+	// ErrorRateSpikeMultiplier: a known error signature firing this many times
+	// above its baseline rate within ErrorRateWindow triggers an
+	// error.signature.spike event. Default: 5.0.
+	ErrorRateSpikeMultiplier float64 `mapstructure:"error_rate_spike_multiplier"`
 }
 
 func createDefaultConfig() component.Config {
 	return &Config{
-		TraceBufferTimeout:     10 * time.Second,
-		MinSpans:               2,
-		MinBaselineOccurrences: 2,
-		BaselineReloadInterval: 60 * time.Second,
-		SplunkIngestURL:        "https://ingest.us1.signalfx.com",
-		PartialTraceThreshold:  0.7,
-		PromotionThreshold:     10,
-		PromotionWriteback:     true,
+		TraceBufferTimeout:       10 * time.Second,
+		MinSpans:                 2,
+		MinBaselineOccurrences:   2,
+		BaselineReloadInterval:   60 * time.Second,
+		SplunkIngestURL:          "https://ingest.us1.signalfx.com",
+		PartialTraceThreshold:    0.7,
+		PromotionThreshold:       10,
+		PromotionWriteback:       true,
+		WarmupDuration:           2 * time.Minute,
+		SpanCountPercentileGuard: true,
+		ErrorRateWindow:          5 * time.Minute,
+		ErrorRateSpikeMultiplier: 5.0,
 	}
 }
