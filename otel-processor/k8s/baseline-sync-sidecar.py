@@ -39,6 +39,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 SPLUNK_TOKEN  = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
 REALM         = os.environ.get("SPLUNK_REALM", "us1")
@@ -116,15 +117,13 @@ def patch_configmap() -> bool:
     Returns True on success.
     """
     try:
-        with open(BASELINE_PATH) as f:
-            baseline_json = f.read()
+        baseline_json = Path(BASELINE_PATH).read_text()
     except Exception as e:
         print(f"[warn] Could not read {BASELINE_PATH}: {e}", flush=True)
         return False
 
     try:
-        with open(ERROR_BASELINE_PATH) as f:
-            error_baseline_json = f.read()
+        error_baseline_json = Path(ERROR_BASELINE_PATH).read_text()
     except Exception as e:
         print(f"[warn] Could not read {ERROR_BASELINE_PATH}: {e}", flush=True)
         error_baseline_json = '{"signatures":{}}'
@@ -149,35 +148,63 @@ def patch_configmap() -> bool:
     # Patch the ConfigMap directly via the Kubernetes API using the in-cluster
     # service account token — no kubectl binary required.
     try:
-        token = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        token = Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
         ca_cert = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
     except Exception as e:
         print(f"[error] Could not read service account credentials: {e}", flush=True)
         return False
 
-    patch = {
-        "data": {
-            "baseline.json":       baseline_json,
-            "error_baseline.json": error_baseline_json,
-        }
-    }
     url = (f"https://kubernetes.default.svc/api/v1/namespaces/{CONFIGMAP_NS}"
            f"/configmaps/{CONFIGMAP_NAME}")
     ctx = ssl.create_default_context(cafile=ca_cert)
-    req = urllib.request.Request(
+
+    # Step 1: GET the current ConfigMap to obtain resourceVersion (required for PUT)
+    get_req = urllib.request.Request(
         url,
-        data=json.dumps(patch).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type":  "application/strategic-merge-patch+json",
-        },
-        method="PATCH",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        method="GET",
     )
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+        with urllib.request.urlopen(get_req, context=ctx, timeout=15) as resp:
+            current = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        print(f"[error] Could not GET ConfigMap {e.code}: {e.read().decode()}", flush=True)
+        return False
+    except Exception as e:
+        print(f"[error] ConfigMap GET failed: {e}", flush=True)
+        return False
+
+    # Step 2: PUT (full replacement) — avoids the last-applied-configuration
+    # annotation caching problem that makes strategic-merge-patch silently ignore
+    # new data. resourceVersion ensures we don't overwrite a concurrent update.
+    resource_version = current.get("metadata", {}).get("resourceVersion", "")
+    put_body = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name":            CONFIGMAP_NAME,
+            "namespace":       CONFIGMAP_NS,
+            "resourceVersion": resource_version,
+        },
+        "data": {
+            "baseline.json":       baseline_json,
+            "error_baseline.json": error_baseline_json,
+        },
+    }
+    put_req = urllib.request.Request(
+        url,
+        data=json.dumps(put_body).encode(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+        },
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(put_req, context=ctx, timeout=15) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
-        print(f"[error] Kubernetes API patch failed {e.code}: {e.read().decode()}", flush=True)
+        print(f"[error] Kubernetes API PUT failed {e.code}: {e.read().decode()}", flush=True)
         return False
     except Exception as e:
         print(f"[error] Kubernetes API request failed: {e}", flush=True)

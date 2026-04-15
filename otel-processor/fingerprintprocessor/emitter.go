@@ -91,6 +91,53 @@ func (e *emitter) emitErrorDrift(env, traceID string, sig errorSignature) error 
 	})
 }
 
+func (e *emitter) emitTraceRestored(env string, fp *traceFingerprint) error {
+	return e.send(splunkEvent{
+		EventType: "trace.path.restored",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"anomaly_type":   "TRACE_RESTORED",
+			"root_operation": fp.rootOp,
+			"service":        rootService(fp.rootOp),
+			"fp_hash":        fp.hash,
+		},
+		Properties: map[string]string{
+			"root_op":     fp.rootOp,
+			"hash":        fp.hash,
+			"path":        fp.path,
+			"detector":    "otel-collector-edge",
+			"environment": env,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (e *emitter) emitErrorRateSpike(env string, sig errorSignature, ratePerMin, baselinePerMin float64) error {
+	return e.send(splunkEvent{
+		EventType: "error.signature.spike",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"anomaly_type":   "ERROR_RATE_SPIKE",
+			"service":        sig.service,
+			"error_type":     sig.errorType,
+			"sig_hash":       sig.hash,
+		},
+		Properties: map[string]string{
+			"service":              sig.service,
+			"error_type":           sig.errorType,
+			"operation":            sig.operation,
+			"hash":                 sig.hash,
+			"rate_per_min":         fmt.Sprintf("%.2f", ratePerMin),
+			"baseline_rate_per_min": fmt.Sprintf("%.2f", baselinePerMin),
+			"detector":             "otel-collector-edge",
+			"environment":          env,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func (e *emitter) emitPromotion(env, hash, rootOp, kind string, detections int) error {
 	return e.send(splunkEvent{
 		EventType: "trace.fingerprint.promoted",

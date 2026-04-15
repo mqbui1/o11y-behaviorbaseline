@@ -29,6 +29,21 @@ When correlate.py runs within DEPLOYMENT_CORRELATION_WINDOW_MINUTES of a
 deployment event on the same service+environment, it downgrades the alert
 severity and annotates the correlated anomaly with deployment context.
 
+GitHub Actions example (add to your deploy workflow):
+
+  - name: Notify behavioral baseline
+    env:
+      SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
+      SPLUNK_REALM: us1
+    run: |
+      python notify_deployment.py \\
+        --service ${{ env.SERVICE_NAME }} \\
+        --environment ${{ env.APM_ENVIRONMENT }} \\
+        --version ${{ github.ref_name }} \\
+        --deployer github-actions \\
+        --commit ${{ github.sha }} \\
+        --description "${{ github.event.head_commit.message }}"
+
 Required env vars:
   SPLUNK_ACCESS_TOKEN
   SPLUNK_REALM              (default: us1)

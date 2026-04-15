@@ -40,19 +40,27 @@ type fingerprintProcessor struct {
 	seenMu     sync.Mutex
 	seenCounts map[string]int // hash -> detection count since startup
 
+	// activeDriftsMu guards activeDrifts, used for recovery signal.
+	activeDriftsMu sync.Mutex
+	activeDrifts   map[string]string // fp_hash -> root_op; cleared when fingerprint returns to baseline
+
+	startTime time.Time // used for warm-up window check
+
 	stopCh chan struct{}
 }
 
 func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Traces) (*fingerprintProcessor, error) {
 	p := &fingerprintProcessor{
-		logger:     logger,
-		cfg:        cfg,
-		next:       next,
-		baseline:   newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
-		emitter:    newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken),
-		buffers:    make(map[string]*traceBuffer),
-		seenCounts: make(map[string]int),
-		stopCh:     make(chan struct{}),
+		logger:       logger,
+		cfg:          cfg,
+		next:         next,
+		baseline:     newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
+		emitter:      newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken),
+		buffers:      make(map[string]*traceBuffer),
+		seenCounts:   make(map[string]int),
+		activeDrifts: make(map[string]string),
+		startTime:    time.Now(),
+		stopCh:       make(chan struct{}),
 	}
 	if cfg.PromotionThreshold > 0 {
 		p.logger.Info("auto-promotion enabled",
@@ -60,7 +68,17 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 			zap.Bool("writeback", cfg.PromotionWriteback),
 		)
 	}
+	if cfg.WarmupDuration > 0 {
+		p.logger.Info("warm-up mode active — drift events suppressed during warmup",
+			zap.Duration("warmup_duration", cfg.WarmupDuration),
+		)
+	}
 	return p, nil
+}
+
+// inWarmup returns true if the processor is still within the warm-up window.
+func (p *fingerprintProcessor) inWarmup() bool {
+	return p.cfg.WarmupDuration > 0 && time.Since(p.startTime) < p.cfg.WarmupDuration
 }
 
 func (p *fingerprintProcessor) Start(_ context.Context, _ component.Host) error {
@@ -215,12 +233,26 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 
 	entry := p.baseline.lookupTrace(fp.hash)
 
-	// Known and established — no alert
-	if entry != nil && entry.Occurrences >= p.cfg.MinBaselineOccurrences {
-		return
-	}
-	// Auto-promoted — no alert
-	if entry != nil && entry.AutoPromoted {
+	// Known and established — check if this hash was previously drifting and
+	// has now recovered (trace.path.restored signal).
+	if entry != nil && (entry.Occurrences >= p.cfg.MinBaselineOccurrences || entry.AutoPromoted) {
+		p.activeDriftsMu.Lock()
+		_, wasDrifting := p.activeDrifts[fp.hash]
+		if wasDrifting {
+			delete(p.activeDrifts, fp.hash)
+		}
+		p.activeDriftsMu.Unlock()
+
+		if wasDrifting {
+			p.logger.Info("trace path restored",
+				zap.String("root_op", fp.rootOp),
+				zap.String("hash", fp.hash),
+				zap.String("environment", p.cfg.Environment),
+			)
+			if err := p.emitter.emitTraceRestored(p.cfg.Environment, fp); err != nil {
+				p.logger.Warn("failed to emit trace restored event", zap.Error(err))
+			}
+		}
 		return
 	}
 
@@ -229,29 +261,39 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 	// trace. In a multi-node deployment, spans from the same trace may arrive
 	// at different collector instances. Fingerprinting an incomplete span set
 	// produces a hash that will never match the baseline, causing false-positive
-	// NEW_FINGERPRINT alerts. Skip detection when the span count is below
-	// PartialTraceThreshold * max(baseline span counts for this root_op).
+	// NEW_FINGERPRINT alerts.
 	if p.cfg.PartialTraceThreshold > 0 {
-		maxExpected := p.baseline.maxBaselineSpanCount(fp.rootOp, p.cfg.MinBaselineOccurrences)
-		if maxExpected > 0 {
-			threshold := int(float64(maxExpected) * p.cfg.PartialTraceThreshold)
-			if fp.spanCount < threshold {
-				p.logger.Debug("skipping partial trace",
-					zap.String("trace_id", buf.traceID),
-					zap.String("root_op", fp.rootOp),
-					zap.Int("span_count", fp.spanCount),
-					zap.Int("expected_min", threshold),
-					zap.Int("baseline_max", maxExpected),
-				)
-				return
+		var minExpected int
+		if p.cfg.SpanCountPercentileGuard {
+			// Use 10th percentile of known span counts for this root_op — more
+			// robust than the fixed-ratio approach when baseline fingerprints
+			// have varying span counts (e.g. cached vs. uncached paths).
+			minExpected = p.baseline.p10BaselineSpanCount(fp.rootOp, p.cfg.MinBaselineOccurrences)
+		} else {
+			maxExpected := p.baseline.maxBaselineSpanCount(fp.rootOp, p.cfg.MinBaselineOccurrences)
+			if maxExpected > 0 {
+				minExpected = int(float64(maxExpected) * p.cfg.PartialTraceThreshold)
 			}
+		}
+		if minExpected > 0 && fp.spanCount < minExpected {
+			p.logger.Debug("skipping partial trace",
+				zap.String("trace_id", buf.traceID),
+				zap.String("root_op", fp.rootOp),
+				zap.Int("span_count", fp.spanCount),
+				zap.Int("expected_min", minExpected),
+			)
+			return
 		}
 	}
 
 	// Check for MISSING_SERVICE: same root_op in baseline but fewer services now
 	established := p.baseline.traceFingerprintsByRootOp(fp.rootOp, p.cfg.MinBaselineOccurrences)
 	if len(established) > 0 && entry == nil {
-		// New fingerprint for a known root op
+		// New fingerprint for a known root op — mark as active drift
+		p.activeDriftsMu.Lock()
+		p.activeDrifts[fp.hash] = fp.rootOp
+		p.activeDriftsMu.Unlock()
+
 		p.logger.Info("trace drift detected",
 			zap.String("trace_id", buf.traceID),
 			zap.String("root_op", fp.rootOp),
@@ -259,8 +301,10 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 			zap.String("path", fp.path),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
-			p.logger.Warn("failed to emit trace drift event", zap.Error(err))
+		if !p.inWarmup() {
+			if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
+				p.logger.Warn("failed to emit trace drift event", zap.Error(err))
+			}
 		}
 		p.maybePromoteTrace(fp)
 		return
@@ -274,8 +318,10 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 			zap.String("hash", fp.hash),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
-			p.logger.Warn("failed to emit trace drift event", zap.Error(err))
+		if !p.inWarmup() {
+			if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
+				p.logger.Warn("failed to emit trace drift event", zap.Error(err))
+			}
 		}
 		p.maybePromoteTrace(fp)
 	}
@@ -322,7 +368,25 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 	for _, sig := range sigs {
 		entry := p.baseline.lookupError(sig.hash)
 		if entry != nil && entry.Occurrences >= p.cfg.MinBaselineOccurrences {
-			continue // known error pattern
+			// Known signature — check for rate spike if tracking is enabled
+			if p.cfg.ErrorRateWindow > 0 {
+				if spiked, rate, baseline := p.baseline.recordErrorAndCheckSpike(sig.hash, p.cfg.ErrorRateWindow, p.cfg.ErrorRateSpikeMultiplier); spiked {
+					p.logger.Info("error signature spike detected",
+						zap.String("hash", sig.hash),
+						zap.String("service", sig.service),
+						zap.String("error_type", sig.errorType),
+						zap.Float64("current_rate_per_min", rate),
+						zap.Float64("baseline_rate_per_min", baseline),
+						zap.String("environment", p.cfg.Environment),
+					)
+					if !p.inWarmup() {
+						if err := p.emitter.emitErrorRateSpike(p.cfg.Environment, sig, rate, baseline); err != nil {
+							p.logger.Warn("failed to emit error rate spike event", zap.Error(err))
+						}
+					}
+				}
+			}
+			continue // known error pattern — no new-signature alert
 		}
 
 		p.logger.Info("new error signature detected",
@@ -334,8 +398,10 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 			zap.String("hash", sig.hash),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if err := p.emitter.emitErrorDrift(p.cfg.Environment, buf.traceID, sig); err != nil {
-			p.logger.Warn("failed to emit error drift event", zap.Error(err))
+		if !p.inWarmup() {
+			if err := p.emitter.emitErrorDrift(p.cfg.Environment, buf.traceID, sig); err != nil {
+				p.logger.Warn("failed to emit error drift event", zap.Error(err))
+			}
 		}
 		p.maybePromoteError(sig)
 	}
