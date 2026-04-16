@@ -1,0 +1,151 @@
+# baseline-agent Deployment
+# ==========================
+# Long-running replacement for the baseline-learn and baseline-onboard CronJobs.
+# Runs agents/baseline_agent.py in poll mode — no cron scheduling needed.
+#
+# Responsibilities:
+#   - Learn + promote trace/error fingerprints every LEARN_INTERVAL_MINUTES
+#   - Push baseline to ConfigMap + inject into otelcol-fingerprint pods
+#   - Post-learn: noise pruning, coverage audit, adaptive thresholds,
+#     baseline health monitor (auto-fix LOW_CONFIDENCE entries),
+#     runbook generation, dedup state pruning
+#   - Onboarding discovery every ONBOARD_INTERVAL_MINUTES
+#   - Continuous anomaly rate monitoring for self-healing (IncidentTracker)
+#   - Heartbeat: behavioral_baseline.baseline_agent.alive gauge
+#
+# Prerequisites:
+#   - workshop-secret: api_token, access_token, realm, env, environments (optional)
+#   - baseline-sync ServiceAccount (ConfigMap + pod exec permissions)
+#
+# Deploy:
+#   kubectl apply -f baseline-agent-deployment.yaml
+#
+# Delete CronJobs once this is running:
+#   kubectl delete cronjob baseline-learn baseline-onboard
+#
+# Logs:
+#   kubectl logs -l app=baseline-agent --tail=100 -f
+#
+# Trigger manual learn (without restarting pod):
+#   kubectl exec -it $(kubectl get pod -l app=baseline-agent -o jsonpath='{.items[0].metadata.name}') \
+#     -- python3 /repo/agents/baseline_agent.py --environment $ENV --once
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: baseline-agent
+  namespace: default
+  labels:
+    app: baseline-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: baseline-agent
+  template:
+    metadata:
+      labels:
+        app: baseline-agent
+    spec:
+      serviceAccountName: baseline-sync   # needs ConfigMap + pod exec permissions
+      initContainers:
+        - name: git-sync
+          image: alpine/git:latest
+          env:
+            - name: GIT_SHA
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: git_sha
+                  optional: true
+          command:
+            - sh
+            - -c
+            - |
+              if [ -n "$GIT_SHA" ] && [ "$GIT_SHA" != "main" ]; then
+                git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                git -C /repo checkout "$GIT_SHA"
+                echo "Repo pinned to $GIT_SHA"
+              else
+                git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                echo "Repo at: $(git -C /repo rev-parse --short HEAD)"
+              fi
+          volumeMounts:
+            - name: workspace
+              mountPath: /repo
+      containers:
+        - name: baseline-agent
+          image: localhost:9999/baseline-learn:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPLUNK_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: api_token
+            - name: SPLUNK_REALM
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: realm
+            - name: SPLUNK_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: access_token
+            - name: ENVIRONMENT
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: env
+            - name: ENVIRONMENTS
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: environments
+                  optional: true   # falls back to ENVIRONMENT if not set
+            - name: LEARN_INTERVAL_MINUTES
+              value: "120"         # re-learn every 2 hours
+            - name: ONBOARD_INTERVAL_MINUTES
+              value: "360"         # onboard check every 6 hours
+            - name: HEAL_POLL_INTERVAL_S
+              value: "120"         # check anomaly rate every 2 minutes
+            - name: LEARN_WINDOW_MINUTES
+              value: "60"          # each learn looks back 60 minutes
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              cd /repo
+
+              # Install kubectl if not pre-baked
+              command -v kubectl >/dev/null 2>&1 || {
+                echo "[baseline-agent] Installing kubectl..."
+                apt-get update -qq && apt-get install -y -qq curl ca-certificates
+                KUBECTL_VER=$(curl -sL https://dl.k8s.io/release/stable.txt)
+                curl -sLO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
+                chmod +x kubectl && mv kubectl /usr/local/bin/
+              }
+
+              pip show requests >/dev/null 2>&1 || pip install requests --quiet
+
+              echo "[baseline-agent] Starting..."
+              exec python3 agents/baseline_agent.py
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: 250m
+            requests:
+              memory: 256Mi
+              cpu: 50m
+          volumeMounts:
+            - name: workspace
+              mountPath: /repo
+            - name: data
+              mountPath: /repo/data
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
