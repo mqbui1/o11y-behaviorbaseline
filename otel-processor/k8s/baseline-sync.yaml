@@ -7,10 +7,14 @@
 # Uses workshop-secret for Splunk API credentials (already present on cluster).
 # Uses the baseline-sync ServiceAccount for ConfigMap + pod exec permissions.
 #
-# Schedule: nightly at 2am UTC. Adjust spec.schedule as needed.
+# Two schedules: 2am UTC (off-hours baseline) + 10am UTC (peak-hours baseline).
+# They share the same CronJob spec - concurrencyPolicy: Forbid prevents overlap.
 #
 # Trigger manually (e.g. after a deploy):
 #   kubectl create job --from=cronjob/baseline-learn baseline-learn-manual
+#
+# Check logs of last run:
+#   kubectl logs -l app=baseline-learn --tail=50
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -18,19 +22,23 @@ metadata:
   name: baseline-learn
   namespace: default
 spec:
-  schedule: "0 2 * * *"        # nightly at 2am UTC
-  concurrencyPolicy: Forbid
+  schedule: "0 2,10 * * *"     # 2am UTC (off-hours) + 10am UTC (peak traffic)
+  concurrencyPolicy: Forbid     # don't overlap if a previous job is still running
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 1
       template:
+        metadata:
+          labels:
+            app: baseline-learn
         spec:
           serviceAccountName: baseline-sync
           restartPolicy: OnFailure
           initContainers:
-            # Clone repo to get trace_fingerprint.py
+            # Clone (or update) the repo to get the latest trace_fingerprint.py.
+            # Uses an emptyDir shared with the learn container.
             - name: git-sync
               image: alpine/git:latest
               command:
@@ -42,14 +50,19 @@ spec:
                   else
                     git clone https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
                   fi
-                  echo "Repo ready: $(ls /repo/core/)"
+                  echo "Repo ready at $(git -C /repo rev-parse --short HEAD)"
               volumeMounts:
                 - name: workspace
                   mountPath: /repo
           containers:
             - name: learn
-              # python:3.11-slim + kubectl installed via curl
-              image: python:3.11-slim
+              # Pre-baked image: python:3.11-slim + kubectl + requests + python-dotenv
+              # Build: docker build -f k8s/Dockerfile.baseline-learn -t localhost:9999/baseline-learn:latest k8s/
+              # Push:  docker push localhost:9999/baseline-learn:latest
+              # Falls back to python:3.11-slim if custom image not available -
+              # kubectl will be downloaded at runtime (slower but functional).
+              image: localhost:9999/baseline-learn:latest
+              imagePullPolicy: IfNotPresent
               env:
                 - name: SPLUNK_ACCESS_TOKEN
                   valueFrom:
@@ -61,6 +74,11 @@ spec:
                     secretKeyRef:
                       name: workshop-secret
                       key: realm
+                - name: SPLUNK_INGEST_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: access_token
                 - name: ENVIRONMENT
                   valueFrom:
                     secretKeyRef:
@@ -70,22 +88,35 @@ spec:
                 - sh
                 - -c
                 - |
-                  set -e
-
-                  # Install kubectl
-                  echo "[baseline-learn] Installing kubectl + deps..."
-                  apt-get update -qq && apt-get install -y -qq curl ca-certificates
-                  curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-                  chmod +x kubectl && mv kubectl /usr/local/bin/
-                  pip install requests python-dotenv --quiet
-
+                  set -eu
                   cd /repo
-                  echo "[baseline-learn] Learning for: $ENVIRONMENT (last 60 min)..."
-                  python3 core/trace_fingerprint.py \
-                    --environment "$ENVIRONMENT" \
-                    learn --window-minutes 60
 
-                  echo "[baseline-learn] Promoting..."
+                  # Install kubectl if not pre-baked (fallback for plain python image)
+                  command -v kubectl >/dev/null 2>&1 || {
+                    echo "[baseline-learn] kubectl not found - installing..."
+                    apt-get update -qq && apt-get install -y -qq curl ca-certificates
+                    KUBECTL_VER=$(curl -sL https://dl.k8s.io/release/stable.txt)
+                    curl -sLO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
+                    chmod +x kubectl && mv kubectl /usr/local/bin/
+                  }
+
+                  # Install Python deps if not pre-baked
+                  pip show requests >/dev/null 2>&1 || pip install requests python-dotenv --quiet
+
+                  echo "[baseline-learn] Learning for environment: $ENVIRONMENT (last 60 min)..."
+                  set +e
+                  python3 core/trace_fingerprint.py \
+                      --environment "$ENVIRONMENT" \
+                      learn --window-minutes 60
+                  LEARN_RC=$?
+                  set -e
+                  if [ $LEARN_RC -ne 0 ]; then
+                    echo "[baseline-learn] learn failed - emitting alert event"
+                    python3 -c "import json,os,time,urllib.request; tok=os.environ.get('SPLUNK_INGEST_TOKEN') or os.environ.get('SPLUNK_ACCESS_TOKEN',''); rlm=os.environ.get('SPLUNK_REALM','us1'); env=os.environ.get('ENVIRONMENT','unknown'); body=json.dumps([{'eventType':'behavioral_baseline.learn_failed','category':'USER_DEFINED','dimensions':{'sf_environment':env},'properties':{'environment':env,'step':'learn','message':'baseline learn step failed'},'timestamp':int(time.time()*1000)}]).encode(); req=urllib.request.Request('https://ingest.'+rlm+'.signalfx.com/v2/event',data=body,headers={'X-SF-Token':tok,'Content-Type':'application/json'},method='POST'); urllib.request.urlopen(req,timeout=10)" || true
+                    exit 1
+                  fi
+
+                  echo "[baseline-learn] Promoting fingerprints..."
                   python3 core/trace_fingerprint.py \
                     --environment "$ENVIRONMENT" \
                     promote
@@ -94,21 +125,22 @@ spec:
                   FP_COUNT=$(python3 -c "import json; d=json.load(open('$BASELINE')); print(len(d['fingerprints']))")
                   echo "[baseline-learn] $FP_COUNT fingerprints learned"
 
-                  echo "[baseline-learn] Updating ConfigMap..."
+                  echo "[baseline-learn] Updating ConfigMap (delete+create)..."
                   kubectl delete configmap behavioral-baseline --ignore-not-found
                   kubectl create configmap behavioral-baseline \
                     --from-file=baseline.json="$BASELINE"
 
                   echo "[baseline-learn] Injecting into pods..."
+                  INJECTED=0
                   for pod in $(kubectl get pods -l app=otelcol-fingerprint \
                       --field-selector=status.phase=Running \
                       -o jsonpath='{.items[*].metadata.name}'); do
                     kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol \
-                      && echo "  $pod: ok" \
+                      && echo "  $pod: ok" && INJECTED=$((INJECTED+1)) \
                       || echo "  $pod: skipped"
                   done
 
-                  echo "[baseline-learn] Done. $FP_COUNT fingerprints active."
+                  echo "[baseline-learn] Done: $FP_COUNT fingerprints active in $INJECTED pod(s)."
               volumeMounts:
                 - name: workspace
                   mountPath: /repo
@@ -137,6 +169,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
