@@ -90,6 +90,13 @@ spec:
                 secretKeyRef:
                   name: triage-secret
                   key: ANTHROPIC_API_KEY
+                  optional: true   # not required if using Groq
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: triage-secret
+                  key: GROQ_API_KEY
+                  optional: true   # not required if using Anthropic/Bedrock
             - name: TRIAGE_WEBHOOK_URL
               valueFrom:
                 secretKeyRef:
@@ -129,6 +136,17 @@ spec:
         - name: data
           emptyDir: {}   # triage_result events go to Splunk, not local disk
 ---
-# triage-secret template — create once:
-# kubectl create secret generic triage-secret \
-#   --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+# triage-secret template — create with whichever key(s) you have:
+#
+# Groq (free tier — get key at console.groq.com):
+#   kubectl create secret generic triage-secret \
+#     --from-literal=GROQ_API_KEY=gsk_...
+#
+# Anthropic:
+#   kubectl create secret generic triage-secret \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+#
+# Both (Anthropic tried first, Groq as fallback):
+#   kubectl create secret generic triage-secret \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+#     --from-literal=GROQ_API_KEY=gsk_...
