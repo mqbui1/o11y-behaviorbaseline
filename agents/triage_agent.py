@@ -70,6 +70,30 @@ except ImportError:
     _CORRELATE_AVAILABLE = False
 
 try:
+    from agents.slo_impact_estimator import estimate_impact as _slo_estimate
+    _SLO_AVAILABLE = True
+except ImportError:
+    _SLO_AVAILABLE = False
+
+try:
+    from agents.drift_explainer import explain_drift as _explain_drift
+    _DRIFT_EXPLAINER_AVAILABLE = True
+except ImportError:
+    _DRIFT_EXPLAINER_AVAILABLE = False
+
+try:
+    from agents.dedup_agent import run as _dedup_run
+    _DEDUP_AVAILABLE = True
+except ImportError:
+    _DEDUP_AVAILABLE = False
+
+try:
+    from agents.multi_env_correlator import run as _multi_env_run
+    _MULTI_ENV_AVAILABLE = True
+except ImportError:
+    _MULTI_ENV_AVAILABLE = False
+
+try:
     import boto3
     _BOTO3_AVAILABLE = True
 except ImportError:
@@ -611,6 +635,47 @@ def triage_anomaly(corr: dict, traces: list[dict], dry_run: bool = False,
         except Exception as e:
             print(f"  [warn] Hypothesis engine: {e}", file=sys.stderr)
 
+    # ── SLO impact: error rate, p99 latency, budget burn ──────────────────────
+    if _SLO_AVAILABLE and not dry_run:
+        try:
+            slo = _slo_estimate(corr["service"], environment, window_minutes)
+            if not slo.get("no_data"):
+                context_parts += [
+                    "",
+                    "## SLO Impact",
+                    slo["one_liner"],
+                ]
+                if slo.get("budget"):
+                    b = slo["budget"]
+                    context_parts.append(
+                        f"- Error rate: {slo['error_rate_pct']}%  "
+                        f"Budget remaining: {b.get('budget_remaining_pct', 'n/a')}%  "
+                        f"Burn rate: {b.get('burn_rate', 'n/a')}x"
+                    )
+                if slo.get("p99_latency_ms") is not None:
+                    context_parts.append(
+                        f"- p99 latency: {slo['p99_latency_ms']}ms "
+                        f"(target: {slo['p99_target_ms']}ms, "
+                        f"status: {slo['latency_status']})"
+                    )
+        except Exception as e:
+            print(f"  [warn] SLO estimator: {e}", file=sys.stderr)
+
+    # ── Drift explainer: plain-English trace path diff ────────────────────────
+    if _DRIFT_EXPLAINER_AVAILABLE and not dry_run and "NEW_FINGERPRINT" in corr.get("anomaly_types", []):
+        try:
+            drift = _explain_drift(corr["service"], environment,
+                                   window_minutes=window_minutes, diff_only=True)
+            explanation = drift.get("explanation", "")
+            if explanation and "No drift detected" not in explanation:
+                context_parts += [
+                    "",
+                    "## Drift Explanation",
+                    explanation[:800],
+                ]
+        except Exception as e:
+            print(f"  [warn] Drift explainer: {e}", file=sys.stderr)
+
     user_message = "\n".join(context_parts)
 
     if dry_run:
@@ -913,11 +978,32 @@ def main() -> None:
         print("  Press Ctrl+C to stop.\n")
         while True:
             try:
+                # 1. Dedup: consolidate raw anomaly events into incidents
+                if _DEDUP_AVAILABLE:
+                    try:
+                        _dedup_run(args.window_minutes, args.environment,
+                                   dry_run=args.dry_run)
+                    except Exception as e:
+                        print(f"  [warn] Dedup agent: {e}", file=sys.stderr)
+
+                # 2. Multi-env: detect anomalies propagating across environments
+                if _MULTI_ENV_AVAILABLE:
+                    try:
+                        _multi_env_run(
+                            lookback_hours=max(1, args.window_minutes // 60),
+                            dry_run=args.dry_run,
+                        )
+                    except Exception as e:
+                        print(f"  [warn] Multi-env correlator: {e}", file=sys.stderr)
+
+                # 3. Recovery check: clear suppression for restored services
                 run_recovery_check(
                     window_minutes=args.window_minutes,
                     environment=args.environment,
                     webhook_url=args.webhook_url,
                 )
+
+                # 4. Triage: correlate + AI analysis for new anomalies
                 run_triage(
                     window_minutes=args.window_minutes,
                     environment=args.environment,
