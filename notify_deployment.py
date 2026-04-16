@@ -118,38 +118,64 @@ def _request(method: str, path: str, body: dict | None = None,
 def trigger_relearn(environment: str | None, delay_minutes: int = RELEARN_DELAY_MINUTES,
                     dry_run: bool = False) -> None:
     """
-    Spawn a detached background process that waits `delay_minutes` then runs
-    trace_fingerprint.py learn and error_fingerprint.py learn for the environment.
-    Returns immediately — the CD pipeline is not blocked.
+    Trigger a baseline re-learn after a deployment.
+
+    Strategy (in priority order):
+      1. In-cluster CronJob: kubectl create job --from=cronjob/baseline-learn
+         Survives laptop close/CI job exit. Preferred when running in-cluster
+         or when kubectl is available.
+      2. Local subprocess fallback: sleep N && python3 trace_fingerprint.py learn
+         Used when kubectl is not available (local dev without cluster access).
     """
-    env_args = ["--environment", environment] if environment else []
-    delay_s  = delay_minutes * 60
-    learn_args = " ".join(env_args + ["learn", "--window-minutes", "30"])
-
-    # Build a shell one-liner: sleep, then run both learns sequentially
-    cmd = (
-        f"sleep {delay_s} && "
-        f"{sys.executable} {SCRIPT_DIR}/trace_fingerprint.py {learn_args} "
-        f">> /tmp/bab_relearn_deploy.log 2>&1 && "
-        f"{sys.executable} {SCRIPT_DIR}/error_fingerprint.py {learn_args} "
-        f">> /tmp/bab_relearn_deploy.log 2>&1"
-    )
-
     env_label = environment or "all"
+
     if dry_run:
-        print(f"  [dry-run] Would trigger re-learn for '{env_label}' "
-              f"in {delay_minutes}m")
+        print(f"  [dry-run] Would trigger re-learn for '{env_label}' in {delay_minutes}m")
         return
 
-    # start_new_session=True detaches from the parent process group so it
-    # survives even if the CI job exits immediately after this script returns.
+    # Strategy 1: trigger in-cluster CronJob via kubectl
+    if _kubectl_available():
+        import time as _time
+        job_name = f"baseline-learn-deploy-{int(_time.time())}"
+        result = subprocess.run(
+            ["kubectl", "create", "job", "--from=cronjob/baseline-learn", job_name],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"  [scheduled] in-cluster baseline-learn job created: {job_name}")
+            print(f"    kubectl logs -l app=baseline-learn --tail=50")
+            return
+        # CronJob may not exist yet (first deploy) — fall through to local
+        print(f"  [warn] kubectl job create failed ({result.stderr.strip()}) — "
+              f"falling back to local relearn")
+
+    # Strategy 2: local subprocess (survives as detached process)
+    env_args  = ["--environment", environment] if environment else []
+    delay_s   = delay_minutes * 60
+    learn_args = " ".join(env_args + ["learn", "--window-minutes", "30"])
+    cmd = (
+        f"sleep {delay_s} && "
+        f"{sys.executable} {SCRIPT_DIR}/core/trace_fingerprint.py {learn_args} "
+        f">> /tmp/bab_relearn_deploy.log 2>&1"
+    )
     subprocess.Popen(
         cmd, shell=True, start_new_session=True,
         env={**os.environ},
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    print(f"  [scheduled] baseline re-learn for '{env_label}' "
-          f"in {delay_minutes}m (background)")
+    print(f"  [scheduled] local baseline re-learn for '{env_label}' in {delay_minutes}m")
+
+
+def _kubectl_available() -> bool:
+    """Return True if kubectl is on PATH and can reach the cluster."""
+    try:
+        result = subprocess.run(
+            ["kubectl", "get", "cronjob", "baseline-learn", "--no-headers"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 # ── Event emission ─────────────────────────────────────────────────────────────
