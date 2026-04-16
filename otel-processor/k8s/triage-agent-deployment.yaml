@@ -1,0 +1,151 @@
+# triage-agent Deployment
+# ========================
+# Runs agents/triage_agent.py in poll mode as a long-running Deployment so
+# AI-powered triage happens cluster-natively without needing a laptop or VM.
+#
+# The agent polls Splunk every TRIAGE_POLL_INTERVAL seconds for new
+# behavioral_baseline.correlated_anomaly events, calls Claude via AWS Bedrock,
+# and routes the plain-English triage summary to a webhook (Slack, PagerDuty).
+#
+# Prerequisites:
+#   - workshop-secret: api_token, access_token, realm, env
+#   - aws-credentials secret: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+#     (or use an IAM instance profile on the node for keyless auth)
+#   - TRIAGE_WEBHOOK_URL env var: Slack incoming webhook URL
+#
+# Deploy:
+#   kubectl apply -f triage-agent-deployment.yaml
+#
+# Logs:
+#   kubectl logs -l app=triage-agent --tail=50 -f
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triage-agent
+  namespace: default
+  labels:
+    app: triage-agent
+spec:
+  replicas: 1                       # single instance — poll mode is stateless
+  selector:
+    matchLabels:
+      app: triage-agent
+  template:
+    metadata:
+      labels:
+        app: triage-agent
+    spec:
+      serviceAccountName: baseline-sync   # reuse existing SA (read ConfigMaps)
+      initContainers:
+        - name: git-sync
+          image: alpine/git:latest
+          env:
+            - name: GIT_SHA
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: git_sha
+                  optional: true
+          command:
+            - sh
+            - -c
+            - |
+              if [ -n "$GIT_SHA" ] && [ "$GIT_SHA" != "main" ]; then
+                git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                git -C /repo checkout "$GIT_SHA"
+                echo "Repo pinned to $GIT_SHA"
+              else
+                git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                echo "Repo at: $(git -C /repo rev-parse --short HEAD)"
+              fi
+          volumeMounts:
+            - name: workspace
+              mountPath: /repo
+      containers:
+        - name: triage-agent
+          image: localhost:9999/baseline-learn:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPLUNK_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: api_token
+            - name: SPLUNK_REALM
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: realm
+            - name: SPLUNK_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: access_token
+            - name: WORKSHOP_ENVIRONMENT
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: env
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true   # omit if using instance profile
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_REGION
+                  optional: true
+            - name: TRIAGE_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: triage_webhook_url
+                  optional: true   # omit to disable webhook routing
+            - name: TRIAGE_POLL_INTERVAL
+              value: "60"
+            - name: TRIAGE_WINDOW_MINUTES
+              value: "15"
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              cd /repo
+              pip show requests boto3 >/dev/null 2>&1 || pip install requests boto3 --quiet
+              echo "[triage-agent] Starting poll mode..."
+              exec python3 agents/triage_agent.py \
+                --environment "$WORKSHOP_ENVIRONMENT" \
+                --mode poll
+          resources:
+            limits:
+              memory: 256Mi
+              cpu: 100m
+            requests:
+              memory: 128Mi
+              cpu: 20m
+          volumeMounts:
+            - name: workspace
+              mountPath: /repo
+            - name: data
+              mountPath: /repo/data
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: data
+          emptyDir: {}   # triage_result events go to Splunk, not local disk
+---
+# aws-credentials Secret template (fill in your values or use IAM instance profile)
+# kubectl create secret generic aws-credentials \
+#   --from-literal=AWS_ACCESS_KEY_ID=AKIA... \
+#   --from-literal=AWS_SECRET_ACCESS_KEY=... \
+#   --from-literal=AWS_REGION=us-west-2
