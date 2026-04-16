@@ -4,14 +4,12 @@
 # AI-powered triage happens cluster-natively without needing a laptop or VM.
 #
 # The agent polls Splunk every TRIAGE_POLL_INTERVAL seconds for new
-# behavioral_baseline.correlated_anomaly events, calls Claude via AWS Bedrock,
+# behavioral_baseline.correlated_anomaly events, calls Claude via Anthropic API,
 # and routes the plain-English triage summary to a webhook (Slack, PagerDuty).
 #
 # Prerequisites:
 #   - workshop-secret: api_token, access_token, realm, env
-#   - aws-credentials secret: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
-#     (or use an IAM instance profile on the node for keyless auth)
-#   - TRIAGE_WEBHOOK_URL env var: Slack incoming webhook URL
+#   - triage-secret: ANTHROPIC_API_KEY
 #
 # Deploy:
 #   kubectl apply -f triage-agent-deployment.yaml
@@ -87,24 +85,11 @@ spec:
                 secretKeyRef:
                   name: workshop-secret
                   key: env
-            - name: AWS_ACCESS_KEY_ID
+            - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: aws-credentials
-                  key: AWS_ACCESS_KEY_ID
-                  optional: true   # omit if using instance profile
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: aws-credentials
-                  key: AWS_SECRET_ACCESS_KEY
-                  optional: true
-            - name: AWS_REGION
-              valueFrom:
-                secretKeyRef:
-                  name: aws-credentials
-                  key: AWS_REGION
-                  optional: true
+                  name: triage-secret
+                  key: ANTHROPIC_API_KEY
             - name: TRIAGE_WEBHOOK_URL
               valueFrom:
                 secretKeyRef:
@@ -121,7 +106,7 @@ spec:
             - |
               set -eu
               cd /repo
-              pip show requests boto3 >/dev/null 2>&1 || pip install requests boto3 --quiet
+              pip show requests >/dev/null 2>&1 || pip install requests --quiet
               echo "[triage-agent] Starting poll mode..."
               exec python3 agents/triage_agent.py \
                 --environment "$WORKSHOP_ENVIRONMENT" \
@@ -144,8 +129,6 @@ spec:
         - name: data
           emptyDir: {}   # triage_result events go to Splunk, not local disk
 ---
-# aws-credentials Secret template (fill in your values or use IAM instance profile)
-# kubectl create secret generic aws-credentials \
-#   --from-literal=AWS_ACCESS_KEY_ID=AKIA... \
-#   --from-literal=AWS_SECRET_ACCESS_KEY=... \
-#   --from-literal=AWS_REGION=us-west-2
+# triage-secret template — create once:
+# kubectl create secret generic triage-secret \
+#   --from-literal=ANTHROPIC_API_KEY=sk-ant-...
