@@ -107,7 +107,7 @@ _DEFAULT_BEDROCK_MODEL = (
 )
 CLAUDE_MODEL        = os.environ.get("CLAUDE_MODEL", _DEFAULT_BEDROCK_MODEL)
 POLL_INTERVAL       = int(os.environ.get("TRIAGE_POLL_INTERVAL", "60"))
-DEFAULT_WINDOW_MIN  = int(os.environ.get("TRIAGE_WINDOW_MINUTES", "15"))
+DEFAULT_WINDOW_MIN  = int(os.environ.get("TRIAGE_WINDOW_MINUTES", "30"))
 WEBHOOK_URL         = os.environ.get("TRIAGE_WEBHOOK_URL")
 
 # Max traces to fetch per anomaly service for context
@@ -115,12 +115,16 @@ MAX_TRACES_PER_SERVICE = 3
 # Max spans to include in the Claude prompt (keep tokens manageable)
 MAX_SPANS_IN_PROMPT = 30
 
-# ── Triage dedup state (persisted across cron restarts) ───────────────────────
-# Keys are "service:corr_type:timestamp_ms". Stored in data/ so once-mode cron
-# runs don't re-triage the same correlated event every 5 minutes.
+# ── Triage dedup state ────────────────────────────────────────────────────────
+# Key format: "service:corr_type" — suppresses re-triage of the same ongoing
+# anomaly for TRIAGE_SEEN_TTL_S seconds. Using service:corr_type (not timestamp)
+# means a persisting anomaly won't be re-triaged every cycle.
+# State is persisted to a K8s ConfigMap when available so it survives pod
+# restarts; falls back to the local data/ directory.
 
-_DATA_DIR = Path(__file__).parent.parent / "data"
-_TRIAGE_SEEN_TTL_S = 3600  # forget seen keys after 1 hour
+_DATA_DIR          = Path(__file__).parent.parent / "data"
+_TRIAGE_SEEN_TTL_S = int(os.environ.get("TRIAGE_SUPPRESS_MINUTES", "30")) * 60
+_SEEN_CONFIGMAP    = os.environ.get("TRIAGE_SEEN_CONFIGMAP", "triage-agent-seen-state")
 
 
 def _triage_seen_path(environment: str | None) -> Path:
@@ -129,19 +133,33 @@ def _triage_seen_path(environment: str | None) -> Path:
 
 
 def _load_triage_seen(environment: str | None) -> dict[str, float]:
-    """Load {key: seen_epoch_s} from disk, expiring entries older than TTL."""
-    p = _triage_seen_path(environment)
-    if not p.exists():
-        return {}
+    """Load {key: seen_epoch_s}, expiring entries older than TTL.
+    Tries K8s ConfigMap first, falls back to local file."""
+    # Try ConfigMap (survives pod restarts)
     try:
-        raw: dict[str, float] = json.loads(p.read_text())
-        cutoff = time.time() - _TRIAGE_SEEN_TTL_S
-        return {k: v for k, v in raw.items() if v > cutoff}
+        import urllib.request as _ur
+        cm_url = (f"http://localhost:8001/api/v1/namespaces/default/configmaps/"
+                  f"{_SEEN_CONFIGMAP}")
+        with _ur.urlopen(cm_url, timeout=2) as r:
+            cm = json.loads(r.read())
+        env = environment or "all"
+        raw_str = (cm.get("data") or {}).get(f"seen.{env}.json", "{}")
+        raw: dict[str, float] = json.loads(raw_str)
     except Exception:
-        return {}
+        # Fall back to local file
+        p = _triage_seen_path(environment)
+        if not p.exists():
+            return {}
+        try:
+            raw = json.loads(p.read_text())
+        except Exception:
+            return {}
+    cutoff = time.time() - _TRIAGE_SEEN_TTL_S
+    return {k: v for k, v in raw.items() if v > cutoff}
 
 
 def _save_triage_seen(environment: str | None, seen: dict[str, float]) -> None:
+    """Persist seen state to local file (ConfigMap patching requires kubectl)."""
     try:
         _triage_seen_path(environment).write_text(json.dumps(seen))
     except Exception as e:
@@ -639,6 +657,74 @@ def send_to_webhook(webhook_url: str, corr: dict, summary: str) -> None:
         print(f"  [warn] Webhook delivery failed: {e}", file=sys.stderr)
 
 
+# ── Recovery detection ────────────────────────────────────────────────────────
+
+def run_recovery_check(window_minutes: int, environment: str | None,
+                       webhook_url: str | None) -> int:
+    """
+    Check for trace.path.restored events and clear suppression state for
+    any service that has recovered. Sends a recovery notification to the
+    webhook if configured. Returns number of recoveries detected.
+    """
+    now_ms   = int(time.time() * 1000)
+    start_ms = now_ms - window_minutes * 60 * 1000
+    raw = _signalflow_events("trace.path.restored", start_ms, now_ms)
+
+    seen = _load_triage_seen(environment)
+    recovered = 0
+    notified: set[str] = set()
+
+    for msg in raw:
+        dims     = msg.get("metadata", {})
+        props    = msg.get("properties", {})
+        event_env = dims.get("sf_environment") or dims.get("environment") or props.get("environment")
+        if environment and event_env and event_env not in (environment, "all"):
+            continue
+        service = dims.get("service") or rootService(dims.get("root_operation", ""))
+        if not service or service in notified:
+            continue
+
+        # Clear all suppression keys for this service so next anomaly triages fresh
+        cleared = [k for k in list(seen.keys()) if k.startswith(f"{service}:")]
+        for k in cleared:
+            del seen[k]
+
+        root_op  = dims.get("root_operation", props.get("root_op", service))
+        fp_hash  = dims.get("fp_hash", props.get("hash", ""))
+        print(f"[recovery] {service} — trace path restored "
+              f"(root_op={root_op}, hash={fp_hash[:8]})")
+
+        if webhook_url:
+            text = (
+                f":large_green_circle: *Behavioral Baseline — Recovered*\n"
+                f"*Service:* {service}  |  *Root op:* {root_op}\n"
+                f"Trace path has returned to baseline. Suppression cleared."
+            )
+            body = json.dumps({"text": text}).encode()
+            req  = urllib.request.Request(
+                webhook_url, data=body,
+                headers={"Content-Type": "application/json"}, method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    r.read()
+                print(f"  Recovery notification sent to webhook.")
+            except Exception as e:
+                print(f"  [warn] Webhook delivery failed: {e}", file=sys.stderr)
+
+        notified.add(service)
+        recovered += 1
+
+    if recovered:
+        _save_triage_seen(environment, seen)
+    return recovered
+
+
+def rootService(root_op: str) -> str:
+    """Extract service name from root_op string (e.g. 'api-gateway:GET' → 'api-gateway')."""
+    return root_op.split(":")[0] if ":" in root_op else root_op
+
+
 # ── Core triage loop ───────────────────────────────────────────────────────────
 
 def _run_inline_correlation(start_ms: int, end_ms: int,
@@ -703,12 +789,13 @@ def run_triage(window_minutes: int, environment: str | None,
         print("  No correlated anomaly events found.")
         return 0
 
-    # Deduplicate: skip events already triaged (persisted to disk so once-mode
-    # cron runs don't re-triage the same event every cycle).
+    # Deduplicate: suppress re-triage of the same ongoing anomaly for
+    # TRIAGE_SUPPRESS_MINUTES. Key is service:corr_type so a persisting
+    # anomaly (e.g. visits-service still down) isn't re-triaged every cycle.
     seen = _load_triage_seen(environment)
     new_events = []
     for c in correlated:
-        key = f"{c['service']}:{c['corr_type']}:{c['timestamp_ms']}"
+        key = f"{c['service']}:{c['corr_type']}"
         if key not in seen:
             new_events.append((key, c))
 
@@ -821,20 +908,29 @@ def main() -> None:
         )
     else:
         print(f"[triage] Poll mode: checking every {args.poll_interval}s "
-              f"(window={args.window_minutes}m, env={args.environment or 'all'})")
+              f"(window={args.window_minutes}m, env={args.environment or 'all'}, "
+              f"suppress={_TRIAGE_SEEN_TTL_S//60}m)")
         print("  Press Ctrl+C to stop.\n")
         while True:
             try:
+                run_recovery_check(
+                    window_minutes=args.window_minutes,
+                    environment=args.environment,
+                    webhook_url=args.webhook_url,
+                )
                 run_triage(
                     window_minutes=args.window_minutes,
                     environment=args.environment,
                     webhook_url=args.webhook_url,
                     dry_run=args.dry_run,
                 )
-                time.sleep(args.poll_interval)
             except KeyboardInterrupt:
                 print("\n[triage] Stopped.")
                 break
+            except Exception as e:
+                print(f"[triage] [error] Poll cycle failed: {e} — continuing",
+                      file=sys.stderr)
+            time.sleep(args.poll_interval)
 
 
 if __name__ == "__main__":
