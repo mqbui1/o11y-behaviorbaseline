@@ -53,6 +53,11 @@ ERROR_BASELINE_PATH = os.environ.get("ERROR_BASELINE_PATH", "/baseline/error_bas
 CONFIGMAP_NAME      = os.environ.get("CONFIGMAP_NAME", "behavioral-baseline")
 CONFIGMAP_NS        = os.environ.get("CONFIGMAP_NAMESPACE", "default")
 DRY_RUN             = os.environ.get("DRY_RUN", "false").lower() == "true"
+# How many trace.path.restored events within the window trigger a re-learn job.
+# A single restoration is normal (one service recovered). Multiple restorations
+# within one poll window suggest a broader recovery — re-learn immediately.
+RESTORE_RELEARN_THRESHOLD = int(os.environ.get("RESTORE_RELEARN_THRESHOLD", "1"))
+LEARN_CRONJOB_NAME  = os.environ.get("LEARN_CRONJOB_NAME", "baseline-learn")
 
 if not SPLUNK_TOKEN:
     print("ERROR: SPLUNK_ACCESS_TOKEN is required", flush=True)
@@ -94,21 +99,100 @@ def _signalflow_events(event_type: str, start_ms: int, end_ms: int) -> list[dict
     return results
 
 
+def _filter_by_env(events: list[dict]) -> list[dict]:
+    """Filter events to our environment. If ENVIRONMENT is unset, return all."""
+    if not ENVIRONMENT:
+        return events
+    out = []
+    for msg in events:
+        dims = msg.get("metadata", {})
+        props = msg.get("properties", {})
+        env = dims.get("sf_environment") or props.get("environment", "")
+        if not env or env == ENVIRONMENT:
+            out.append(msg)
+    return out
+
+
 def has_promotion_events(start_ms: int, end_ms: int) -> bool:
     """Return True if any trace.fingerprint.promoted events exist in the window."""
-    events = _signalflow_events("trace.fingerprint.promoted", start_ms, end_ms)
-    if not events:
+    events = _filter_by_env(_signalflow_events("trace.fingerprint.promoted", start_ms, end_ms))
+    return len(events) > 0
+
+
+def count_restore_events(start_ms: int, end_ms: int) -> int:
+    """Return the number of trace.path.restored events in the window."""
+    events = _filter_by_env(_signalflow_events("trace.path.restored", start_ms, end_ms))
+    return len(events)
+
+
+def trigger_learn_job() -> bool:
+    """
+    Create a one-off Kubernetes Job from the baseline-learn CronJob template.
+    Uses the in-cluster service account token to call the Kubernetes API directly
+    (no kubectl binary needed in the sidecar container).
+    Returns True on success.
+    """
+    import time as _time
+    job_name = f"{LEARN_CRONJOB_NAME}-restore-{int(_time.time())}"
+
+    try:
+        sa_token = Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
+        ca_cert  = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    except Exception as e:
+        print(f"[warn] Could not read service account token: {e}", flush=True)
         return False
-    # Filter to our environment if set
-    if not ENVIRONMENT:
+
+    ctx = ssl.create_default_context(cafile=ca_cert)
+
+    # GET the CronJob spec to use as template for the Job
+    cj_url = (f"https://kubernetes.default.svc/apis/batch/v1/namespaces/{CONFIGMAP_NS}"
+              f"/cronjobs/{LEARN_CRONJOB_NAME}")
+    get_req = urllib.request.Request(
+        cj_url,
+        headers={"Authorization": f"Bearer {sa_token}", "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(get_req, context=ctx, timeout=10) as resp:
+            cj = json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"[warn] Could not fetch CronJob {LEARN_CRONJOB_NAME}: {e}", flush=True)
+        return False
+
+    # Build a Job from the CronJob's jobTemplate
+    job_spec = cj.get("spec", {}).get("jobTemplate", {}).get("spec", {})
+    job_body = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name":      job_name,
+            "namespace": CONFIGMAP_NS,
+            "labels":    {"app": "baseline-learn", "trigger": "restore"},
+        },
+        "spec": job_spec,
+    }
+
+    jobs_url = (f"https://kubernetes.default.svc/apis/batch/v1/namespaces/{CONFIGMAP_NS}/jobs")
+    post_req = urllib.request.Request(
+        jobs_url,
+        data=json.dumps(job_body).encode(),
+        headers={
+            "Authorization": f"Bearer {sa_token}",
+            "Content-Type":  "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(post_req, context=ctx, timeout=10) as resp:
+            resp.read()
+        print(f"[baseline-sync] triggered learn job: {job_name}", flush=True)
         return True
-    for msg in events:
-        dims  = msg.get("metadata", {})
-        props = msg.get("properties", {})
-        env   = dims.get("sf_environment") or props.get("environment", "")
-        if not env or env == ENVIRONMENT:
-            return True
-    return False
+    except urllib.error.HTTPError as e:
+        print(f"[warn] Could not create learn job {e.code}: {e.read().decode()[:200]}", flush=True)
+        return False
+    except Exception as e:
+        print(f"[warn] Could not create learn job: {e}", flush=True)
+        return False
 
 
 def patch_configmap() -> bool:
@@ -219,6 +303,7 @@ def patch_configmap() -> bool:
 def main() -> None:
     print(f"[baseline-sync] starting — environment={ENVIRONMENT or 'any'} "
           f"poll={POLL_INTERVAL}s lookback={LOOKBACK_SECONDS}s "
+          f"restore_relearn_threshold={RESTORE_RELEARN_THRESHOLD} "
           f"dry_run={DRY_RUN}", flush=True)
 
     # On startup, do an initial sync to ensure ConfigMap matches the local files
@@ -226,23 +311,38 @@ def main() -> None:
     print("[baseline-sync] initial sync on startup...", flush=True)
     patch_configmap()
 
-    last_seen_ms = int(time.time() * 1000)
+    last_seen_ms     = int(time.time() * 1000)
+    last_learn_ms    = 0  # track when we last triggered a learn to avoid spamming
 
     while True:
         time.sleep(POLL_INTERVAL)
 
-        now_ms    = int(time.time() * 1000)
-        start_ms  = now_ms - (LOOKBACK_SECONDS * 1000)
-
-        # Only query events newer than what we've already processed
+        now_ms      = int(time.time() * 1000)
+        start_ms    = now_ms - (LOOKBACK_SECONDS * 1000)
         query_start = max(start_ms, last_seen_ms)
 
+        # ── Promotion events: sync ConfigMap ────────────────────────────────
         if has_promotion_events(query_start, now_ms):
             print("[baseline-sync] promotion event detected — syncing ConfigMap...",
                   flush=True)
             if patch_configmap():
                 last_seen_ms = now_ms
-        # else: no new promotions, nothing to do
+
+        # ── Restore events: trigger a full re-learn ──────────────────────────
+        # When services recover (trace.path.restored), the healthy baseline
+        # should be re-learned so future traces don't look like drift.
+        # Rate-limit: don't trigger more than once per 10 minutes.
+        restore_count = count_restore_events(query_start, now_ms)
+        learn_cooldown_ms = 10 * 60 * 1000
+        if (restore_count >= RESTORE_RELEARN_THRESHOLD
+                and (now_ms - last_learn_ms) > learn_cooldown_ms):
+            print(f"[baseline-sync] {restore_count} restore event(s) detected — "
+                  f"triggering baseline re-learn job...", flush=True)
+            if DRY_RUN:
+                print("[dry-run] Would create learn job", flush=True)
+                last_learn_ms = now_ms
+            elif trigger_learn_job():
+                last_learn_ms = now_ms
 
 
 if __name__ == "__main__":
