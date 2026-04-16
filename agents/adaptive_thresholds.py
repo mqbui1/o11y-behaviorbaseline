@@ -498,6 +498,7 @@ def run(environment: str | None, dry_run: bool,
     print(f"\n  Written to {THRESHOLDS_PATH}")
     print(f"  Add THRESHOLDS_PATH={THRESHOLDS_PATH} to your .env or environment "
           f"to have fingerprint scripts pick up per-service overrides.")
+    return thresholds
 
 
 def cmd_show() -> None:
@@ -532,6 +533,38 @@ def cmd_show() -> None:
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
+def _emit_thresholds_changed(thresholds: dict, environment: str | None) -> None:
+    """Emit a behavioral_baseline.thresholds_updated event to Splunk (best-effort)."""
+    services_changed = list(thresholds.get("services", {}).keys())
+    if not services_changed:
+        return
+    ingest_token = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
+    ingest_url   = f"https://ingest.{REALM}.signalfx.com"
+    body = json.dumps([{
+        "eventType": "behavioral_baseline.thresholds_updated",
+        "category":  "USER_DEFINED",
+        "dimensions": {"sf_environment": environment or "all"},
+        "properties": {
+            "environment":       environment or "all",
+            "services_tuned":    len(services_changed),
+            "service_list":      ",".join(services_changed[:10]),
+            "updated_at":        thresholds.get("_updated_at", ""),
+            "message":           f"Per-service thresholds updated for {len(services_changed)} service(s)",
+        },
+        "timestamp": int(time.time() * 1000),
+    }]).encode()
+    try:
+        req = urllib.request.Request(
+            f"{ingest_url}/v2/event", data=body,
+            headers={"X-SF-Token": ingest_token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        print("  [emit] behavioral_baseline.thresholds_updated sent to Splunk")
+    except Exception as e:
+        print(f"  [warn] Could not emit thresholds event: {e}", file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Adaptive Threshold Tuner — per-service anomaly sensitivity tuning"
@@ -544,14 +577,17 @@ def main() -> None:
                         help="Print current per-service thresholds and exit")
     parser.add_argument("--observation-days", type=int, default=OBSERVATION_DAYS,
                         help=f"Days of history to analyze (default: {OBSERVATION_DAYS})")
+    parser.add_argument("--emit", action="store_true",
+                        help="Emit behavioral_baseline.thresholds_updated event to Splunk after tuning")
     args = parser.parse_args()
 
     if args.show:
         cmd_show()
         return
 
-    obs_days = args.observation_days
-    run(args.environment, args.dry_run, obs_days)
+    result = run(args.environment, args.dry_run, args.observation_days)
+    if args.emit and result and not args.dry_run:
+        _emit_thresholds_changed(result, args.environment)
 
 
 if __name__ == "__main__":

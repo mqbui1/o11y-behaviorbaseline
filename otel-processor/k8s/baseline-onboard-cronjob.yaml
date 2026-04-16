@@ -1,0 +1,127 @@
+# baseline-onboard CronJob
+# =========================
+# Runs onboard.py --auto daily to auto-discover new environments in Splunk APM
+# and provision behavioral baseline detectors + seed the trace/error baselines.
+#
+# This makes environment lifecycle fully automatic:
+#   - New workshop cluster spins up → APM sends traces → onboard.py detects
+#     the new environment → provisions detectors, learns baseline, wires cron.
+#   - Environment goes quiet → onboard.py marks it inactive (no teardown by default).
+#
+# Uses the same workshop-secret as the baseline-learn CronJob.
+# Uses the baseline-sync ServiceAccount (already has ConfigMap + pod permissions).
+#
+# Trigger manually:
+#   kubectl create job --from=cronjob/baseline-onboard baseline-onboard-manual
+#
+# Check logs:
+#   kubectl logs -l app=baseline-onboard --tail=80
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: baseline-onboard
+  namespace: default
+spec:
+  schedule: "0 6 * * *"            # 6am UTC daily — after off-hours learn cycle
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: baseline-onboard
+        spec:
+          serviceAccountName: baseline-sync
+          restartPolicy: OnFailure
+          initContainers:
+            - name: git-sync
+              image: alpine/git:latest
+              env:
+                - name: GIT_SHA
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: git_sha
+                      optional: true
+              command:
+                - sh
+                - -c
+                - |
+                  if [ -n "$GIT_SHA" ] && [ "$GIT_SHA" != "main" ]; then
+                    if [ -d /repo/.git ]; then
+                      git -C /repo fetch --quiet
+                    else
+                      git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                    fi
+                    git -C /repo checkout "$GIT_SHA"
+                    echo "Repo pinned to $GIT_SHA"
+                  else
+                    if [ -d /repo/.git ]; then
+                      git -C /repo fetch --depth 1 --quiet origin main
+                      git -C /repo reset --hard origin/main
+                    else
+                      git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                    fi
+                    echo "Repo at latest main: $(git -C /repo rev-parse --short HEAD)"
+                  fi
+              volumeMounts:
+                - name: workspace
+                  mountPath: /repo
+          containers:
+            - name: onboard
+              image: localhost:9999/baseline-learn:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: SPLUNK_ACCESS_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: api_token
+                - name: SPLUNK_REALM
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: realm
+                - name: SPLUNK_INGEST_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: access_token
+                - name: ENVIRONMENT
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: env
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  cd /repo
+
+                  # Install Python deps if not pre-baked
+                  pip show requests >/dev/null 2>&1 || pip install requests python-dotenv --quiet
+
+                  echo "[baseline-onboard] Running auto-onboarding discovery..."
+                  set +e
+                  python3 onboard.py --auto --dry-run
+                  RC=$?
+                  set -e
+
+                  if [ $RC -ne 0 ]; then
+                    echo "[baseline-onboard] onboard.py failed (rc=$RC)"
+                    python3 -c "import json,os,time,urllib.request; tok=os.environ.get('SPLUNK_INGEST_TOKEN') or os.environ.get('SPLUNK_ACCESS_TOKEN',''); rlm=os.environ.get('SPLUNK_REALM','us1'); body=json.dumps([{'eventType':'behavioral_baseline.onboard_failed','category':'USER_DEFINED','dimensions':{'sf_environment':os.environ.get('ENVIRONMENT','unknown')},'properties':{'step':'onboard','message':'baseline-onboard CronJob failed'},'timestamp':int(time.time()*1000)}]).encode(); req=urllib.request.Request('https://ingest.'+rlm+'.signalfx.com/v2/event',data=body,headers={'X-SF-Token':tok,'Content-Type':'application/json'},method='POST'); urllib.request.urlopen(req,timeout=10)" || true
+                    exit 1
+                  fi
+
+                  echo "[baseline-onboard] Done."
+              volumeMounts:
+                - name: workspace
+                  mountPath: /repo
+          volumes:
+            - name: workspace
+              emptyDir: {}

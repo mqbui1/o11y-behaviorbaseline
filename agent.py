@@ -198,8 +198,9 @@ def load_similar_past_incidents(anomalies: list[dict], top_n: int = 5) -> list[d
 
 def record_incident_feedback(plan: dict, watch_result: dict, env: str) -> None:
     """
-    Append a resolved-incident record to data/incident_feedback.json.
-    Called after Claude produces a triage plan so future incidents can learn from it.
+    Append a resolved-incident record to data/incident_feedback.json AND emit
+    it as a behavioral_baseline.triage_result Splunk event so the feedback is
+    cluster-wide (not just local to whoever ran agent.py).
     Only records INCIDENT or DEGRADED severity (OK has no learning value).
     """
     if plan.get("severity") == "OK":
@@ -215,13 +216,29 @@ def record_incident_feedback(plan: dict, watch_result: dict, env: str) -> None:
         "resolved_at":   "",  # filled in manually or by a resolve hook
         "triage_action": plan.get("action", ""),
     }
+    # Write local file (fast lookup for future sessions on same machine)
     try:
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
         existing = json.loads(_FEEDBACK_FILE.read_text()) if _FEEDBACK_FILE.exists() else []
         existing.append(record)
         _FEEDBACK_FILE.write_text(json.dumps(existing, indent=2))
     except Exception:
-        pass  # feedback is best-effort — never fail the main flow
+        pass  # best-effort — never fail the main flow
+
+    # Also emit to Splunk so all agents (cluster-wide) benefit from this feedback
+    try:
+        import collect
+        collect.emit_event("behavioral_baseline.triage_result", {
+            "environment":     env,
+            "severity":        plan.get("severity", ""),
+            "anomaly_types":   ",".join(record["anomaly_types"]),
+            "services":        ",".join(record["services"]),
+            "confirmed_cause": record["confirmed_cause"],
+            "triage_action":   record["triage_action"],
+            "assessment":      plan.get("assessment", ""),
+        })
+    except Exception:
+        pass  # best-effort
 
 
 # ── 2. REASON ─────────────────────────────────────────────────────────────────
