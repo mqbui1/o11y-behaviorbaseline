@@ -35,6 +35,8 @@ Optional env vars:
   CLAUDE_MODEL              Bedrock model ID or inference profile ARN
                             (default: arn:aws:bedrock:us-west-2:387769110234:application-inference-profile/fky19kpnw2m7)
   AWS_REGION                AWS region for Bedrock (default: us-west-2)
+  GROQ_API_KEY              Groq API key (free tier at console.groq.com) — fallback after Bedrock+Anthropic
+  GROQ_MODEL                Groq model to use (default: llama-3.3-70b-versatile)
 """
 
 import argparse
@@ -57,6 +59,17 @@ except ImportError:
     _HYPOTHESIS_AVAILABLE = False
 
 try:
+    from core.correlate import (
+        fetch_anomaly_events as _correlate_fetch_anomaly_events,
+        fetch_deployment_events as _correlate_fetch_deployments,
+        correlate as _correlate_events,
+        send_correlated_event as _correlate_send_event,
+    )
+    _CORRELATE_AVAILABLE = True
+except ImportError:
+    _CORRELATE_AVAILABLE = False
+
+try:
     import boto3
     _BOTO3_AVAILABLE = True
 except ImportError:
@@ -76,6 +89,7 @@ ACCESS_TOKEN  = os.environ.get("SPLUNK_ACCESS_TOKEN")
 INGEST_TOKEN  = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
 REALM         = os.environ.get("SPLUNK_REALM", "us1")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")  # optional: direct API fallback
+GROQ_KEY      = os.environ.get("GROQ_API_KEY")        # optional: Groq fallback
 AWS_REGION    = os.environ.get("AWS_REGION", "us-west-2")
 
 if not ACCESS_TOKEN:
@@ -158,24 +172,28 @@ def _request(method: str, path: str, body: Any = None,
 
 def _claude_request(messages: list[dict], system: str) -> str:
     """
-    Call Claude. Tries AWS Bedrock first (uses ambient AWS credentials,
-    no extra cost if already on Bedrock). Falls back to direct Anthropic
-    API if ANTHROPIC_API_KEY is set.
+    Call an LLM. Priority order:
+      1. AWS Bedrock (ambient IAM credentials via boto3)
+      2. Anthropic direct API (ANTHROPIC_API_KEY)
+      3. Groq (GROQ_API_KEY) — free tier, no credit card needed
     """
     if _BOTO3_AVAILABLE:
         try:
             return _bedrock_request(messages, system)
         except Exception as e:
-            if ANTHROPIC_KEY:
-                print(f"  [warn] Bedrock failed ({e}), falling back to Anthropic API",
-                      file=sys.stderr)
-            else:
-                raise
+            print(f"  [warn] Bedrock failed ({e}), trying next backend",
+                  file=sys.stderr)
     if ANTHROPIC_KEY:
-        return _anthropic_direct_request(messages, system)
+        try:
+            return _anthropic_direct_request(messages, system)
+        except Exception as e:
+            print(f"  [warn] Anthropic API failed ({e}), trying next backend",
+                  file=sys.stderr)
+    if GROQ_KEY:
+        return _groq_request(messages, system)
     raise RuntimeError(
-        "No LLM backend available. Install boto3 (pip install boto3) for "
-        "Bedrock, or set ANTHROPIC_API_KEY for direct API access."
+        "No LLM backend available. Options: install boto3 for Bedrock, "
+        "set ANTHROPIC_API_KEY, or set GROQ_API_KEY (free at console.groq.com)."
     )
 
 
@@ -220,6 +238,36 @@ def _anthropic_direct_request(messages: list[dict], system: str) -> str:
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         raise RuntimeError(f"Anthropic API {e.code}: {raw[:300]}")
+
+
+def _groq_request(messages: list[dict], system: str) -> str:
+    """Call an LLM via Groq's OpenAI-compatible API (requires GROQ_API_KEY).
+    Free tier at console.groq.com — no credit card needed.
+    """
+    groq_model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    # Groq uses OpenAI chat format: system message as first entry
+    groq_messages = [{"role": "system", "content": system}] + messages
+    body = {
+        "model":      groq_model,
+        "max_tokens": 1024,
+        "messages":   groq_messages,
+    }
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {GROQ_KEY}",
+            "Content-Type":  "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode())
+            return result["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        raise RuntimeError(f"Groq API {e.code}: {raw[:300]}")
 
 
 # ── Splunk event fetching ──────────────────────────────────────────────────────
@@ -593,11 +641,48 @@ def send_to_webhook(webhook_url: str, corr: dict, summary: str) -> None:
 
 # ── Core triage loop ───────────────────────────────────────────────────────────
 
+def _run_inline_correlation(start_ms: int, end_ms: int,
+                             environment: str | None) -> list[dict]:
+    """
+    Run correlation inline (without a separate correlate.py CronJob).
+    Fetches tier2/tier3/tier1 anomaly events + deployments, runs correlate(),
+    emits correlated_anomaly events to Splunk, and returns the correlation
+    results in the same shape as fetch_correlated_anomaly_events().
+    """
+    anomaly_events = _correlate_fetch_anomaly_events(start_ms, end_ms, environment)
+    if not anomaly_events:
+        return []
+    deployments = _correlate_fetch_deployments(start_ms, end_ms, environment)
+    correlations = _correlate_events(anomaly_events, deployments)
+
+    results = []
+    for corr in correlations:
+        # Emit to Splunk so dashboards and other consumers can see it
+        try:
+            _correlate_send_event(corr)
+        except Exception as e:
+            print(f"  [warn] Could not emit correlated_anomaly event: {e}",
+                  file=sys.stderr)
+        results.append({
+            "service":       corr["service"],
+            "corr_type":     corr["corr_type"],
+            "severity":      corr["severity"],
+            "tiers":         corr["tiers"],
+            "anomaly_types": corr["anomaly_types"],
+            "messages":      corr["messages"],
+            "environment":   corr.get("environment", environment or "all"),
+            "timestamp_ms":  corr.get("latest_ms", end_ms),
+            "deployment":    corr.get("deployment"),
+        })
+    return results
+
+
 def run_triage(window_minutes: int, environment: str | None,
                webhook_url: str | None, dry_run: bool) -> int:
     """
-    Fetch recent correlated anomaly events, triage each one with Claude,
-    and optionally route to webhook. Returns number of events triaged.
+    Run correlation inline, then triage each correlated anomaly with Claude.
+    Falls back to fetching pre-emitted correlated_anomaly events from Splunk
+    if the correlate module is unavailable. Returns number of events triaged.
     """
     now_ms   = int(time.time() * 1000)
     start_ms = now_ms - window_minutes * 60 * 1000
@@ -606,7 +691,13 @@ def run_triage(window_minutes: int, environment: str | None,
     print(f"[triage] Scanning {window_minutes}m window for correlated anomalies "
           f"({env_desc})...")
 
-    correlated = fetch_correlated_anomaly_events(start_ms, now_ms, environment)
+    if _CORRELATE_AVAILABLE:
+        correlated = _run_inline_correlation(start_ms, now_ms, environment)
+        if not correlated:
+            # Also check for any pre-emitted events (e.g. from a separate correlate run)
+            correlated = fetch_correlated_anomaly_events(start_ms, now_ms, environment)
+    else:
+        correlated = fetch_correlated_anomaly_events(start_ms, now_ms, environment)
 
     if not correlated:
         print("  No correlated anomaly events found.")
