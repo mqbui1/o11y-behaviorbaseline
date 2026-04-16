@@ -67,64 +67,66 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 │  all DaemonSet pods reload    │    │  └────────────────────┬────────────────┘   │
 │  within 60s (baseline_reload  │    │                       │                     │
 │  _interval)                   │    │  ┌────────────────────▼────────────────┐   │
-└───────────────────────────────┘    │  │  Custom Events (SignalFlow)          │   │
-                                     │  │  trace.path.drift        (Tier 2)   │   │
-                                     │  │  error.signature.drift   (Tier 3)   │   │
-                                     │  │  trace.fingerprint.promoted          │   │
-                                     │  │  deployment.started                  │   │
-                                     │  │  behavioral_baseline.*               │   │
-                                     │  └────────────────────┬────────────────┘   │
-                                     └───────────────────────│─────────────────────┘
-                                                             │
-                           ┌─────────────────────────────────┤
-                           │                                 │
-              ┌────────────▼──────────┐       ┌─────────────▼────────────────┐
-              │  watch_otel_events.py │       │  core/correlate.py           │
-              │                       │       │                              │
-              │  Fast-path triage     │       │  Joins Tier 1+2+3 by service │
-              │  queries SignalFlow   │       │  within a time window        │
-              │  for recent drift     │       │  deployment-aware downgrade  │
-              │  events (~30s lag)    │       │  ──▶  MULTI_TIER / Critical  │
-              └────────────┬──────────┘       └─────────────┬────────────────┘
-                           │                                 │
-                           │         JSON anomaly list       │
-                           └──────────────┬──────────────────┘
-                                          │
-                                          ▼
-                              ┌───────────────────────┐
-                              │  agent.py             │
-                              │  (AWS Bedrock/Claude) │
-                              │                       │
-                              │  severity: INCIDENT   │
-                              │  root_cause: ...      │
-                              │  action: PAGE_ONCALL  │
-                              └───────────┬───────────┘
-                                          │
-                          ┌───────────────┼───────────────┐
-                          ▼               ▼               ▼
-                    alerts.log    PAGE_ONCALL event   Splunk Dashboard
-                                  (Splunk ingest)
+└───────────┬───────────────────┘    │  │  Custom Events (SignalFlow)          │   │
+            │ seeded by              │  │  trace.path.drift        (Tier 2)   │   │
+            │ baseline-agent         │  │  error.signature.drift   (Tier 3)   │   │
+            ▼                        │  │  trace.fingerprint.promoted          │   │
+┌───────────────────────────────┐    │  │  deployment.started                  │   │
+│  baseline-agent  (Deployment) │    │  │  behavioral_baseline.*               │   │
+│                               │    │  └────────────────────┬────────────────┘   │
+│  learn every 2h               │    └───────────────────────│─────────────────────┘
+│  onboard check every 6h       │                            │
+│  anomaly rate poll every 2m   │        ┌───────────────────┘
+│                               │        │
+│  post-learn: noise pruning,   │        ▼
+│  coverage audit, adaptive     │  ┌─────────────────────────────────────────────┐
+│  thresholds, baseline monitor,│  │  triage-agent  (Deployment)                 │
+│  runbook gen, self-healing    │  │                                             │
+│                               │  │  polls every 60s                            │
+│  pushes to ConfigMap +        │  │  inline correlate.py (Tier 1+2+3 join)     │
+│  injects into DaemonSet pods  │  │  recovery detection (clears suppression)   │
+└───────────────────────────────┘  │  dedup: suppress same anomaly for 30m      │
+                                   │  LLM triage: Bedrock → Anthropic → Groq    │
+                                   │                                             │
+                                   │  severity: INCIDENT                         │
+                                   │  root_cause: ...                            │
+                                   │  action: PAGE_ONCALL                        │
+                                   └────────────────┬────────────────────────────┘
+                                                    │
+                                    ┌───────────────┼───────────────┐
+                                    ▼               ▼               ▼
+                              alerts.log    PAGE_ONCALL event   Splunk Dashboard
+                                            (Splunk ingest)
 ```
 
 ### Detection latency by path
 
 | Path | How | Latency |
 |------|-----|---------|
-| **OTel edge → `watch_otel_events.py` → `agent.py`** | Processor detects on first affected trace, event lands in Splunk, sidecar/watcher queries it | **~50s** (15s detect + 30s index + 5s triage) |
-| **OTel edge → `correlate.py`** | Same events consumed by correlate for multi-tier join | **~1–5 min** (cron interval) |
-| **Python APM polling → `agent.py`** | `trace_fingerprint.py watch` samples APM traces directly | **~1–5 min** (cron interval) |
-| **Splunk AutoDetect → `correlate.py`** | Native metric alerts joined with Tier 2/3 events | **~3–7 min** (metric aggregation + cron) |
+| **OTel edge → `triage-agent`** | Processor detects on first affected trace, event lands in Splunk, triage-agent inline-correlates and calls LLM | **~60–90s** (15s detect + 30s index + 60s poll cycle) |
+| **OTel edge → inline `correlate.py`** | Tier 2/3 events joined with Tier 1 AutoDetect incidents inside triage-agent | **~1–2 min** (triage-agent poll cycle) |
+| **Python APM polling → `agent.py`** | `trace_fingerprint.py watch` samples APM traces directly | **~1–5 min** (manual/scripted) |
+| **Splunk AutoDetect → inline `correlate.py`** | Native metric alerts joined with Tier 2/3 events | **~3–7 min** (metric aggregation + poll cycle) |
 
 ### Baseline lifecycle
 
 ```
-Manual / scheduled learn (Python)                  ←── daily cron (02:00 UTC)
-  python3 core/trace_fingerprint.py learn
-    └─▶ data/baseline.<env>.json
-  python3 core/error_fingerprint.py learn
-    └─▶ data/error_baseline.<env>.json
-          └─▶ sync-baseline.sh  ──▶  behavioral-baseline ConfigMap
-                └─▶ DaemonSet pods reload (init container on next restart)
+baseline-agent Deployment                          ←── long-running, no CronJobs needed
+  every 2h:
+    python3 core/trace_fingerprint.py learn + promote
+      └─▶ data/baseline.<env>.json
+    python3 core/error_fingerprint.py learn + promote
+      └─▶ data/error_baseline.<env>.json
+    post-learn: noise pruning → coverage audit → adaptive thresholds
+                baseline monitor (auto-fix) → runbook gen → dedup pruning
+                self-healing (auto re-learn after incident resolves)
+    push:
+      kubectl delete/create behavioral-baseline ConfigMap
+      kubectl cp baseline into each otelcol-fingerprint pod
+  every 6h:
+    onboard.py --auto  (discover new environments, provision detectors)
+  every 2m:
+    IncidentTracker: monitor anomaly rate → trigger immediate re-learn on incident
 
 OTel processor auto-promotion                      ←── continuous, threshold=10
 
@@ -149,28 +151,42 @@ OTel processor auto-promotion                      ←── continuous, thresho
 
 ```
 o11y-behaviorbaseline/
-├── agent.py                  ← unified agent (primary entry point)
+├── agent.py                  ← unified agent (perception-action loop, AWS Bedrock/Claude)
 ├── collect.py                ← all data fetching (topology, anomalies, SLO, deployments)
 ├── baseline.py               ← baseline data layer (load, summarize, health, learn, promote)
-├── onboard.py                ← provisioning + cron management
-├── notify_deployment.py      ← CI/CD hook (emits deployment.started events)
-├── watch_otel_events.py      ← fast-path triage: queries OTel edge events from Splunk (~10s)
+├── onboard.py                ← provisioning + detector management
+├── notify_deployment.py      ← CI/CD hook (emits deployment.started + triggers re-learn)
+├── watch_otel_events.py      ← fast-path triage: queries OTel edge events from Splunk
 ├── poll_drift_events.py      ← live terminal display: tails OTel collector logs via SSH
 │
-├── core/                     ← detection engine (called by agent + onboard)
+├── core/                     ← detection engine
 │   ├── trace_fingerprint.py        ← Tier 2: trace path drift
 │   ├── error_fingerprint.py        ← Tier 3: error signature drift
-│   ├── correlate.py                ← Tier C: cross-tier correlation
+│   ├── correlate.py                ← Tier C: cross-tier correlation (also used inline by triage-agent)
 │   └── provision_detectors.py      ← Tiers 1b/3/4: SignalFlow detectors
 │
-├── agents/                   ← standalone agents (superseded by agent.py)
-│   └── triage_agent.py, baseline_healer.py, drift_explainer.py, ...
+├── agents/                   ← long-running Deployment agents + standalone helpers
+│   ├── baseline_agent.py           ← Deployment: learn/onboard/heal lifecycle (replaces CronJobs)
+│   ├── triage_agent.py             ← Deployment: inline correlation + LLM triage, polls every 60s
+│   ├── baseline_healer.py          ← auto re-learn baseline after incident resolves
+│   ├── adaptive_thresholds.py      ← per-service threshold tuning
+│   ├── hypothesis_engine.py        ← BFS root cause ranking
+│   ├── dedup_agent.py              ← anomaly flood deduplication
+│   ├── deployment_risk_scorer.py   ← pre-deploy risk score
+│   ├── drift_explainer.py          ← edge-by-edge trace diff with LLM explanation
+│   ├── multi_env_correlator.py     ← cross-environment anomaly propagation
+│   ├── coverage_auditor.py         ← per-root-op baseline coverage
+│   ├── slo_impact_estimator.py     ← error budget burn rate
+│   ├── runbook_generator.py        ← generates RUNBOOK.<env>.md via Claude
+│   ├── noise_learner.py            ← learns app-specific noise patterns
+│   ├── baseline_monitor.py         ← baseline health checks (stale, contaminated, dupes)
+│   └── onboarding_advisor.py       ← traffic classification + config recommendations
 │
 └── data/                     ← runtime state (gitignored)
     ├── baseline.<env>.json
     ├── error_baseline.<env>.json
     ├── dedup_state.<env>.json
-    ├── otel_dedup_state.<env>.json  ← dedup state for watch_otel_events.py
+    ├── otel_dedup_state.<env>.json
     └── thresholds.json
 ```
 
@@ -275,28 +291,9 @@ python onboard.py --environment petclinicmbtest
 python onboard.py --auto
 ```
 
-`onboard.py` installs the following cron jobs automatically (tagged `# behavioral-baseline-managed`):
+In cluster deployments, the `baseline-agent` Deployment handles scheduling automatically — no cron jobs required. `onboard.py` is still available for standalone or local use.
 
-```
-# Per-environment (every 5 min)
-*/5 * * * *   core/trace_fingerprint.py --environment <env> watch
-*/5 * * * *   core/error_fingerprint.py --environment <env> watch
-*/5 * * * *   core/correlate.py --environment <env>
-*/5 * * * *   agents/dedup_agent.py --environment <env>
-
-# Per-environment (daily)
-0   2 * * *   core/trace_fingerprint.py --environment <env> learn
-0   2 * * *   core/error_fingerprint.py --environment <env> learn
-30  2 * * *   agents/noise_learner.py --environment <env> --apply
-0 */6 * * *   agents/baseline_healer.py --environment <env>
-0 */6 * * *   agents/baseline_monitor.py --environment <env>
-
-# Global (every 30 min)
-*/30 * * * *  agents/multi_env_correlator.py
-*/30 * * * *  onboard.py --auto
-```
-
-Teardown removes all per-environment entries:
+Teardown removes per-environment detectors:
 
 ```bash
 python onboard.py --teardown --environment petclinicmbtest
@@ -422,7 +419,9 @@ Tiers 2, 3, and C emit **custom events** queryable via SignalFlow:
 |----------|---------|-------------|
 | `SPLUNK_ACCESS_TOKEN` | required | API token (read/write) |
 | `SPLUNK_INGEST_TOKEN` | falls back to `SPLUNK_ACCESS_TOKEN` | Ingest token for writing custom events |
-| `SPLUNK_REALM` | `us0` | Splunk realm |
+| `SPLUNK_REALM` | `us1` | Splunk realm |
+| `ENVIRONMENT` | required | Single APM environment to monitor |
+| `ENVIRONMENTS` | — | Comma-separated list of environments (overrides `ENVIRONMENT`) |
 | `BASELINE_PATH` | `data/baseline.json` | Trace fingerprint baseline location |
 | `ERROR_BASELINE_PATH` | `data/error_baseline.json` | Error signature baseline location |
 | `THRESHOLDS_PATH` | `data/thresholds.json` | Per-service threshold overrides |
@@ -434,6 +433,14 @@ Tiers 2, 3, and C emit **custom events** queryable via SignalFlow:
 | `WATCH_SAMPLE_LIMIT` | `50` | Max traces fetched per watch run |
 | `AGENT_WINDOW_MINUTES` | `30` | Anomaly lookback window for `agent.py` |
 | `AWS_REGION` | `us-west-2` | AWS region for Bedrock (Claude) calls |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key (triage-agent fallback if Bedrock unavailable) |
+| `GROQ_API_KEY` | — | Groq API key (triage-agent second fallback, free tier) |
+| `LEARN_INTERVAL_MINUTES` | `120` | `baseline-agent`: minutes between learn cycles |
+| `ONBOARD_INTERVAL_MINUTES` | `360` | `baseline-agent`: minutes between onboard discovery cycles |
+| `HEAL_POLL_INTERVAL_S` | `120` | `baseline-agent`: seconds between anomaly rate checks |
+| `TRIAGE_POLL_INTERVAL_S` | `60` | `triage-agent`: seconds between correlation+triage cycles |
+| `TRIAGE_WINDOW_MINUTES` | `30` | `triage-agent`: lookback window for anomaly events |
+| `TRIAGE_SUPPRESS_MINUTES` | `30` | `triage-agent`: suppress re-triage for same anomaly within N minutes |
 
 ---
 
@@ -465,13 +472,29 @@ Anomaly types detected by `core/error_fingerprint.py`:
 
 ---
 
-## Standalone agents (`agents/`)
+## Agents (`agents/`)
 
-The `agents/` directory contains 14 single-purpose scripts built before `agent.py`. They remain available for targeted use:
+### Long-running Deployments
+
+Two agents run as Kubernetes Deployments in the cluster:
+
+| Deployment | Manifest | Purpose |
+|------------|----------|---------|
+| `baseline-agent` | `otel-processor/k8s/baseline-agent-deployment.yaml` | Learn/promote baselines every 2h, onboard new environments every 6h, monitor anomaly rate every 2m and auto-heal. Runs all post-learn steps inline (noise pruning, coverage audit, adaptive thresholds, baseline monitor, runbook gen). Pushes updated baseline to ConfigMap + injects into DaemonSet pods. |
+| `triage-agent` | `otel-processor/k8s/triage-agent-deployment.yaml` | Polls every 60s. Runs `correlate.py` inline to join Tier 1+2+3 signals. Calls Claude (Bedrock → Anthropic → Groq) for LLM triage. Deduplicates persistent anomalies (30m suppression). Detects recovery events and clears suppression state. |
+
+Deploy both:
+```bash
+kubectl apply -f otel-processor/k8s/baseline-agent-deployment.yaml
+kubectl apply -f otel-processor/k8s/triage-agent-deployment.yaml
+```
+
+### Standalone helper scripts
+
+The remaining scripts in `agents/` are available for targeted use or are called internally by the Deployment agents:
 
 | Script | Purpose |
 |--------|---------|
-| `triage_agent.py` | Claude summary of correlated anomalies + traces |
 | `baseline_healer.py` | Auto re-learns baseline after incident resolves |
 | `adaptive_thresholds.py` | Tunes per-service thresholds based on TP/FP history |
 | `hypothesis_engine.py` | BFS dependency walk + ranked root cause hypotheses |
@@ -486,7 +509,7 @@ The `agents/` directory contains 14 single-purpose scripts built before `agent.p
 | `baseline_monitor.py` | Health checks on baseline files (stale, contaminated, near-dupes) |
 | `onboarding_advisor.py` | Classifies env traffic, writes config recommendations |
 
-`agent.py` subsumes all of the above in a single perception-action loop. Use the standalone agents when you need targeted, per-concern observability or are debugging a specific dimension.
+`agent.py` provides a single perception-action loop that subsumes most of the above. The Deployment agents (`baseline-agent`, `triage-agent`) are the recommended production path.
 
 ---
 
@@ -696,8 +719,8 @@ All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprin
 
 ## Limitations
 
-- **Auto-promotion lag**: New patterns after a deployment will alert for up to `AUTO_PROMOTE_THRESHOLD × cron_interval` minutes. Use `promote` immediately after a known deployment to skip the wait.
+- **Auto-promotion lag**: New patterns after a deployment will alert until `baseline-agent` completes its next learn cycle (default: 2h). Use `notify_deployment.py` in your CI/CD pipeline to trigger an immediate re-learn via the running `baseline-agent` pod.
 - **Trace search cap**: The Splunk APM trace search API returns at most 200 traces per query, regardless of `WATCH_SAMPLE_LIMIT`. Low-frequency paths may need multiple learn windows to achieve full coverage.
 - **AutoDetect parent detectors**: Tiers 1b, 3, and 4 create `AutoDetectCustomization` children. The org-wide parent detectors must exist in your org — they are created automatically by Splunk Observability in all orgs with APM enabled.
-- **Bedrock credentials**: `agent.py` and the Claude-calling standalone agents require ambient AWS credentials with Bedrock access.
-- **Edge processor baseline sync**: After auto-promotion, the updated baseline is written to the mounted path on that pod only. Other DaemonSet pods pick it up on their next `baseline_reload_interval` tick only if the path points to a shared volume. For ConfigMap-mounted baselines (read-only), set `promotion_writeback: false` and run `sync-baseline.sh` after each Python learn/promote cycle instead.
+- **LLM credentials**: `triage-agent` tries Bedrock → Anthropic → Groq in order. At least one must have valid credentials and available credits. Groq offers a free tier — set `GROQ_API_KEY` in `triage-secret` as a fallback.
+- **Edge processor baseline sync**: After auto-promotion, the updated baseline is written to the mounted path on that pod only. Other DaemonSet pods pick it up on their next `baseline_reload_interval` tick. `baseline-agent` also pushes the baseline directly into each running pod every learn cycle via `kubectl cp`.
