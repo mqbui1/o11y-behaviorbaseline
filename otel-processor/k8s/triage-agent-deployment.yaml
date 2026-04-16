@@ -106,7 +106,9 @@ spec:
             - name: TRIAGE_POLL_INTERVAL
               value: "60"
             - name: TRIAGE_WINDOW_MINUTES
-              value: "15"
+              value: "30"
+            - name: TRIAGE_SUPPRESS_MINUTES
+              value: "30"
           command:
             - sh
             - -c
