@@ -188,13 +188,12 @@ echo ""
 # ── Step 7: Inject baseline directly into running pods ────────────────────────
 # The init container seeds /baseline from the ConfigMap at pod start. But since
 # we want the baseline active immediately (not after the next 60s reload cycle),
-# we write it directly into each pod's emptyDir volume.
+# we write it directly into each pod's emptyDir volume via kubectl cp.
+# kubectl cp works reliably on both Linux and macOS (no base64 line-wrap issues).
 echo "--- Step 7: Inject baseline into running pods ---"
-# base64 -w 0 disables line-wrapping on Linux; macOS base64 ignores -w
-B64=$(base64 -w 0 "$BASELINE" 2>/dev/null || base64 "$BASELINE" | tr -d '\n')
 for pod in $(kubectl get pods -l app=otelcol-fingerprint --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
   echo -n "  $pod: "
-  kubectl exec "$pod" -c otelcol -- sh -c "echo '$B64' | base64 -d > /baseline/baseline.json && echo ok" 2>&1 || echo "skipped (pod not ready)"
+  kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol 2>&1 && echo "ok" || echo "skipped (pod not ready)"
 done
 echo ""
 
