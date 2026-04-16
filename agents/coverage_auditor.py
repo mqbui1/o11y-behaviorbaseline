@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import time
+import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -48,8 +49,10 @@ if _ENV_FILE.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip())
 
-ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN")
-REALM        = os.environ.get("SPLUNK_REALM", "us1")
+ACCESS_TOKEN  = os.environ.get("SPLUNK_ACCESS_TOKEN")
+INGEST_TOKEN  = os.environ.get("SPLUNK_INGEST_TOKEN") or ACCESS_TOKEN
+REALM         = os.environ.get("SPLUNK_REALM", "us1")
+INGEST_URL    = f"https://ingest.{REALM}.signalfx.com"
 
 if not ACCESS_TOKEN:
     print("Error: SPLUNK_ACCESS_TOKEN is required.", file=sys.stderr)
@@ -265,6 +268,45 @@ def print_report(results: list[dict], warn_threshold: int) -> int:
     return 1 if has_low else 0
 
 
+# ── Event emission ────────────────────────────────────────────────────────────
+
+def emit_low_coverage_events(results: list[dict], environment: str | None) -> None:
+    """
+    Emit a behavioral_baseline.low_coverage event for each root_op with LOW coverage.
+    Called automatically when --emit is passed (e.g. from the CronJob).
+    """
+    low = [r for r in results if r.get("status") == "LOW" and r.get("live_total", 0) > 0]
+    if not low:
+        print("  [emit] All root ops have acceptable coverage — no events emitted.")
+        return
+    env_label = environment or "unknown"
+    for r in low:
+        body = json.dumps([{
+            "eventType": "behavioral_baseline.low_coverage",
+            "category":  "USER_DEFINED",
+            "dimensions": {"sf_environment": env_label, "root_op": r["root_op"]},
+            "properties": {
+                "environment":   env_label,
+                "root_op":       r["root_op"],
+                "coverage_pct":  r["coverage_pct"],
+                "live_total":    r["live_total"],
+                "matched":       r["matched"],
+                "message":       f"Coverage {r['coverage_pct']}% for {r['root_op']} — baseline may be stale",
+            },
+            "timestamp": int(time.time() * 1000),
+        }]).encode()
+        req = urllib.request.Request(
+            f"{INGEST_URL}/v2/event", data=body,
+            headers={"X-SF-Token": INGEST_TOKEN, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            print(f"  [emit] behavioral_baseline.low_coverage — {r['root_op']} ({r['coverage_pct']}%)")
+        except Exception as e:
+            print(f"  [warn] Could not emit coverage event: {e}", file=sys.stderr)
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -278,6 +320,8 @@ def main() -> None:
                         help=f"Coverage pct below which to warn (default: {DEFAULT_WARN_THRESHOLD})")
     parser.add_argument("--sample-limit",   type=int, default=DEFAULT_SAMPLE_LIMIT)
     parser.add_argument("--json",           action="store_true")
+    parser.add_argument("--emit",           action="store_true",
+                        help="Emit behavioral_baseline.low_coverage events to Splunk for LOW coverage root ops")
     args = parser.parse_args()
 
     print(f"[coverage-auditor] env={args.environment or 'all'}, "
@@ -293,6 +337,10 @@ def main() -> None:
         sys.exit(0)
 
     exit_code = print_report(results, args.threshold)
+
+    if args.emit:
+        emit_low_coverage_events(results, args.environment)
+
     sys.exit(exit_code)
 
 
