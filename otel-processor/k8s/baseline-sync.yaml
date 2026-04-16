@@ -243,6 +243,34 @@ spec:
                   echo "[baseline-learn] Pruning dedup state files..."
                   python3 -c "import json,time; from pathlib import Path; cutoff=time.time()-7*24*3600; [f.write_text(json.dumps({k:v for k,v in json.loads(f.read_text()).items() if isinstance(json.loads(f.read_text()),dict) and v.get('ts',0)>cutoff})) or print(f'  pruned {f.name}') for f in Path('data').glob('*dedup_state*.json')]" 2>/dev/null || true
 
+                  # 6. Baseline health monitor — check for stale entries, incident
+                  #    artifacts, near-duplicates, and low-confidence fingerprints.
+                  #    --auto-fix removes LOW_CONFIDENCE entries automatically.
+                  echo "[baseline-learn] Running baseline health monitor..."
+                  echo "$ENV_LIST" | tr ',' '\n' | while read -r ENV; do
+                    ENV=$(echo "$ENV" | tr -d ' ')
+                    [ -z "$ENV" ] && continue
+                    python3 agents/baseline_monitor.py --environment "$ENV" --auto-fix 2>/dev/null || true
+                  done
+
+                  # 7. Self-healing — if an incident recently resolved, pick the
+                  #    cleanest pre-incident window and re-learn the baseline from it.
+                  echo "[baseline-learn] Running self-healing check..."
+                  echo "$ENV_LIST" | tr ',' '\n' | while read -r ENV; do
+                    ENV=$(echo "$ENV" | tr -d ' ')
+                    [ -z "$ENV" ] && continue
+                    python3 agents/baseline_healer.py --environment "$ENV" --mode once 2>/dev/null || true
+                  done
+
+                  # 8. Runbook generation — write/refresh the incident runbook for
+                  #    each environment. Skips if runbook already exists and is fresh.
+                  echo "[baseline-learn] Refreshing incident runbooks..."
+                  echo "$ENV_LIST" | tr ',' '\n' | while read -r ENV; do
+                    ENV=$(echo "$ENV" | tr -d ' ')
+                    [ -z "$ENV" ] && continue
+                    python3 agents/runbook_generator.py --environment "$ENV" 2>/dev/null || true
+                  done
+
                   echo "[baseline-learn] All post-learn steps complete."
               volumeMounts:
                 - name: workspace

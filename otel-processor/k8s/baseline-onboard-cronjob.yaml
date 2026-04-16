@@ -118,6 +118,14 @@ spec:
                     exit 1
                   fi
 
+                  # Post-onboard: run onboarding advisor for detailed recommendations
+                  echo "[baseline-onboard] Running onboarding advisor..."
+                  python3 agents/onboarding_advisor.py --environment "$ENVIRONMENT" 2>/dev/null || true
+
+                  # Post-onboard: generate incident runbook for this environment
+                  echo "[baseline-onboard] Generating incident runbook..."
+                  python3 agents/runbook_generator.py --environment "$ENVIRONMENT" 2>/dev/null || true
+
                   echo "[baseline-onboard] Done."
               volumeMounts:
                 - name: workspace
