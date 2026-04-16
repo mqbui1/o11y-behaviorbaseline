@@ -58,6 +58,15 @@ DRY_RUN             = os.environ.get("DRY_RUN", "false").lower() == "true"
 # within one poll window suggest a broader recovery — re-learn immediately.
 RESTORE_RELEARN_THRESHOLD = int(os.environ.get("RESTORE_RELEARN_THRESHOLD", "1"))
 LEARN_CRONJOB_NAME  = os.environ.get("LEARN_CRONJOB_NAME", "baseline-learn")
+# Emit behavioral_baseline.stale event if ConfigMap not updated in this many seconds.
+STALENESS_THRESHOLD_S = int(os.environ.get("STALENESS_THRESHOLD_S", str(24 * 3600)))
+# baseline_reload_interval from the processor config (default 60s). Used to detect
+# pods that stopped reloading their local baseline file.
+BASELINE_RELOAD_INTERVAL_S = int(os.environ.get("BASELINE_RELOAD_INTERVAL_S", "60"))
+# Ingest URL for emitting alert events (needs ingest token, not API token)
+SPLUNK_INGEST_TOKEN = os.environ.get("SPLUNK_INGEST_TOKEN", "") or SPLUNK_TOKEN
+SPLUNK_INGEST_URL   = os.environ.get("SPLUNK_INGEST_URL",
+                                      f"https://ingest.{os.environ.get('SPLUNK_REALM', 'us1')}.signalfx.com")
 
 if not SPLUNK_TOKEN:
     print("ERROR: SPLUNK_ACCESS_TOKEN is required", flush=True)
@@ -195,6 +204,108 @@ def trigger_learn_job() -> bool:
         return False
 
 
+def _emit_event(event_type: str, properties: dict) -> None:
+    """Emit a custom event to Splunk Observability (best-effort, never raises)."""
+    if DRY_RUN:
+        print(f"[dry-run] Would emit {event_type}: {properties}", flush=True)
+        return
+    body = json.dumps([{
+        "eventType": event_type,
+        "category":  "USER_DEFINED",
+        "dimensions": {"sf_environment": ENVIRONMENT or "unknown",
+                       "detector":       "baseline-sync-sidecar"},
+        "properties": properties,
+        "timestamp":  int(time.time() * 1000),
+    }]).encode()
+    req = urllib.request.Request(
+        f"{SPLUNK_INGEST_URL}/v2/event",
+        data=body,
+        headers={"X-SF-Token": SPLUNK_INGEST_TOKEN, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"[warn] Could not emit {event_type}: {e}", flush=True)
+
+
+def get_configmap_update_time() -> float:
+    """
+    Return the last update timestamp of the behavioral-baseline ConfigMap as
+    a Unix timestamp (float). Returns 0.0 on any error.
+    """
+    try:
+        token  = Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
+        ca_cert = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        ctx    = ssl.create_default_context(cafile=ca_cert)
+        url    = (f"https://kubernetes.default.svc/api/v1/namespaces/{CONFIGMAP_NS}"
+                  f"/configmaps/{CONFIGMAP_NAME}")
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+            cm = json.loads(resp.read().decode())
+        ts_str = (cm.get("metadata", {}).get("managedFields", [{}])[-1]
+                  .get("time", "") or
+                  cm.get("metadata", {}).get("creationTimestamp", ""))
+        if ts_str:
+            import datetime
+            dt = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            return dt.timestamp()
+    except Exception as e:
+        print(f"[warn] Could not read ConfigMap timestamp: {e}", flush=True)
+    return 0.0
+
+
+def check_baseline_empty_and_bootstrap() -> None:
+    """
+    On startup: if the local baseline has 0 fingerprints, trigger a learn job
+    immediately so detection starts as soon as possible.
+    """
+    try:
+        data = json.loads(Path(BASELINE_PATH).read_text())
+        fp_count = len(data.get("fingerprints", {}))
+    except Exception:
+        fp_count = 0
+
+    if fp_count == 0:
+        print("[baseline-sync] baseline is empty — triggering bootstrap learn job...",
+              flush=True)
+        if DRY_RUN:
+            print("[dry-run] Would trigger bootstrap learn job", flush=True)
+        else:
+            trigger_learn_job()
+    else:
+        print(f"[baseline-sync] baseline has {fp_count} fingerprint(s) — no bootstrap needed",
+              flush=True)
+
+
+def check_local_baseline_staleness() -> None:
+    """
+    Warn if the local baseline file hasn't been updated in > 2× reload interval.
+    This catches cases where the processor stopped reloading (disk issue, permission
+    problem, etc.) — the file mtime would be stuck at pod-start time.
+    """
+    try:
+        mtime = Path(BASELINE_PATH).stat().st_mtime
+        age_s = time.time() - mtime
+        threshold_s = BASELINE_RELOAD_INTERVAL_S * 2
+        if age_s > threshold_s:
+            print(f"[warn] Local baseline file is {age_s:.0f}s old "
+                  f"(threshold {threshold_s}s) — processor may not be reloading",
+                  flush=True)
+            _emit_event("behavioral_baseline.pod_stale", {
+                "environment":    ENVIRONMENT or "unknown",
+                "baseline_age_s": int(age_s),
+                "threshold_s":    threshold_s,
+                "message":        f"Baseline file not updated in {age_s:.0f}s — processor reload may be stuck",
+            })
+    except Exception:
+        pass  # best-effort
+
+
 def patch_configmap() -> bool:
     """
     Read current baseline files from disk and patch the ConfigMap.
@@ -304,15 +415,19 @@ def main() -> None:
     print(f"[baseline-sync] starting — environment={ENVIRONMENT or 'any'} "
           f"poll={POLL_INTERVAL}s lookback={LOOKBACK_SECONDS}s "
           f"restore_relearn_threshold={RESTORE_RELEARN_THRESHOLD} "
+          f"staleness_threshold={STALENESS_THRESHOLD_S}s "
           f"dry_run={DRY_RUN}", flush=True)
 
-    # On startup, do an initial sync to ensure ConfigMap matches the local files
-    # (handles the case where this pod restarted after a promotion)
+    # ── Startup: bootstrap if baseline is empty ──────────────────────────────
+    check_baseline_empty_and_bootstrap()
+
+    # ── Startup: sync ConfigMap to match local files ─────────────────────────
     print("[baseline-sync] initial sync on startup...", flush=True)
     patch_configmap()
 
-    last_seen_ms     = int(time.time() * 1000)
-    last_learn_ms    = 0  # track when we last triggered a learn to avoid spamming
+    last_seen_ms      = int(time.time() * 1000)
+    last_learn_ms     = 0   # track when we last triggered a learn to avoid spamming
+    last_stale_alert_ms = 0  # rate-limit staleness alerts to once per staleness window
 
     while True:
         time.sleep(POLL_INTERVAL)
@@ -343,6 +458,29 @@ def main() -> None:
                 last_learn_ms = now_ms
             elif trigger_learn_job():
                 last_learn_ms = now_ms
+
+        # ── ConfigMap staleness check ─────────────────────────────────────────
+        # Alert if the ConfigMap hasn't been updated in > STALENESS_THRESHOLD_S.
+        # Rate-limit the alert to once per staleness window to avoid spam.
+        stale_cooldown_ms = STALENESS_THRESHOLD_S * 1000
+        if (now_ms - last_stale_alert_ms) > stale_cooldown_ms:
+            cm_update_time = get_configmap_update_time()
+            if cm_update_time > 0:
+                age_s = time.time() - cm_update_time
+                if age_s > STALENESS_THRESHOLD_S:
+                    print(f"[baseline-sync] ConfigMap is {age_s/3600:.1f}h old — emitting staleness alert",
+                          flush=True)
+                    _emit_event("behavioral_baseline.stale", {
+                        "environment":   ENVIRONMENT or "unknown",
+                        "age_hours":     round(age_s / 3600, 1),
+                        "threshold_hours": round(STALENESS_THRESHOLD_S / 3600, 1),
+                        "message":       f"Baseline ConfigMap not updated in {age_s/3600:.1f}h — scheduled learn may have failed",
+                    })
+                    last_stale_alert_ms = now_ms
+
+        # ── Local baseline file staleness check ───────────────────────────────
+        # Warn if the processor seems to have stopped reloading its local copy.
+        check_local_baseline_staleness()
 
 
 if __name__ == "__main__":
