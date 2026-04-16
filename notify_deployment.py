@@ -121,9 +121,8 @@ def trigger_relearn(environment: str | None, delay_minutes: int = RELEARN_DELAY_
     Trigger a baseline re-learn after a deployment.
 
     Strategy (in priority order):
-      1. In-cluster CronJob: kubectl create job --from=cronjob/baseline-learn
-         Survives laptop close/CI job exit. Preferred when running in-cluster
-         or when kubectl is available.
+      1. baseline-agent pod exec: runs --once inside the already-running
+         baseline-agent Deployment (no new pod spin-up, instant).
       2. Local subprocess fallback: sleep N && python3 trace_fingerprint.py learn
          Used when kubectl is not available (local dev without cluster access).
     """
@@ -133,21 +132,27 @@ def trigger_relearn(environment: str | None, delay_minutes: int = RELEARN_DELAY_
         print(f"  [dry-run] Would trigger re-learn for '{env_label}' in {delay_minutes}m")
         return
 
-    # Strategy 1: trigger in-cluster CronJob via kubectl
-    if _kubectl_available():
-        import time as _time
-        job_name = f"baseline-learn-deploy-{int(_time.time())}"
+    # Strategy 1: exec into the running baseline-agent pod
+    if _baseline_agent_available():
+        env_args = ["--environment", environment] if environment else []
         result = subprocess.run(
-            ["kubectl", "create", "job", "--from=cronjob/baseline-learn", job_name],
-            capture_output=True, text=True,
+            ["kubectl", "exec",
+             "$(kubectl get pod -l app=baseline-agent -o jsonpath='{.items[0].metadata.name}')",
+             "--", "python3", "/repo/agents/baseline_agent.py", "--once"] + env_args,
+            capture_output=True, text=True, shell=False,
         )
-        if result.returncode == 0:
-            print(f"  [scheduled] in-cluster baseline-learn job created: {job_name}")
-            print(f"    kubectl logs -l app=baseline-learn --tail=50")
+        # kubectl exec with subshell expansion requires shell=True
+        pod_result = subprocess.run(
+            "kubectl exec "
+            "$(kubectl get pod -l app=baseline-agent -o jsonpath='{.items[0].metadata.name}') "
+            f"-- python3 /repo/agents/baseline_agent.py --once "
+            + (" ".join(env_args)),
+            shell=True, capture_output=True, text=True, timeout=300,
+        )
+        if pod_result.returncode == 0:
+            print(f"  [triggered] baseline-agent re-learn for '{env_label}' (exec)")
             return
-        # CronJob may not exist yet (first deploy) — fall through to local
-        print(f"  [warn] kubectl job create failed ({result.stderr.strip()}) — "
-              f"falling back to local relearn")
+        print(f"  [warn] baseline-agent exec failed — falling back to local relearn")
 
     # Strategy 2: local subprocess (survives as detached process)
     env_args  = ["--environment", environment] if environment else []
@@ -166,14 +171,15 @@ def trigger_relearn(environment: str | None, delay_minutes: int = RELEARN_DELAY_
     print(f"  [scheduled] local baseline re-learn for '{env_label}' in {delay_minutes}m")
 
 
-def _kubectl_available() -> bool:
-    """Return True if kubectl is on PATH and can reach the cluster."""
+def _baseline_agent_available() -> bool:
+    """Return True if the baseline-agent Deployment pod is reachable via kubectl."""
     try:
         result = subprocess.run(
-            ["kubectl", "get", "cronjob", "baseline-learn", "--no-headers"],
+            ["kubectl", "get", "pod", "-l", "app=baseline-agent",
+             "--field-selector=status.phase=Running", "--no-headers"],
             capture_output=True, timeout=5,
         )
-        return result.returncode == 0
+        return result.returncode == 0 and bool(result.stdout.strip())
     except Exception:
         return False
 
