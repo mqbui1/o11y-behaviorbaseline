@@ -10,6 +10,13 @@
 # Two schedules: 2am UTC (off-hours baseline) + 10am UTC (peak-hours baseline).
 # They share the same CronJob spec - concurrencyPolicy: Forbid prevents overlap.
 #
+# Multi-environment: set ENVIRONMENTS in workshop-secret to a comma-separated list
+# (e.g. "env1,env2,env3") to learn baselines for multiple environments in one job.
+# Falls back to ENVIRONMENT (single env) for backwards compatibility.
+#
+# Git SHA pinning: set GIT_SHA in workshop-secret to pin the job to a specific
+# commit. Leave unset (or set to "main") to always use the latest main branch.
+#
 # Trigger manually (e.g. after a deploy):
 #   kubectl create job --from=cronjob/baseline-learn baseline-learn-manual
 #
@@ -38,19 +45,33 @@ spec:
           restartPolicy: OnFailure
           initContainers:
             # Clone (or update) the repo to get the latest trace_fingerprint.py.
-            # Uses an emptyDir shared with the learn container.
+            # If GIT_SHA is set, checks out that exact commit (safe, reproducible).
+            # If unset or "main", uses the latest main branch commit.
             - name: git-sync
               image: alpine/git:latest
+              env:
+                - name: GIT_SHA
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: git_sha
+                      optional: true   # key may not exist — falls back to main
               command:
                 - sh
                 - -c
                 - |
                   if [ -d /repo/.git ]; then
-                    git -C /repo pull --ff-only
+                    git -C /repo fetch --quiet
                   else
                     git clone https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
                   fi
-                  echo "Repo ready at $(git -C /repo rev-parse --short HEAD)"
+                  if [ -n "$GIT_SHA" ] && [ "$GIT_SHA" != "main" ]; then
+                    git -C /repo checkout "$GIT_SHA"
+                    echo "Repo pinned to $GIT_SHA"
+                  else
+                    git -C /repo checkout main && git -C /repo pull --ff-only
+                    echo "Repo at latest main: $(git -C /repo rev-parse --short HEAD)"
+                  fi
               volumeMounts:
                 - name: workspace
                   mountPath: /repo
@@ -84,6 +105,12 @@ spec:
                     secretKeyRef:
                       name: workshop-secret
                       key: env
+                - name: ENVIRONMENTS
+                  valueFrom:
+                    secretKeyRef:
+                      name: workshop-secret
+                      key: environments
+                      optional: true   # comma-separated list; falls back to ENVIRONMENT
               command:
                 - sh
                 - -c
@@ -103,44 +130,66 @@ spec:
                   # Install Python deps if not pre-baked
                   pip show requests >/dev/null 2>&1 || pip install requests python-dotenv --quiet
 
-                  echo "[baseline-learn] Learning for environment: $ENVIRONMENT (last 60 min)..."
-                  set +e
-                  python3 core/trace_fingerprint.py \
-                      --environment "$ENVIRONMENT" \
-                      learn --window-minutes 60
-                  LEARN_RC=$?
-                  set -e
-                  if [ $LEARN_RC -ne 0 ]; then
-                    echo "[baseline-learn] learn failed - emitting alert event"
-                    python3 -c "import json,os,time,urllib.request; tok=os.environ.get('SPLUNK_INGEST_TOKEN') or os.environ.get('SPLUNK_ACCESS_TOKEN',''); rlm=os.environ.get('SPLUNK_REALM','us1'); env=os.environ.get('ENVIRONMENT','unknown'); body=json.dumps([{'eventType':'behavioral_baseline.learn_failed','category':'USER_DEFINED','dimensions':{'sf_environment':env},'properties':{'environment':env,'step':'learn','message':'baseline learn step failed'},'timestamp':int(time.time()*1000)}]).encode(); req=urllib.request.Request('https://ingest.'+rlm+'.signalfx.com/v2/event',data=body,headers={'X-SF-Token':tok,'Content-Type':'application/json'},method='POST'); urllib.request.urlopen(req,timeout=10)" || true
+                  # Build the list of environments to learn for.
+                  # ENVIRONMENTS (comma-separated) takes priority over single ENVIRONMENT.
+                  ENV_LIST="${ENVIRONMENTS:-${ENVIRONMENT:-}}"
+                  if [ -z "$ENV_LIST" ]; then
+                    echo "[baseline-learn] ERROR: no environment configured (set ENVIRONMENT or ENVIRONMENTS)"
                     exit 1
                   fi
 
-                  echo "[baseline-learn] Promoting fingerprints..."
-                  python3 core/trace_fingerprint.py \
-                    --environment "$ENVIRONMENT" \
-                    promote
+                  EMIT_FAIL="python3 -c \"import json,os,time,urllib.request; tok=os.environ.get('SPLUNK_INGEST_TOKEN') or os.environ.get('SPLUNK_ACCESS_TOKEN',''); rlm=os.environ.get('SPLUNK_REALM','us1'); env='\$ENV'; body=json.dumps([{'eventType':'behavioral_baseline.learn_failed','category':'USER_DEFINED','dimensions':{'sf_environment':env},'properties':{'environment':env,'step':'learn','message':'baseline learn step failed'},'timestamp':int(time.time()*1000)}]).encode(); req=urllib.request.Request('https://ingest.'+rlm+'.signalfx.com/v2/event',data=body,headers={'X-SF-Token':tok,'Content-Type':'application/json'},method='POST'); urllib.request.urlopen(req,timeout=10)\" || true"
 
-                  BASELINE="data/baseline.${ENVIRONMENT}.json"
-                  FP_COUNT=$(python3 -c "import json; d=json.load(open('$BASELINE')); print(len(d['fingerprints']))")
-                  echo "[baseline-learn] $FP_COUNT fingerprints learned"
+                  TOTAL_FP=0
+                  TOTAL_INJECTED=0
 
-                  echo "[baseline-learn] Updating ConfigMap (delete+create)..."
-                  kubectl delete configmap behavioral-baseline --ignore-not-found
-                  kubectl create configmap behavioral-baseline \
-                    --from-file=baseline.json="$BASELINE"
+                  # Loop over each environment (comma-separated)
+                  echo "$ENV_LIST" | tr ',' '\n' | while read -r ENV; do
+                    ENV=$(echo "$ENV" | tr -d ' ')
+                    [ -z "$ENV" ] && continue
 
-                  echo "[baseline-learn] Injecting into pods..."
-                  INJECTED=0
-                  for pod in $(kubectl get pods -l app=otelcol-fingerprint \
-                      --field-selector=status.phase=Running \
-                      -o jsonpath='{.items[*].metadata.name}'); do
-                    kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol \
-                      && echo "  $pod: ok" && INJECTED=$((INJECTED+1)) \
-                      || echo "  $pod: skipped"
+                    echo "[baseline-learn] === Environment: $ENV ==="
+                    echo "[baseline-learn] Learning (last 60 min)..."
+                    set +e
+                    python3 core/trace_fingerprint.py --environment "$ENV" learn --window-minutes 60
+                    LEARN_RC=$?
+                    set -e
+
+                    if [ $LEARN_RC -ne 0 ]; then
+                      echo "[baseline-learn] learn failed for $ENV - emitting alert"
+                      python3 -c "import json,os,time,urllib.request; tok=os.environ.get('SPLUNK_INGEST_TOKEN') or os.environ.get('SPLUNK_ACCESS_TOKEN',''); rlm=os.environ.get('SPLUNK_REALM','us1'); body=json.dumps([{'eventType':'behavioral_baseline.learn_failed','category':'USER_DEFINED','dimensions':{'sf_environment':'$ENV'},'properties':{'environment':'$ENV','step':'learn','message':'baseline learn step failed'},'timestamp':int(time.time()*1000)}]).encode(); req=urllib.request.Request('https://ingest.'+rlm+'.signalfx.com/v2/event',data=body,headers={'X-SF-Token':tok,'Content-Type':'application/json'},method='POST'); urllib.request.urlopen(req,timeout=10)" || true
+                      continue
+                    fi
+
+                    echo "[baseline-learn] Promoting fingerprints..."
+                    python3 core/trace_fingerprint.py --environment "$ENV" promote
+
+                    BASELINE="data/baseline.${ENV}.json"
+                    FP_COUNT=$(python3 -c "import json; d=json.load(open('$BASELINE')); print(len(d.get('fingerprints',{})))")
+                    PENDING=$(python3 -c "import json; d=json.load(open('$BASELINE')); print(len(d.get('pending',{})))" 2>/dev/null || echo 0)
+                    echo "[baseline-learn] $FP_COUNT fingerprints promoted, $PENDING pending"
+
+                    # Alert if fingerprints are stuck in pending (not promoted yet)
+                    if [ "$PENDING" -gt 0 ]; then
+                      python3 -c "import json,os,time,urllib.request; tok=os.environ.get('SPLUNK_INGEST_TOKEN') or os.environ.get('SPLUNK_ACCESS_TOKEN',''); rlm=os.environ.get('SPLUNK_REALM','us1'); body=json.dumps([{'eventType':'trace.fingerprint.pending','category':'USER_DEFINED','dimensions':{'sf_environment':'$ENV'},'properties':{'environment':'$ENV','pending_count':$PENDING,'promoted_count':$FP_COUNT,'message':'$PENDING fingerprint(s) pending promotion - may need more traffic or lower promotion_threshold'},'timestamp':int(time.time()*1000)}]).encode(); req=urllib.request.Request('https://ingest.'+rlm+'.signalfx.com/v2/event',data=body,headers={'X-SF-Token':tok,'Content-Type':'application/json'},method='POST'); urllib.request.urlopen(req,timeout=10)" || true
+                    fi
+
+                    echo "[baseline-learn] Updating ConfigMap behavioral-baseline..."
+                    kubectl delete configmap behavioral-baseline --ignore-not-found
+                    kubectl create configmap behavioral-baseline --from-file=baseline.json="$BASELINE"
+
+                    echo "[baseline-learn] Injecting into pods..."
+                    INJECTED=0
+                    for pod in $(kubectl get pods -l app=otelcol-fingerprint \
+                        --field-selector=status.phase=Running \
+                        -o jsonpath='{.items[*].metadata.name}'); do
+                      kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol \
+                        && echo "  $pod: ok" && INJECTED=$((INJECTED+1)) \
+                        || echo "  $pod: skipped"
+                    done
+
+                    echo "[baseline-learn] Done: $ENV — $FP_COUNT fingerprints in $INJECTED pod(s)."
                   done
-
-                  echo "[baseline-learn] Done: $FP_COUNT fingerprints active in $INJECTED pod(s)."
               volumeMounts:
                 - name: workspace
                   mountPath: /repo
