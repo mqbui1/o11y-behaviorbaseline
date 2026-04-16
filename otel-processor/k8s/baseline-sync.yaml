@@ -17,6 +17,13 @@
 # Git SHA pinning: set GIT_SHA in workshop-secret to pin the job to a specific
 # commit. Leave unset (or set to "main") to always use the latest main branch.
 #
+# Post-learn steps (automatic each run):
+#   - noise_learner.py --apply: prunes noise patterns before learn
+#   - coverage_auditor.py: emits behavioral_baseline.low_coverage if coverage <50%
+#   - adaptive_thresholds.py --emit: tunes per-service thresholds
+#   - baseline_drift_monitor.py snapshot: weekly drift snapshot (Sundays 2am)
+#   - dedup state pruning: removes otel_dedup_state entries older than 7 days
+#
 # Trigger manually (e.g. after a deploy):
 #   kubectl create job --from=cronjob/baseline-learn baseline-learn-manual
 #
@@ -60,16 +67,21 @@ spec:
                 - sh
                 - -c
                 - |
-                  if [ -d /repo/.git ]; then
-                    git -C /repo fetch --quiet
-                  else
-                    git clone https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
-                  fi
                   if [ -n "$GIT_SHA" ] && [ "$GIT_SHA" != "main" ]; then
+                    if [ -d /repo/.git ]; then
+                      git -C /repo fetch --quiet
+                    else
+                      git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                    fi
                     git -C /repo checkout "$GIT_SHA"
                     echo "Repo pinned to $GIT_SHA"
                   else
-                    git -C /repo checkout main && git -C /repo pull --ff-only
+                    if [ -d /repo/.git ]; then
+                      git -C /repo fetch --depth 1 --quiet origin main
+                      git -C /repo reset --hard origin/main
+                    else
+                      git clone --depth 1 https://github.com/mqbui1/o11y-behaviorbaseline.git /repo
+                    fi
                     echo "Repo at latest main: $(git -C /repo rev-parse --short HEAD)"
                   fi
               volumeMounts:
@@ -190,6 +202,48 @@ spec:
 
                     echo "[baseline-learn] Done: $ENV — $FP_COUNT fingerprints in $INJECTED pod(s)."
                   done
+
+                  # ── Post-learn steps (run once, across all envs) ──────────────
+                  echo "[baseline-learn] Running post-learn steps..."
+
+                  # 1. Noise pattern pruning — find and persist app-specific noise
+                  #    patterns so the next learn cycle ignores them automatically.
+                  echo "[baseline-learn] Pruning noise patterns..."
+                  python3 agents/noise_learner.py --apply 2>/dev/null || true
+
+                  # 2. Coverage audit — emit low_coverage events for any root_op
+                  #    below 50% match rate against live traffic.
+                  echo "[baseline-learn] Running coverage audit..."
+                  echo "$ENV_LIST" | tr ',' '\n' | while read -r ENV; do
+                    ENV=$(echo "$ENV" | tr -d ' ')
+                    [ -z "$ENV" ] && continue
+                    python3 agents/coverage_auditor.py --environment "$ENV" --window-minutes 60 --emit 2>/dev/null || true
+                  done
+
+                  # 3. Adaptive threshold tuning — observe FP/TP rates and
+                  #    update per-service thresholds in thresholds.json.
+                  echo "[baseline-learn] Tuning adaptive thresholds..."
+                  python3 agents/adaptive_thresholds.py \
+                    --environment "${ENVIRONMENT:-}" --emit 2>/dev/null || true
+
+                  # 4. Weekly drift snapshot (only on Sundays at 2am UTC).
+                  #    Taken once per week so the next diff can report changes.
+                  DOW=$(date +%u)   # 1=Mon ... 7=Sun
+                  HOUR=$(date +%H)
+                  if [ "$DOW" = "7" ] && [ "$HOUR" -lt "4" ]; then
+                    echo "[baseline-learn] Taking weekly drift snapshot..."
+                    echo "$ENV_LIST" | tr ',' '\n' | while read -r ENV; do
+                      ENV=$(echo "$ENV" | tr -d ' ')
+                      [ -z "$ENV" ] && continue
+                      python3 baseline_drift_monitor.py --environment "$ENV" snapshot 2>/dev/null || true
+                    done
+                  fi
+
+                  # 5. Dedup state pruning — remove entries older than 7 days.
+                  echo "[baseline-learn] Pruning dedup state files..."
+                  python3 -c "import json,time; from pathlib import Path; cutoff=time.time()-7*24*3600; [f.write_text(json.dumps({k:v for k,v in json.loads(f.read_text()).items() if isinstance(json.loads(f.read_text()),dict) and v.get('ts',0)>cutoff})) or print(f'  pruned {f.name}') for f in Path('data').glob('*dedup_state*.json')]" 2>/dev/null || true
+
+                  echo "[baseline-learn] All post-learn steps complete."
               volumeMounts:
                 - name: workspace
                   mountPath: /repo

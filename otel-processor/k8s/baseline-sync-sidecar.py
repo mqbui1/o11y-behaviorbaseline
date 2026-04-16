@@ -204,6 +204,40 @@ def trigger_learn_job() -> bool:
         return False
 
 
+def _emit_heartbeat() -> None:
+    """
+    Send a behavioral_baseline.sidecar.alive gauge metric (value=1) to Splunk.
+    Build a Splunk detector on this metric with a missing-data condition to
+    alert when the sidecar stops reporting (OOMKilled, crash-loop, etc.).
+    """
+    if DRY_RUN:
+        return
+    try:
+        token = SPLUNK_INGEST_TOKEN
+        dims  = {
+            "sf_environment": ENVIRONMENT or "unknown",
+            "component":      "baseline-sync-sidecar",
+        }
+        dim_str = ",".join(f"{k}={v}" for k, v in dims.items())
+        # Use SignalFx ingest REST API for a single gauge datapoint
+        body = json.dumps({
+            "gauge": [{
+                "metric":     "behavioral_baseline.sidecar.alive",
+                "value":      1,
+                "dimensions": dims,
+            }]
+        }).encode()
+        req = urllib.request.Request(
+            f"{SPLUNK_INGEST_URL}/v2/datapoint",
+            data=body,
+            headers={"X-SF-Token": token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass  # heartbeat is best-effort — never disrupt the main loop
+
+
 def _emit_event(event_type: str, properties: dict) -> None:
     """Emit a custom event to Splunk Observability (best-effort, never raises)."""
     if DRY_RUN:
@@ -481,6 +515,12 @@ def main() -> None:
         # ── Local baseline file staleness check ───────────────────────────────
         # Warn if the processor seems to have stopped reloading its local copy.
         check_local_baseline_staleness()
+
+        # ── Heartbeat metric ──────────────────────────────────────────────────
+        # Emit a gauge=1 metric every poll cycle. A Splunk detector on
+        # behavioral_baseline.sidecar.alive can alert when this goes silent
+        # (sidecar OOMKilled, crash-loop, etc.).
+        _emit_heartbeat()
 
 
 if __name__ == "__main__":
