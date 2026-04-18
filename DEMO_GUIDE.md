@@ -181,57 +181,35 @@ visits-service-569b6f8c77-xxxxx                        Running
 
 ### Reset and verify baselines are clean
 
-> **Critical order:** restore the cluster to fully healthy BEFORE wiping the baseline.
-> If any service is down when you wipe, the first watch run will immediately re-learn
-> the active error signatures — defeating the reset.
+Run **`demo-reset.sh`** — it handles everything in one command (~2-3 minutes):
 
 ```bash
-# Step 1 — Ensure all services are restored (run after any prior demo)
-k "kubectl scale deployment petclinic-db vets-service visits-service customers-service --replicas=1"
-k "kubectl rollout status deployment/petclinic-db vets-service visits-service --timeout=90s"
-
-# Step 2 — Wait for services to reconnect to DB (~30s)
-sleep 30
-
-# Step 3 — Remove any cron jobs added by Demo 7 (onboard.py --auto)
-crontab -l | grep -v "behavioral-baseline-managed" | crontab -
-
-# Step 4 — Clear the alert log
-cat /dev/null > data/alerts.log
-
-# Step 5 — Hard-wipe the error baseline (cluster must be healthy before this step)
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
-python3 core/error_fingerprint.py --environment $ENV show
-# Expected: "Error baseline for environment '<env>' is empty"
-
-# Step 6 — Strip stale watch-promoted fingerprints AND vets-service startup fingerprint
-# (vets-service:GET -> config-server fires MISSING_SERVICE noise on every pod restart)
-python3 -c "
-import json, pathlib, os
-e = os.environ['ENV']
-p = pathlib.Path(f'data/baseline.{e}.json')
-d = json.loads(p.read_text())
-before = len(d['fingerprints'])
-d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
-                     if fp['occurrences'] >= 2
-                     and fp['watch_hits'] == 0
-                     and not fp.get('root_op','').startswith('vets-service:')}
-p.write_text(json.dumps(d, indent=2))
-print(f'Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
-"
-
-# Step 7 — Refresh AWS credentials (tokens expire every few hours)
-# !! Run this in the CLAUDE CODE terminal (it has AWS env vars set automatically) !!
-#    cd /Users/mbui/Documents/o11y-behaviorbaseline && python3 refresh_aws_creds.py
-#
-# Then back in THIS demo terminal:
+# Refresh AWS credentials first (in Claude Code terminal)
+python3 refresh_aws_creds.py
+# Then back in demo terminal:
 source .env
 
-# Step 8 — Confirm 0 trace anomalies (wait 60s after restore before running this)
-python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
-# Expected: "All trace paths match baseline"
-# If you get "Traces: 0 candidates" — services are still warming up, wait 30s and retry
+# Run the reset script
+./demo-reset.sh
 ```
+
+`demo-reset.sh` does all of this automatically:
+1. Restore all services to `--replicas=1`
+2. Wait 30s for DB reconnect
+3. Clear `data/alerts.log`
+4. Wipe error baseline → push wiped version to ConfigMap + inject into OTel pods
+5. Clear dedup state
+6. Strip watch-contaminated trace fingerprints
+7. Verify 0 Python trace anomalies
+8. Verify 0 OTel events in Splunk (last 3m)
+
+> **If step 8 shows OTel events still present:** the previous demo's events haven't aged out of the 3m window yet. Wait 3 minutes and re-run `./demo-reset.sh` — it is idempotent.
+
+> **If trace anomalies persist after reset:** re-learn the baseline:
+> ```bash
+> python3 core/trace_fingerprint.py --environment $ENV learn --window-minutes 60 --reset
+> python3 core/trace_fingerprint.py --environment $ENV promote
+> ```
 
 ### Open the alert log in a separate terminal
 All Python scripts (detection, triage, correlation) run **locally** — only `k "..."` commands go to the EC2 cluster.
@@ -241,7 +219,7 @@ cd /Users/mbui/Documents/o11y-behaviorbaseline
 tail -f data/alerts.log
 ```
 
-> **Note on cron jobs:** All cron jobs have been removed for the demo. Every detection step is run manually. The `crontab -l` command in Demo 0 is purely to show the audience that autonomous scheduling exists — the output shown below is what it looks like in a production setup, not what is active during the demo.
+> **Note on scheduling:** In production, `baseline-agent` (Deployment) runs learn/onboard/heal cycles automatically and `triage-agent` (Deployment) polls every 60s for anomalies. During the demo every detection step is run manually to show each layer explicitly.
 
 ---
 
@@ -259,9 +237,8 @@ python3 core/trace_fingerprint.py --environment $ENV show
 # Known error signatures
 python3 core/error_fingerprint.py --environment $ENV show
 
-# Show what the autonomous cron schedule looks like in production
-# Cron jobs are disabled for this demo — talk through the output below instead
-crontab -l | grep "behavioral-baseline-managed"
+# Show autonomous agents running in the cluster
+k "kubectl get deployment baseline-agent triage-agent"
 
 # Confirm 0 anomalies right now
 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
@@ -269,13 +246,22 @@ python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 
 **Expected output (trace show):**
 ```
-Baseline (environment '<env>'): 9 fingerprints
+Baseline (environment '<env>'): 10 fingerprints
   Services: [api-gateway, customers-service, discovery-server, vets-service, visits-service, ...]
 
-  api-gateway:GET /api/gateway/owners/{ownerId}  (4 patterns)
-  api-gateway:GET customers-service              (3 patterns)
+  api-gateway:GET /api/gateway/owners/{ownerId}  (2 patterns)
+  api-gateway:GET customers-service              (4 patterns)
   api-gateway:GET vets-service                   (1 pattern)
   api-gateway:PUT customers-service              (1 pattern)
+  admin-server:GET                               (1 pattern)
+  visits-service:GET                             (1 pattern)
+```
+
+**Expected output (kubectl get deployments):**
+```
+NAME             READY   UP-TO-DATE   AVAILABLE
+baseline-agent   1/1     1            1
+triage-agent     1/1     1            1
 ```
 
 **Expected output (trace watch — 0 anomalies):**
@@ -283,22 +269,15 @@ Baseline (environment '<env>'): 9 fingerprints
 [watch] Discovering topology + searching traces in parallel (environment '<env>')...
   Topology: 7 services | Traces: 200 candidates
   Fetching 200 traces (20 parallel)...
-    40/200 fetched...
-    80/200 fetched...
-    120/200 fetched...
-    160/200 fetched...
-    200/200 fetched...
-
-  Checked 19 traces, 181 skipped, 0 anomalies detected
-  Per-service breakdown:
-    api-gateway                          19 traces checked
+    ...
+  Checked 28 traces, 172 skipped, 0 anomalies detected
   All trace paths match baseline
 ```
 
 **Key talking points:**
 - *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
-- *"9 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
-- *"8 cron jobs per environment run autonomously — trace watch, error watch, correlate, dedup every 5 minutes; relearn daily."*
+- *"10 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"Two autonomous Deployments run continuously: `baseline-agent` re-learns every 2h and heals baselines after incidents; `triage-agent` polls every 60s, correlates all three detection tiers, and calls Claude for triage."*
 - *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
 
 ---
@@ -1038,7 +1017,7 @@ if best:
 - *"No one configured a threshold for 'how many times to see a new pattern before accepting it'. 2 (or 5 in production) is the default — tunable via `AUTO_PROMOTE_THRESHOLD`."*
 - *"The framework learns the new normal on its own. After a deployment, new trace paths stop firing within 25 minutes at the default setting. Zero alert fatigue from known-good deploys."*
 - *"The healer scores candidate windows by two metrics: error rate (lower is cleaner) and trace diversity (higher means richer coverage). It picks the window most likely to produce a good baseline — not just the most recent one."*
-- *"In production, the healer runs on a 6-hour cron (`0 */6 * * *`). It's stateless — just looks at the last 20 minutes of anomaly events vs the 20 minutes before that. If the rate spiked then dropped, it heals."*
+- *"In production, `baseline-agent` runs the healer every 2 minutes via `IncidentTracker`. It's stateless — just looks at the anomaly rate over a rolling window. If the rate spiked then dropped to zero, it picks the cleanest pre-incident window and re-learns automatically."*
 
 ### Restore
 ```bash
@@ -1050,9 +1029,9 @@ python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minu
 
 ## Demo 7: Auto-Onboarding a New Environment
 
-**Story:** *"A new environment shows up in Splunk APM — a team just deployed their first instrumented services. `onboard.py --auto` discovers it automatically, builds baselines from live traffic, creates a dashboard, registers cron jobs, and generates a runbook via Claude. Zero manual configuration. The framework is fully operational for the new environment in one command."*
+**Story:** *"A new environment shows up in Splunk APM — a team just deployed their first instrumented services. `onboard.py --auto` discovers it automatically, builds baselines from live traffic, creates a dashboard, and generates a runbook via Claude. Zero manual configuration. The framework is fully operational for the new environment in one command. In the cluster, `baseline-agent` picks it up on its next 6h onboard cycle."*
 
-> **Why this is last:** `onboard.py --auto` re-learns baselines from the last 120 minutes (which includes any outage errors from earlier demos) and adds cron jobs. Running it last means there's no cleanup needed before subsequent demos.
+> **Why this is last:** `onboard.py --auto` re-learns baselines from the last 120 minutes (which may include outage errors from earlier demos). Running it last means there's no cleanup needed before subsequent demos.
 
 ### Prerequisites
 ```bash
@@ -1131,21 +1110,17 @@ python3 onboard.py --auto
 
 > The runbook line shows "already exists" because it was generated in a prior session. In a truly fresh environment it generates automatically. Use `--force` on `runbook_generator.py` to regenerate.
 
-### Step 3 — Restore (remove cron jobs added by --auto)
+### Step 3 — Restore
 ```bash
-# Remove the behavioral-baseline-managed cron jobs added by onboard.py --auto
-crontab -l | grep -v "behavioral-baseline-managed" | crontab -
-
 # Restore onboarding state from backup
 cp data/onboarding_state.json.bak data/onboarding_state.json
 echo "Onboarding state restored."
 ```
 
 **What was created in ~60 seconds:**
-- Trace fingerprint baseline: 9 structural call path patterns
-- Error signature baseline: learned from last 120 minutes of live traffic
+- Trace fingerprint baseline: structural call path patterns learned from live traffic
+- Error signature baseline: known-good error patterns from live traffic
 - Dashboard: linked to the Behavioral Baseline dashboard group
-- Cron jobs: 8 per-environment + 2 global scheduled jobs
 - Runbook: `RUNBOOK.<env>.md` generated by Claude with service topology context
 
 > **Note:** Error rate, latency, and request rate detectors are already live via Splunk APM AutoDetect — no provisioning needed. This framework adds the behavioral layer on top.
@@ -1153,7 +1128,7 @@ echo "Onboarding state restored."
 **Key talking points:**
 - *"No YAML. No alert rules. No thresholds to configure. The framework reads the live APM topology, learns what normal looks like, and is ready to detect anomalies — all from a single command."*
 - *"Metric-based alerts (error rate, latency, request rate) are already covered by Splunk's built-in APM AutoDetect for every environment with traces flowing. This framework adds a second layer: structural drift, new error signatures, cross-tier correlation."*
-- *"`--auto` runs every 30 minutes via cron. If your platform team deploys a new environment on Monday morning, it's onboarded by Monday morning. Zero human intervention."*
+- *"`baseline-agent` runs `onboard.py --auto` every 6 hours. If your platform team deploys a new environment on Monday morning, it's onboarded by Monday morning. Zero human intervention."*
 - *"The runbook is generated by Claude from the actual service topology — not a generic template. It knows which services call the DB, which are ingress, and what dependencies exist."*
 
 ---
@@ -1200,32 +1175,26 @@ Slow path — Python APM polling (used in Demo 6 auto-promotion only):
 
 ## Restore / Reset
 
+Use `demo-reset.sh` for a full reset between demos:
+
 ```bash
-# Restore all services (including visits-service)
-k "kubectl scale deployment vets-service petclinic-db visits-service --replicas=1"
-k "kubectl rollout status deployment/vets-service deployment/petclinic-db deployment/visits-service --timeout=90s"
+./demo-reset.sh
+```
 
-# Wait for services to reconnect to DB
-sleep 30
+If you need to also re-learn the trace baseline from scratch (e.g. after a full topology change):
 
-# Relearn trace baseline after disruptions
-python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 55
+```bash
+python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 60
 python3 core/trace_fingerprint.py --environment $ENV promote
 
-# Push the updated baseline into the ConfigMap and inject into running pods
-sshpass -p "$EC2_PASSWORD" scp -P 2222 \
-  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
+# Push updated baseline to cluster
+sshpass -p "$EC2_PASSWORD" scp -P 2222 data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
 k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
    kubectl create configmap behavioral-baseline \
-     --from-file=baseline.json=/tmp/baseline.json && \
+     --from-file=baseline.json=/tmp/baseline.json \
+     --from-file=error_baseline.json=/tmp/error_baseline.json && \
    B64=\$(base64 -w 0 /tmp/baseline.json); \
    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
      kubectl exec \$pod -c otelcol -- sh -c \"echo '\$B64' | base64 -d > /baseline/baseline.json\"; \
    done && echo 'Baseline pushed to all pods'"
-
-# Relearn error baseline after disruptions (wait for clean window first)
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
-
-# Clear alert log
-cat /dev/null > data/alerts.log
 ```
