@@ -191,7 +191,7 @@ data:
         min_spans: 2
         min_baseline_occurrences: 2
         baseline_reload_interval: 60s
-        partial_trace_threshold: 0.7
+        partial_trace_threshold: 0.3
         # Auto-promote new fingerprints after 10 detections. The promoted
         # baseline is written back to /baseline (emptyDir) and the
         # baseline-sync sidecar patches the ConfigMap so all pods reload it.
