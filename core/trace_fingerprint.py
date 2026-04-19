@@ -105,7 +105,10 @@ LEARN_SAMPLE_LIMIT = int(os.environ.get("LEARN_SAMPLE_LIMIT", "50"))
 WATCH_SAMPLE_LIMIT = int(os.environ.get("WATCH_SAMPLE_LIMIT", "50"))
 
 # Fingerprints seen fewer times than this in baseline are treated as "rare"
-MIN_BASELINE_OCCURRENCES = 2
+# and excluded. Raising to 3 filters one-off structural variants (e.g. petclinic
+# cache-miss/hit variations) that appear occasionally but not reliably enough to
+# anchor MISSING_SERVICE detection.
+MIN_BASELINE_OCCURRENCES = 3
 
 # Span count must exceed this multiple of baseline max to fire SPAN_COUNT_SPIKE
 SPAN_COUNT_SPIKE_MULTIPLIER = 2
@@ -1103,6 +1106,11 @@ def cmd_watch(window_minutes: int = 10,
         # Also skip if any span path in the baseline entries is a noise operation
         # (e.g. Eureka registration PUTs rooted at a service span like customers-service:PUT)
         if any(_is_noise_trace(info.get("path", "")) for info in bl_entries):
+            continue
+        # Skip root_ops whose baseline entries exclusively contain config-server calls —
+        # these are pod-startup config fetches that only appear during restarts, never
+        # during steady-state traffic, so their absence is not an anomaly.
+        if all("config-server" in info.get("path", "") for info in bl_entries):
             continue
         total_patterns = len(bl_entries)
         service_counts: dict[str, int] = defaultdict(int)
