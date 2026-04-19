@@ -8,12 +8,18 @@
 # Run this before EACH demo (or between demos) to guarantee a clean slate.
 # Takes ~2-3 minutes including wait times.
 
-set -euo pipefail
+set -eo pipefail
 
-: "${EC2_IP:?EC2_IP not set — source .env first}"
-: "${EC2_PASSWORD:?EC2_PASSWORD not set}"
+# Load .env if vars not already in environment
+_REPO="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$_REPO/.env" ]; then
+    set -a; source "$_REPO/.env"; set +a
+fi
+
+: "${EC2_IP:?EC2_IP not set — check .env}"
+: "${EC2_PASSWORD:?EC2_PASSWORD not set — check .env}"
 : "${ENV:?ENV not set — export ENV=<your-environment>}"
-: "${SPLUNK_ACCESS_TOKEN:?SPLUNK_ACCESS_TOKEN not set}"
+: "${SPLUNK_ACCESS_TOKEN:?SPLUNK_ACCESS_TOKEN not set — check .env}"
 
 K="sshpass -p $EC2_PASSWORD ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@$EC2_IP"
 
@@ -43,19 +49,10 @@ pathlib.Path(f'data/error_baseline.{e}.json').write_text(
 print(f'  Error baseline wiped (data/error_baseline.{e}.json)')
 "
 
-# Push wiped error baseline to cluster so OTel processor resets too
+# Stage error baseline on cluster (ConfigMap+inject happens after step 6)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
-$K "kubectl delete configmap behavioral-baseline --ignore-not-found && \
-    kubectl create configmap behavioral-baseline \
-      --from-file=baseline.json=/tmp/baseline.json \
-      --from-file=error_baseline.json=/tmp/error_baseline.json" 2>/dev/null
-# Inject into pods immediately (don't wait for 60s reload)
-$K "EB64=\$(base64 -w 0 /tmp/error_baseline.json); \
-    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
-      kubectl exec \$pod -c otelcol -- sh -c \"echo '\$EB64' | base64 -d > /baseline/error_baseline.json\" 2>/dev/null && echo \"  error_baseline injected: \$pod\"; \
-    done" 2>/dev/null || true
-echo "  Error baseline pushed to cluster."
+echo "  Error baseline staged."
 
 # ── Step 5: Clear dedup state ─────────────────────────────────────────────────
 echo "[5/8] Clearing dedup state..."
@@ -69,7 +66,7 @@ for f in pathlib.Path('data').glob(f'*dedup_state*{e}*'):
 print(f'  Cleared: {cleared}')
 "
 
-# ── Step 6: Strip watch-contaminated trace fingerprints ───────────────────────
+# ── Step 6: Strip watch-contaminated trace fingerprints + push to cluster ─────
 echo "[6/8] Cleaning trace baseline (removing watch-contaminated entries)..."
 python3 -c "
 import json, pathlib, os
@@ -80,11 +77,29 @@ if not p.exists():
     exit()
 d = json.loads(p.read_text())
 before = len(d['fingerprints'])
+# Keep entries that are either:
+#   (a) clean watch record (watch_hits=0) with occurrences >= 2, OR
+#   (b) auto_promoted (OTel-sourced stubs) — always keep regardless of occurrences
 d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
-                     if fp.get('watch_hits', 0) == 0 and fp.get('occurrences', fp.get('seen', 0)) >= 2}
+                     if fp.get('auto_promoted') or
+                        (fp.get('watch_hits', 0) == 0 and fp.get('occurrences', fp.get('seen', 0)) >= 2)}
 p.write_text(json.dumps(d, indent=2))
 print(f'  Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 "
+# Push both baselines to cluster (single ConfigMap update after all local cleanup)
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
+  "data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
+$K "kubectl delete configmap behavioral-baseline --ignore-not-found && \
+    kubectl create configmap behavioral-baseline \
+      --from-file=baseline.json=/tmp/baseline.json \
+      --from-file=error_baseline.json=/tmp/error_baseline.json" 2>/dev/null
+# Inject both into pods immediately (don't wait for 60s reload)
+$K "BB64=\$(base64 -w 0 /tmp/baseline.json); \
+    EB64=\$(base64 -w 0 /tmp/error_baseline.json); \
+    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
+      kubectl exec \$pod -c otelcol -- sh -c \"echo '\$BB64' | base64 -d > /baseline/baseline.json && echo '\$EB64' | base64 -d > /baseline/error_baseline.json\" 2>/dev/null && echo \"  baselines injected: \$pod\"; \
+    done" 2>/dev/null || true
+echo "  Cleaned baselines pushed to cluster."
 
 # ── Step 7: Verify 0 trace anomalies ─────────────────────────────────────────
 echo "[7/8] Verifying 0 trace anomalies (Python watch)..."
