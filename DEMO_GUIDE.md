@@ -298,15 +298,12 @@ python3 -u poll_drift_events.py
 
 Within **10–15 seconds** of the kill, you'll see `error.signature.drift` events printed — the OTel processor detected new error signatures on the first affected trace.
 
-### Step 2 — Wait 30 seconds (for Splunk indexing lag)
+### Step 3 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
+python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
-### Step 3 — Run triage directly from OTel events (one command)
-```bash
-python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
-```
+Waits for events from the OTel log stream, collects for 5s, then pipes directly to agent.py — no Splunk indexing lag.
 
 **Expected terminal output:**
 ```
@@ -420,8 +417,7 @@ Within **10–15 seconds** you'll see `trace.path.drift` printed here. Refresh A
 
 ### Step 4 — Run triage
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for Splunk indexing... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo ""
-python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
+python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected output:**
@@ -471,14 +467,9 @@ Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event fo
 
 > **Talking point:** *"The OTel processor fires in ~10 seconds — it fingerprints every trace as it flows through the collector, no polling interval. Those events land in Splunk immediately. The next step pulls them from Splunk and calls Claude for triage — no window to wait for."*
 
-### Step 2 — Wait 30 seconds (for Splunk indexing lag)
+### Step 3 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
-```
-
-### Step 3 — Run triage directly from OTel events (one command)
-```bash
-python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
+python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
@@ -573,14 +564,9 @@ python3 -u poll_drift_events.py
 
 Within **10–15 seconds** you'll see both `trace.path.drift` (vets-service gone) and `error.signature.drift` (DB errors) fire simultaneously.
 
-### Step 2 — Wait 30 seconds (for Splunk indexing lag)
+### Step 3 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
-```
-
-### Step 3 — Run triage directly from OTel events (one command)
-```bash
-python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
+python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
@@ -681,23 +667,12 @@ python3 notify_deployment.py --service vets-service --environment $ENV \
 k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 2 — Wait 30 seconds (countdown for audience)
+### Step 2 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for failure traces... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — 30 seconds elapsed. Run detection now.          "
+python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
-### Step 2b — Watch OTel real-time detection (while the countdown runs)
-In a third terminal tab:
-```bash
-python3 -u poll_drift_events.py
-```
-
-Within 10–15 seconds you'll see drift events fire for vets-service.
-
-### Step 3 — Run triage from OTel events (agent sees INCIDENT, doesn't know about deploy)
-```bash
-python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
-```
+This blocks until drift events arrive from the OTel processor (~10-15s after the kill), collects for 5s, then triages immediately.
 
 **Expected terminal output:**
 ```
@@ -715,7 +690,7 @@ python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment
     [PAGE_ONCALL] event emitted to Splunk
 ```
 
-### Step 3b — Run correlate.py (sees the deployment event → downgrades severity)
+### Step 3 — Run correlate.py (sees the deployment event → downgrades severity)
 ```bash
 python3 core/correlate.py --environment $ENV --window-minutes 55
 ```
@@ -970,8 +945,8 @@ WATCH  →  Two paths:
 
   Fast path (OTel edge, ~10s latency):
           OTel Collector processor fingerprints every trace as it flows through
-          DRIFT → emits trace.path.drift / error.signature.drift event to Splunk
-          watch_otel_events.py pulls those events from Splunk SignalFlow → JSON
+          DRIFT → emits trace.path.drift / error.signature.drift to its own logs
+          poll_drift_events.py --triage tails logs directly → JSON (no Splunk wait)
 
   Slow path (Python APM polling, ~1-5 min):
           Sample traces from the last N minutes via Splunk APM API
@@ -984,9 +959,9 @@ TRIAGE →  Claude reads the JSON anomaly list
           Writes DETECTION + TRIAGE to alerts.log
 ```
 
-Fast path — triage OTel edge events directly (used in all demos):
+Fast path — triage directly from OTel logs (used in all demos, no Splunk indexing wait):
 ```bash
-python3 watch_otel_events.py --environment $ENV \
+python3 poll_drift_events.py --triage --environment $ENV \
   | python3 agent.py --environment $ENV
 ```
 
