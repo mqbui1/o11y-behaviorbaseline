@@ -39,24 +39,41 @@ if not EC2_IP or not EC2_PASS:
 
 DAEMONSET_LABEL = os.environ.get("OTEL_POD_LABEL", "app=otelcol-fingerprint")
 OTEL_CONTAINER  = os.environ.get("OTEL_CONTAINER", "otelcol")
+_DATA_DIR       = Path(__file__).parent / "data"
 
-_ssh_cmd = (
-    "exec bash -c '"
-    "for p in $(kubectl get pods -l " + DAEMONSET_LABEL + " -o jsonpath=\"{.items[*].metadata.name}\");"
-    " do kubectl logs -f --since=5s $p -c " + OTEL_CONTAINER + " 2>/dev/null & done;"
-    " tail -f /dev/null'"
-)
+def _make_ssh_cmd(since: str = "5s") -> str:
+    return (
+        "exec bash -c '"
+        "for p in $(kubectl get pods -l " + DAEMONSET_LABEL + " -o jsonpath=\"{.items[*].metadata.name}\");"
+        f" do kubectl logs -f --since={since} $p -c " + OTEL_CONTAINER + " 2>/dev/null & done;"
+        " tail -f /dev/null'"
+    )
 
-def _make_proc():
+def _make_proc(since: str = "5s"):
     return subprocess.Popen(
         ["sshpass", f"-p{EC2_PASS}",
          "ssh", "-T", "-p", EC2_PORT,
          "-o", "StrictHostKeyChecking=no",
          "-o", "RequestTTY=no",
          f"splunk@{EC2_IP}",
-         _ssh_cmd],
+         _make_ssh_cmd(since)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
+
+def _dedup_path(env: str) -> Path:
+    return _DATA_DIR / f"otel_dedup_state.{env}.json"
+
+def _load_dedup(env: str) -> dict:
+    p = _dedup_path(env)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {}
+
+def _save_dedup(env: str, state: dict) -> None:
+    _dedup_path(env).write_text(json.dumps(state))
 
 drift_re = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected)')
 hash_re  = re.compile(r'"hash": "([^"]+)"')
@@ -117,13 +134,49 @@ def _parse_event(line: str) -> dict | None:
         }
 
 
-def _run_watch(triage: bool, environment: str, settle: int, timeout: int) -> None:
-    """Live stream mode (triage=False) or triage mode (triage=True)."""
-    hash_last_seen: dict = {}
+# Root ops that are direct service-to-service OTel auto-promotion noise.
+# These are NOT api-gateway-rooted and fire as NEW_FINGERPRINT continuously until
+# the OTel processor auto-promotes them (10 hits). Exclude from --triage output
+# to prevent steady-state false positives. Error signatures are always kept.
+_NOISE_ROOT_OP_PREFIXES = (
+    "customers-service:",
+    "visits-service:",
+    "vets-service:",
+    "config-server:",
+    "discovery-server:",
+    "admin-server:",
+)
+
+
+def _is_noise_fingerprint(event: dict) -> bool:
+    """Return True if this is a direct-service NEW_FINGERPRINT that should be suppressed."""
+    if event.get("anomaly_type") != "NEW_FINGERPRINT":
+        return False
+    root_op = event.get("root_op", "")
+    return any(root_op.startswith(p) for p in _NOISE_ROOT_OP_PREFIXES)
+
+
+def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
+               dedup_ttl: int = DEDUP_TTL) -> None:
+    """Live stream mode (triage=False) or triage mode (triage=True).
+
+    Triage mode shares the same dedup state file as watch_otel_events.py so that
+    hashes already suppressed there are also suppressed here, preventing steady-state
+    OTel auto-promotion events from triggering spurious triage runs.
+    """
+    # In triage mode: use --since=30s to catch events that fired before we connected,
+    # while relying on the shared dedup state to suppress already-seen steady-state hashes.
+    # The dedup state is cleared by demo-reset.sh before each demo, so only events from
+    # the current demo scenario will appear.
+    since = "30s" if triage else "5s"
+    dedup_state: dict = _load_dedup(environment) if triage else {}
+    new_dedup:   dict = dict(dedup_state)
+
+    hash_last_seen: dict = {}  # in-memory dedup for live stream mode
     collected: list[dict] = []
     first_event_time: float | None = None
 
-    proc = _make_proc()
+    proc = _make_proc(since)
     deadline = time.time() + timeout
 
     try:
@@ -140,25 +193,36 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int) -> Non
             h_val = event.get("hash", "")
             now = time.time()
 
-            # Dedup
-            if h_val:
-                if now - hash_last_seen.get(h_val, 0) < DEDUP_TTL:
-                    continue
-                hash_last_seen[h_val] = now
-
             if triage:
+                # Skip direct-service NEW_FINGERPRINT events (OTel auto-promotion noise)
+                if _is_noise_fingerprint(event):
+                    continue
+
+                # Use shared dedup state (same file watch_otel_events.py writes)
+                dedup_key = h_val if h_val else (
+                    f"{event.get('anomaly_type')}:{event.get('service')}:{event.get('root_op') or event.get('error_type')}"
+                )
+                last_seen_ms = dedup_state.get(dedup_key, 0)
+                if now * 1000 - last_seen_ms < dedup_ttl * 1000:
+                    continue
+                new_dedup[dedup_key] = int(now * 1000)
+
                 collected.append(event)
                 if first_event_time is None:
                     first_event_time = now
                     print(f"  [{time.strftime('%H:%M:%S')}] {len(collected)} event(s) received — settling for {settle}s...",
                           file=sys.stderr)
-                # Exit settle window after first event
-                if now - first_event_time >= settle:
+                elif now - first_event_time >= settle:
                     break
-                # Also check timeout
                 if now >= deadline:
                     break
             else:
+                # Live stream: in-memory dedup only
+                if h_val:
+                    if now - hash_last_seen.get(h_val, 0) < dedup_ttl:
+                        continue
+                    hash_last_seen[h_val] = now
+
                 ts    = time.strftime("%H:%M:%S")
                 etype = "error.signature.drift" if event["anomaly_type"] == "NEW_ERROR_SIGNATURE" else "trace.path.drift"
                 print(f"[{ts}] {etype}")
@@ -166,9 +230,6 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int) -> Non
                 if event.get("trace_id"):
                     print(f"  trace_id={event['trace_id']}")
                 print()
-
-            if triage and time.time() >= deadline:
-                break
 
     except KeyboardInterrupt:
         pass
@@ -182,6 +243,7 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int) -> Non
         if not collected:
             print("  No drift events received within timeout.", file=sys.stderr)
             sys.exit(1)
+        _save_dedup(environment, new_dedup)
         result = {
             "environment":    environment,
             "timestamp":      datetime.now(timezone.utc).isoformat(),
