@@ -246,16 +246,14 @@ python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 
 **Expected output (trace show):**
 ```
-Baseline (environment '<env>'): 18 fingerprints
-  Services: [admin-server, api-gateway, config-server, customers-service, discovery-server, vets-service, visits-service]
+Baseline (environment '<env>'): 8 fingerprints
+  Services: [admin-server, api-gateway, customers-service, vets-service, visits-service]
 
-  admin-server:GET                               (2 patterns)
-  api-gateway:GET /api/gateway/owners/{ownerId}  (5 patterns)
-  api-gateway:GET customers-service              (5 patterns)
-  api-gateway:GET vets-service                   (3 patterns)
+  admin-server:GET                               (1 pattern)
+  api-gateway:GET /api/gateway/owners/{ownerId}  (2 patterns)
+  api-gateway:GET customers-service              (3 patterns)
+  api-gateway:GET vets-service                   (1 pattern)
   api-gateway:PUT customers-service              (1 pattern)
-  vets-service:GET                               (1 pattern)
-  visits-service:GET                             (1 pattern)
 ```
 
 **Expected output (kubectl get deployments):**
@@ -271,13 +269,13 @@ triage-agent     1/1     1            1
   Topology: 7 services | Traces: 200 candidates
   Fetching 200 traces (20 parallel)...
     ...
-  Checked 28 traces, 172 skipped, 0 anomalies detected
+  Checked 23 traces, 177 skipped, 0 anomalies detected
   All trace paths match baseline
 ```
 
 **Key talking points:**
 - *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
-- *"18 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"8 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
 - *"Two autonomous Deployments run continuously: `baseline-agent` re-learns every 2h and heals baselines after incidents; `triage-agent` polls every 60s, correlates all three detection tiers, and calls Claude for triage."*
 - *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
 
@@ -401,111 +399,49 @@ k "kubectl rollout status daemonset/otelcol-fingerprint --timeout=90s"
 
 ---
 
-## Demo 2: Bad Deploy — New Error Signature on First Occurrence
+## Demo 2: Gap Demo — APM Has No Alert, Framework Fires in 10s
 
-**Story:** *"A new deploy of visits-service introduces a regression — the pod crashes immediately on startup. The very first request after the deploy hits the dead service and fires a brand new error signature on a code path that was previously clean. No threshold crossed. No baseline rate exceeded. First occurrence fires."*
+**Story:** *"vets-service is killed. Open the APM Service Map — it shows green. No alert. No incident. APM doesn't know yet. Meanwhile, the OTel edge processor detected the structural absence on the very first affected trace and fired in ~10 seconds. This is the gap the framework fills."*
 
-### Prerequisites
+### Step 1 — Open APM Service Map
+Point browser at the Splunk APM Service Map for this environment. Confirm all services green, no incidents.
+
+### Step 2 — Kill vets-service
 ```bash
-# Clear alert log and ensure clean error baseline
-cat /dev/null > data/alerts.log
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
-python3 core/error_fingerprint.py --environment $ENV show
-# Expected: 0 signatures (system is healthy)
+k "kubectl scale deployment vets-service --replicas=0"
 ```
 
-### Step 1 — Simulate bad deploy (visits-service crashes)
-```bash
-k "kubectl scale deployment visits-service --replicas=0"
-```
-
-### Step 1b — Watch OTel real-time detection (while the countdown runs)
-In a third terminal tab, stream drift events directly from the OTel edge processor:
+### Step 3 — Watch framework fire in real time
 ```bash
 python3 -u poll_drift_events.py
 ```
 
-Within **10–15 seconds** of the kill, you'll see `trace.path.drift` and `error.signature.drift` events — the OTel processor detected both the structural absence of visits-service and the new connection error on the first affected trace.
+Within **10–15 seconds** you'll see `trace.path.drift` printed here. Refresh APM — still green.
 
-### Step 2 — Wait 30 seconds (for Splunk indexing lag)
+### Step 4 — Run triage
 ```bash
-for i in $(seq 30 -1 1); do printf "\r  Waiting for events to index... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo -e "\r  Done — run triage now.                               "
-```
-
-### Step 3 — Run triage directly from OTel events (one command)
-```bash
+for i in $(seq 30 -1 1); do printf "\r  Waiting for Splunk indexing... %02d:%02d remaining" $((i/60)) $((i%60)); sleep 1; done; echo ""
 python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment $ENV
 ```
 
-**Expected terminal output:**
+**Expected output:**
 ```
-[agent] env=<env> | 3 anomaly(s) from watch
+[agent] env=<env> | 1 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — The visits-service is completely absent from traces and the
-    api-gateway is throwing WebClientRequestException errors when attempting
-    to reach it via GET /api/gateway/owners/{ownerId}.
-    Root cause: visits-service is down or unreachable — the OTel edge processor
-    detected both the structural trace absence and a new connection error on the
-    first affected request.
-    Confidence: HIGH | Affected: visits-service, api-gateway
+[!!] INCIDENT — vets-service is absent from traces. Root cause: vets-service is down.
+    Confidence: HIGH | Affected: vets-service, api-gateway
     Recommended action: PAGE_ONCALL
-
-    [TRIAGE SUMMARY] written to alerts.log
-    [PAGE_ONCALL] event emitted to Splunk
 ```
 
-The anomalies (from OTel edge):
-- `NEW_FINGERPRINT` — `api-gateway:GET /api/gateway/owners/{ownerId}` — truncated trace (visits-service absent)
-- `NEW_ERROR_SIGNATURE` ×2 — `WebClientRequestException` in api-gateway, `500` on GET
+APM still has no alert at this point.
 
-**Expected alerts.log:**
-```
-════════════════════════════════════════════════════════════════════════
-[TIMESTAMP UTC]  DETECTION
-  anomaly type         : NEW_FINGERPRINT
-  environment          : <env>
-  service              : api-gateway
-  message              : Trace path drift on 'api-gateway:GET /api/gateway/owners/{ownerId}'
-                         (OTel edge detector)
-────────────────────────────────────────────────────────────────────────
+**Key talking point:** *"APM metrics need time to accumulate before thresholds fire — minutes, not seconds. The OTel edge processor sees structural changes in the first affected trace. That's the gap."*
 
-════════════════════════════════════════════════════════════════════════
-[TIMESTAMP UTC]  DETECTION
-  anomaly type         : NEW_ERROR_SIGNATURE
-  environment          : <env>
-  service              : api-gateway
-  message              : New error signature in api-gateway:
-                         org.springframework.web.reactive.function.client.WebClientRequestException on GET
-────────────────────────────────────────────────────────────────────────
-
-════════════════════════════════════════════════════════════════════════
-[TIMESTAMP UTC]  TRIAGE
-  severity             : INCIDENT
-  confidence           : HIGH
-  environment          : <env>
-  affected services    : visits-service, api-gateway
-  root cause           : visits-service is down — trace path drift and connection error
-                         detected by OTel edge processor on first affected request
-  action               : PAGE_ONCALL
-────────────────────────────────────────────────────────────────────────
-```
-
-**Key talking points:**
-- *"The OTel processor fires in ~10 seconds — no poll interval, no window to fill. It fingerprints every trace as it flows through the collector."*
-- *"Both the structural absence (trace path drift) and the new error signature arrive simultaneously — Claude sees the full picture from a single triage command."*
-- *"Total time from kill to triage: under 1 minute."*
-
-### Step 4 — Restore
+### Restore
 ```bash
-k "kubectl scale deployment visits-service --replicas=1"
-k "kubectl rollout status deployment/visits-service --timeout=60s"
-
-# Wait ~60s for loadgen to generate fresh traces before Demo 3 prerequisites
-sleep 60
-
-# Re-learn clean baseline after demo
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
+k "kubectl scale deployment vets-service --replicas=1"
+k "kubectl rollout status deployment/vets-service --timeout=60s"
 ```
 
 ---
@@ -607,38 +543,19 @@ k "kubectl rollout status deployment/vets-service --timeout=60s"
 
 ---
 
-## Demo 4: Correlated Anomaly — All Three Tiers Fire Simultaneously
+## Demo 4: Correlated Anomaly — Two Tiers Fire Simultaneously
 
-**Story:** *"Both vets-service AND the database go down at the same time. The trace tier sees MISSING_SERVICE across multiple paths. The error tier sees new CannotCreateTransactionException signatures. APM AutoDetect fires on the error rate spike. When all three tiers fire on the same service simultaneously, `correlate.py` emits a `[Critical] MULTI_TIER` correlated event — the highest-confidence signal in the framework."*
+**Story:** *"Both vets-service AND the database go down at the same time. The trace tier detects MISSING_SERVICE across multiple paths. The error tier detects new CannotCreateTransactionException signatures. `correlate.py` joins trace + error signals on the same service and emits a `[Major] TIER2_TIER3` correlated event — the framework immediately maps the blast radius across all affected services from a single command."*
 
 ### Prerequisites
 ```bash
 # Clear alert log
 cat /dev/null > data/alerts.log
 
-# Strip stale watch-promoted fingerprints AND vets-service startup fingerprint
-# (vets-service:GET -> config-server re-learns on every pod restart, causes noise)
-python3 -c "
-import json, pathlib, os
-e = os.environ['ENV']
-p = pathlib.Path(f'data/baseline.{e}.json')
-d = json.loads(p.read_text())
-before = len(d['fingerprints'])
-d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
-                     if fp['occurrences'] >= 2
-                     and fp['watch_hits'] == 0
-                     and not fp.get('root_op','').startswith('vets-service:')}
-after = len(d['fingerprints'])
-p.write_text(json.dumps(d, indent=2))
-print(f'Trace baseline: removed {before-after} stale entries, kept {after} clean fingerprints.')
-"
-
 # Reset error baseline to 0
 python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
-python3 core/error_fingerprint.py --environment $ENV show
-# Expected: 0 signatures
 
-# Verify 0 trace anomalies (cluster must be fully healthy before this check)
+# Verify 0 trace anomalies
 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 # Expected: "All trace paths match baseline"
 ```
@@ -654,7 +571,7 @@ In a third terminal tab, stream drift events directly from the OTel edge process
 python3 -u poll_drift_events.py
 ```
 
-Within **10–15 seconds** you'll see both `trace.path.drift` (vets-service gone) and `error.signature.drift` (DB errors) events fire simultaneously.
+Within **10–15 seconds** you'll see both `trace.path.drift` (vets-service gone) and `error.signature.drift` (DB errors) fire simultaneously.
 
 ### Step 2 — Wait 30 seconds (for Splunk indexing lag)
 ```bash
@@ -671,14 +588,12 @@ python3 watch_otel_events.py --environment $ENV | python3 agent.py --environment
 [agent] env=<env> | 7 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — The database backing customers-service (and likely other services) is
-    unreachable, causing transaction failures, 500 errors on the api-gateway, and complete
-    silence on several previously active trace paths.
-    Root cause: A shared database dependency is down or unreachable — customers-service is
-    throwing CannotCreateTransactionException on every DB call, which cascades into 500s at
-    the api-gateway and explains why PUT/GET operations to customers-service, vets-service,
-    and visits-service have gone completely silent.
-    Confidence: HIGH | Affected: api-gateway, customers-service, visits-service, vets-service
+[!!] INCIDENT — The database backing customers-service is unreachable, causing transaction
+    failures, 500 errors at the api-gateway, and complete silence on several trace paths.
+    Root cause: Shared database dependency is down — customers-service throws
+    CannotCreateTransactionException, cascading into 500s at api-gateway.
+    vets-service is also absent from all traces.
+    Confidence: HIGH | Affected: api-gateway, customers-service, vets-service
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
@@ -690,38 +605,10 @@ The 7 anomalies:
 - `MISSING_SERVICE` — `api-gateway:GET vets-service` — vets-service pod down
 - `MISSING_SERVICE` — `api-gateway:GET /api/gateway/owners/{ownerId}` — owner detail path silent
 - `MISSING_SERVICE` — `api-gateway:PUT customers-service` — write path silent (can't open DB transaction)
-- `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` on `GET /owners, OwnerRepository.findAll` in customers-service
-- `NEW_ERROR_SIGNATURE` — `500 on GET, GET customers-service` in api-gateway
+- `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` in customers-service
+- `NEW_ERROR_SIGNATURE` — `500 on GET customers-service` in api-gateway
 
-### Step 3b — Wait for AutoDetect to fire (poll loop)
-AutoDetect needs sustained error rate before it fires (~3–7 minutes). Use this loop to
-proceed automatically as soon as Tier 1 incidents appear — no manual watching required:
-
-```bash
-# Poll until at least 2 active incidents appear for this environment, then proceed
-until python3 -c "
-import os, sys, requests
-token = os.environ['SPLUNK_ACCESS_TOKEN']
-realm = os.environ.get('SPLUNK_REALM', 'us1')
-env   = os.environ['ENV']
-r = requests.get(
-    f'https://api.{realm}.signalfx.com/v2/incident',
-    headers={'X-SF-Token': token},
-    params={'limit': 100, 'includeResolved': 'false'}
-)
-incidents = [i for i in r.json().get('results', [])
-             if any(env in str(v) for v in i.get('inputs', {}).values())]
-print(f'  Active incidents for {env}: {len(incidents)}')
-sys.exit(0 if len(incidents) >= 2 else 1)
-"; do
-  sleep 30
-done
-echo "AutoDetect has fired — run correlate now."
-```
-
-### Step 3c — Run correlate.py to see MULTI_TIER / Critical
-With AutoDetect now firing (Tier 1) + trace drift (Tier 2) + error signatures (Tier 3)
-all on the same service, correlate.py escalates to `[Critical] MULTI_TIER`.
+### Step 3b — Run correlate.py to see TIER2_TIER3 cross-tier correlation
 ```bash
 python3 core/correlate.py --environment $ENV --window-minutes 20
 ```
@@ -729,52 +616,37 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 **Expected output:**
 ```
 [correlate] Fetching anomaly + deployment events in parallel (environment '<env>')...
-  Found 34 anomaly events across 3 tier(s)
-    tier1: 8 event(s)
-    tier2: 16 event(s)
-    tier3: 10 event(s)
+  Found 18 anomaly events across 2 tier(s)
+    tier2: 10 event(s)
+    tier3: 8 event(s)
 
-  Found 3 correlated anomaly group(s):
+  Found 2 correlated anomaly group(s):
 
-  [Critical] MULTI_TIER — api-gateway
-    Tiers:         tier1, tier2, tier3
-    Anomaly types: AUTODETECT_TIER1, AUTODETECT_TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE, NEW_FINGERPRINT, SIGNATURE_VANISHED
-    Events:        26 over 958s
-    - Dominant error signature disappeared in api-gateway: 503 on GET vets-service (was 97% of service errors)
-    - Dominant error signature disappeared in api-gateway: 503 on GET vets-service (was 97% of service errors)
-    - Dominant error signature disappeared in api-gateway: 503 on GET vets-service (was 97% of service errors)
-
-  [Critical] MULTI_TIER — customers-service
-    Tiers:         tier1, tier2, tier3
-    Anomaly types: AUTODETECT_TIER3, MISSING_SERVICE, NEW_ERROR_SIGNATURE
-    Events:        14 over 934s
-    - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
-    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent: ['api-gateway', 'customers-service', 'visits-service']
-    - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent: ['api-gateway', 'customers-service']
-
-  [Major] TIER2_TIER3 — vets-service
+  [Major] TIER2_TIER3 — api-gateway
     Tiers:         tier2, tier3
-    Anomaly types: MISSING_SERVICE, SIGNATURE_VANISHED
-    Events:        6 over 951s
-    - Dominant error signature disappeared in vets-service: java.net.ConnectException on GET (was 38% of service errors)
-    - Dominant error signature disappeared in vets-service: java.net.ConnectException on GET (was 38% of service errors)
-    - Dominant error signature disappeared in vets-service: java.net.ConnectException on GET (was 38% of service errors)
+    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE, NEW_FINGERPRINT
+    Events:        14 over 92s
+    - New error signature in api-gateway: 500 on GET customers-service
+    - No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent
+    - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent
+
+  [Major] TIER2_TIER3 — customers-service
+    Tiers:         tier2, tier3
+    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Events:        4 over 88s
+    - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
 
   Event sent for api-gateway (behavioral_baseline.correlated_anomaly)
   Event sent for customers-service (behavioral_baseline.correlated_anomaly)
-  Event sent for vets-service (behavioral_baseline.correlated_anomaly)
 ```
 
-> **Note:** Exact event counts vary. Key indicators: `3 tier(s)` in the header and `[Critical] MULTI_TIER`
-> on api-gateway and customers-service. vets-service shows `[Major] TIER2_TIER3` because AutoDetect only
-> fired on api-gateway and customers-service (the DB-dependent paths). If AutoDetect hasn't fired yet,
-> all groups will show `TIER2_TIER3` — run correlate again after another 2-3 minutes.
+> **Note:** Exact event counts vary. Key indicator: `TIER2_TIER3` on both api-gateway and customers-service, showing trace structural silence AND new error signatures on the same services simultaneously.
 
 **Key talking points:**
-- *"Tier 2 alone: could be a canary deploy. Tier 3 alone: could be noise. But all three tiers firing on the same service simultaneously? That's unambiguous — Critical severity, page oncall immediately."*
-- *"AutoDetect sees the error rate spike on metrics. Our framework sees the structural silence in traces AND the new exception type. correlate.py is the join layer that brings all three together."*
-- *"Without this correlation layer, you get 3 separate alerts from 3 different systems. With it, you get one [Critical] MULTI_TIER event with full context — tier1 metric anomaly, tier2 trace dropout, tier3 new error signature."*
-- *"This is the value of the framework as a layer on top of AutoDetect, not a replacement for it."*
+- *"Tier 2 alone: could be a canary deploy. Tier 3 alone: could be noise. Both firing on the same service at the same time? That's high-confidence — TIER2_TIER3 escalates to Major immediately."*
+- *"correlate.py is the join layer. It groups trace drift + error signals by service and surface blast radius in one pass."*
+- *"Without correlation: you'd get separate alerts from separate detectors with no common thread. With it: one correlated event per affected service, full context attached."*
+- *"If AutoDetect also fires later, it upgrades automatically to `[Critical] MULTI_TIER`. The framework gets sharper as more evidence accumulates."*
 
 ### Step 4 — Restore
 ```bash
@@ -786,7 +658,7 @@ k "kubectl rollout status deployment/vets-service deployment/petclinic-db --time
 
 ## Demo 5: Deploy-Correlated Severity Downgrade
 
-**Story:** *"A deploy of vets-service is announced via `notify_deployment.py`. The deploy is bad — vets-service crashes. Anomalies fire: trace tier detects MISSING_SERVICE, error tier detects 503s. On its own, agent.py calls it INCIDENT + PAGE_ONCALL. But `correlate.py` finds the deployment event in its window and downgrades severity from Major → Minor, annotating it as `[deployment-correlated]`. The on-call gets context: this looks like a deploy regression, not a random outage."*
+**Story:** *"A deploy of vets-service is announced via `notify_deployment.py`. The deploy is bad — vets-service crashes immediately on startup. Anomalies fire: trace tier detects MISSING_SERVICE, error tier detects new WebClientRequestException and 503 signatures. On its own, agent.py calls it INCIDENT + PAGE_ONCALL. But `correlate.py` finds the deployment event in its window and downgrades severity from Major → Minor, annotating it as `[deployment-correlated]`. The on-call gets context: this looks like a deploy regression, not a random outage."*
 
 ### Prerequisites
 ```bash
@@ -885,36 +757,32 @@ k "kubectl scale deployment vets-service --replicas=1"
 
 ---
 
-## Demo 6: Self-Healing — Auto-Promotion + Baseline Healer
+## Demo 6: Self-Healing — Live Auto-Promotion
 
-**Story:** *"A deploy of vets-service changes its trace structure. The new call path fires NEW_FINGERPRINT on the first watch run. After 2 consecutive clean runs the framework promotes it automatically — no human intervention, no alert fatigue. In the background, `baseline_healer.py` monitors anomaly event rates; when it detects a spike followed by a drop-to-zero, it scores pre-incident windows, picks the cleanest one, and re-learns the baseline autonomously."*
+**Story:** *"A deploy of vets-service changes its trace structure. The new call path fires NEW_FINGERPRINT on the first watch run — then again on the second. On the second hit, the framework auto-promotes it: the new path is accepted as baseline with zero human intervention. By the third watch run, silence. The framework learned the new normal entirely on its own."*
 
 ### Prerequisites
 ```bash
 cat /dev/null > data/alerts.log
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
 
 # Simulate a deploy: remove vets-service fingerprint from baseline
 # (represents a deployment that changed the call path)
-# Also remove the vets-service startup fingerprint (config-server call on pod start)
-# — it only appears during restarts, causes MISSING_SERVICE noise during the demo
 python3 -c "
-import json, os
+import json, pathlib, os
 e = os.environ['ENV']
-with open(f'data/baseline.{e}.json') as f:
-    b = json.load(f)
+p = pathlib.Path(f'data/baseline.{e}.json')
+b = json.loads(p.read_text())
 fps = b['fingerprints']
-removed = [h for h, info in fps.items() if info.get('root_op','').startswith('vets-service:') or info.get('root_op','').startswith('api-gateway:GET vets')]
+removed = [h for h, info in fps.items()
+           if info.get('root_op','').startswith('vets-service:')
+           or info.get('root_op','').startswith('api-gateway:GET vets')]
 for h in removed: del fps[h]
-with open(f'data/baseline.{e}.json', 'w') as f:
-    json.dump(b, f, indent=2)
+p.write_text(json.dumps(b, indent=2))
 print(f'Removed {len(removed)} vets fingerprint(s) — simulating new deploy')
 "
 ```
 
-### Part 1 — Auto-Promotion
-
-#### Watch run 1 — NEW_FINGERPRINT fires, watch_hits=1
+### Watch run 1 — NEW_FINGERPRINT fires, watch_hits=1
 ```bash
 AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
@@ -924,7 +792,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
   ANOMALY DETECTED
     Type:    NEW_FINGERPRINT
     Message: Unknown execution path for 'api-gateway:GET vets-service'
-    Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /vets -> vets-service:GET /vets -> vets-service:VetRepository.findAll -> ...
+    Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> vets-service:GET /vets -> ...
     TraceID: 480b3c097b6f49d9d2d0cacbc3452f6d
     Event sent (trace.path.drift)
 
@@ -934,7 +802,9 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
   Downstream services seen: customers-service, vets-service, visits-service
 ```
 
-#### Watch run 2 — auto-promotes (watch_hits=2 ≥ threshold)
+*Talking point: "The framework sees a path it doesn't know. It alerts — but doesn't immediately accept it. It needs to see this consistently before trusting it."*
+
+### Watch run 2 — auto-promotes (watch_hits=2 ≥ threshold)
 ```bash
 AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
@@ -949,15 +819,14 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
     Event sent (trace.path.drift)
 
   AUTO-PROMOTED: 31ddc9717bc4e16a... (seen 2 watch runs) root_op=api-gateway:GET vets-service
-  Baseline saved -> data/baseline.<env>.json  (15 fingerprints)
+  Baseline saved -> data/baseline.<env>.json  (9 fingerprints)
 
   Checked 18 traces, 182 skipped, 1 anomalies detected, 1 auto-promoted
-  Per-service breakdown:
-    api-gateway                          18 traces checked  [1 anomaly]
-  Downstream services seen: customers-service, vets-service, visits-service
 ```
 
-#### Watch run 3 — completely silent
+*Talking point: "Seen twice consistently — promoted. The new path is now baseline. No human involved."*
+
+### Watch run 3 — completely silent
 ```bash
 AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
@@ -965,65 +834,21 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
 **Expected output:**
 ```
   Checked 24 traces, 176 skipped, 0 anomalies detected
-  Per-service breakdown:
-    api-gateway                          24 traces checked
-  Downstream services seen: customers-service, vets-service, visits-service
   All trace paths match baseline
 ```
 
-### Part 2 — Baseline Healer (scoring demo)
-
-The healer runs autonomously in the background. Show the scoring logic directly:
-
-```bash
-python3 -c "
-import sys, time, calendar
-sys.path.insert(0, 'agents')
-from baseline_healer import pick_best_window, heal
-
-# Set incident_start_ms to when the outage began
-incident_start = int(time.time() * 1000) - 20 * 60 * 1000   # ~20 min ago
-import os
-env = os.environ['ENV']
-best = pick_best_window(incident_start, env)
-if best:
-    heal(incident_start, env, best, dry_run=True)
-"
-```
-
-**Expected output:**
-```
-  [healer] Scoring 4 candidate windows in parallel...
-    Scoring window -30m to -90m...
-    Scoring window -60m to -120m...
-    Scoring window -120m to -240m...
-    Scoring window -240m to -360m...
-      17:28-18:28 UTC: 80 traces, error_rate=3.3%, diversity=13, score=0.684
-      14:58-16:58 UTC: 80 traces, error_rate=3.3%, diversity=6,  score=0.628
-      16:58-17:58 UTC: 80 traces, error_rate=0.0%, diversity=7,  score=0.656
-      12:58-14:58 UTC: 80 traces, error_rate=0.0%, diversity=6,  score=0.648
-
-  [healer] Best window: -30m to -90m (score=0.684, error_rate=3.3%, diversity=13)
-
-  [healer] Healing baseline for '<env>' using window -30m to -90m...
-    $ python3 core/trace_fingerprint.py --environment <env> learn \
-        --window-minutes 60 --window-offset-minutes 50 --reset
-    $ python3 core/error_fingerprint.py --environment <env> learn \
-        --window-minutes 60 --window-offset-minutes 50 --reset
-    [dry-run] skipped
-  [healer] Dry run complete — no changes written.
-```
+*Talking point: "Zero anomalies. The framework adapted. No alert fatigue from a known-good deploy."*
 
 **Key talking points:**
-- *"No one configured a threshold for 'how many times to see a new pattern before accepting it'. 2 (or 5 in production) is the default — tunable via `AUTO_PROMOTE_THRESHOLD`."*
-- *"The framework learns the new normal on its own. After a deployment, new trace paths stop firing within 25 minutes at the default setting. Zero alert fatigue from known-good deploys."*
-- *"The healer scores candidate windows by two metrics: error rate (lower is cleaner) and trace diversity (higher means richer coverage). It picks the window most likely to produce a good baseline — not just the most recent one."*
-- *"In production, `baseline-agent` runs the healer every 2 minutes via `IncidentTracker`. It's stateless — just looks at the anomaly rate over a rolling window. If the rate spiked then dropped to zero, it picks the cleanest pre-incident window and re-learns automatically."*
+- *"No threshold to configure. 2 (or 5 in production) consecutive detections before acceptance — tunable via `AUTO_PROMOTE_THRESHOLD`."*
+- *"The framework learned the new normal on its own. After a deployment, new trace paths stop firing within 2 watch cycles. Zero alert fatigue."*
+- *"In production, `baseline-agent` runs `baseline_healer.py` every 2 minutes. When anomaly rate spikes then drops to zero (incident resolved), it scores pre-incident windows by error rate + trace diversity and re-learns the cleanest one automatically."*
 
 ### Restore
 ```bash
-# Relearn baseline to get vets fingerprint back properly
-python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 50
+# Relearn baseline to restore vets fingerprint
+python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minutes 30 --window-offset-minutes 3
+python3 core/trace_fingerprint.py --environment $ENV promote
 ```
 
 ---
