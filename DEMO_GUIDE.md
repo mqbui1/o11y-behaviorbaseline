@@ -223,6 +223,71 @@ tail -f data/alerts.log
 
 ---
 
+## Hands-Off Demo Mode
+
+Run `demo_watch.py` in one terminal. Kill services in another. Everything else is automatic.
+
+```bash
+# Terminal 1 — leave running throughout the demo
+python3 demo_watch.py --environment $ENV
+```
+
+```bash
+# Terminal 2 — trigger scenarios (no other commands needed)
+alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no splunk@$EC2_IP'
+k "kubectl scale deployment vets-service --replicas=0"   # fires in ~15s
+# restore
+k "kubectl scale deployment vets-service --replicas=1"
+```
+
+**What `demo_watch.py` does on each event:**
+1. Tails OTel collector logs over SSH — detects drift in ~10–15s, no Splunk wait
+2. Pipes events directly to `agent.py` — Claude triage runs immediately
+3. Waits 60s for Splunk indexing, then runs `correlate.py` — shows TIER2_TIER3
+4. Clears dedup state — ready for next scenario without any manual reset
+
+**Expected output (kill vets-service → watch terminal):**
+```
+[demo_watch] env=<env> | watching for drift events...
+  Kill a service in another terminal to trigger detection.
+
+[22:47:08 UTC] Waiting for drift events from OTel edge processor...
+  [22:47:19 UTC] 1 event(s) received — settling for 5s...
+
+[agent] env=<env> | 1 anomaly(s) from watch
+  Reasoning with Claude...
+
+[!!] INCIDENT — The vets-service is unreachable...
+    Confidence: HIGH | Affected: vets-service, api-gateway
+    Recommended action: PAGE_ONCALL
+    [TRIAGE SUMMARY] written to alerts.log
+
+[22:47:28 UTC] Triage complete. Waiting 60s for Splunk indexing before cross-tier correlation...
+
+[correlate] Fetching anomaly + deployment events in parallel (environment '<env>')...
+  Found 4 anomaly events across 2 tier(s)
+  [Major] TIER2_TIER3 — api-gateway
+    ...
+
+[22:48:32 UTC] Ready for next scenario. Kill a service to trigger again.
+```
+
+**Options:**
+```bash
+# Skip correlate step (faster, triage only)
+python3 demo_watch.py --environment $ENV --no-correlate
+
+# Adjust correlate delay (default 60s — Splunk indexing lag)
+python3 demo_watch.py --environment $ENV --correlate-delay 90
+
+# Suppress poll/status messages (cleaner output)
+python3 demo_watch.py --environment $ENV --quiet
+```
+
+> **Tip:** Keep `tail -f data/alerts.log` open in a third terminal — this shows the structured log that `demo_watch.py` writes via `agent.py`, which has cleaner formatting for screen sharing.
+
+---
+
 ## Demo 0: Context Setting — Framework in Steady State
 
 **Story:** *"This is what the framework looks like before we break anything. Every component is autonomous — no manual alerting rules, no hardcoded thresholds."*
