@@ -52,7 +52,11 @@ print(f'  Error baseline wiped (data/error_baseline.{e}.json)')
 # Stage error baseline on cluster (ConfigMap+inject happens after step 6)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
-echo "  Error baseline staged."
+# Also wipe OTel in-memory error baseline on each pod so demo error signatures fire fresh
+$K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
+      kubectl exec \$pod -c otelcol -- sh -c 'echo \"{\\\"signatures\\\":{}}\" > /baseline/error_baseline.json' 2>/dev/null && echo \"  OTel error baseline wiped: \$pod\"; \
+    done" 2>/dev/null || true
+echo "  Error baseline staged + OTel pods wiped."
 
 # ── Step 5: Clear dedup state ─────────────────────────────────────────────────
 echo "[5/8] Clearing dedup state..."
