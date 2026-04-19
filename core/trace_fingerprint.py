@@ -676,7 +676,15 @@ def _baseline_path(environment: str | None) -> Path:
 def load_baseline(environment: str | None = None) -> dict:
     path = _baseline_path(environment)
     if path.exists():
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
+        # Normalize: ensure every entry has 'hash' == its dict key, and
+        # strip stray "Path: " prefixes that external tools may have injected.
+        for k, v in data.get("fingerprints", {}).items():
+            if "hash" not in v:
+                v["hash"] = k
+            if isinstance(v.get("path"), str) and v["path"].startswith("Path: "):
+                v["path"] = v["path"][6:]
+        return data
     return {"fingerprints": {}, "topology": None,
             "created_at": None, "updated_at": None,
             "sf_environment": environment}
