@@ -246,14 +246,15 @@ python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 
 **Expected output (trace show):**
 ```
-Baseline (environment '<env>'): 10 fingerprints
-  Services: [api-gateway, customers-service, discovery-server, vets-service, visits-service, ...]
+Baseline (environment '<env>'): 18 fingerprints
+  Services: [admin-server, api-gateway, config-server, customers-service, discovery-server, vets-service, visits-service]
 
-  api-gateway:GET /api/gateway/owners/{ownerId}  (2 patterns)
-  api-gateway:GET customers-service              (4 patterns)
-  api-gateway:GET vets-service                   (1 pattern)
+  admin-server:GET                               (2 patterns)
+  api-gateway:GET /api/gateway/owners/{ownerId}  (5 patterns)
+  api-gateway:GET customers-service              (5 patterns)
+  api-gateway:GET vets-service                   (3 patterns)
   api-gateway:PUT customers-service              (1 pattern)
-  admin-server:GET                               (1 pattern)
+  vets-service:GET                               (1 pattern)
   visits-service:GET                             (1 pattern)
 ```
 
@@ -276,7 +277,7 @@ triage-agent     1/1     1            1
 
 **Key talking points:**
 - *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
-- *"10 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"18 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
 - *"Two autonomous Deployments run continuously: `baseline-agent` re-learns every 2h and heals baselines after incidents; `triage-agent` polls every 60s, correlates all three detection tiers, and calls Claude for triage."*
 - *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
 
@@ -948,7 +949,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
     Event sent (trace.path.drift)
 
   AUTO-PROMOTED: 31ddc9717bc4e16a... (seen 2 watch runs) root_op=api-gateway:GET vets-service
-  Baseline saved -> data/baseline.<env>.json  (9 fingerprints)
+  Baseline saved -> data/baseline.<env>.json  (15 fingerprints)
 
   Checked 18 traces, 182 skipped, 1 anomalies detected, 1 auto-promoted
   Per-service breakdown:
