@@ -707,9 +707,21 @@ for pod in $(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*]
 done
 ```
 
-**Step 4 — Wire the Splunk collector to forward spans to the processor**
+**Step 4 — Point app traces at the processor (via OTel Operator)**
 
-The standard Splunk Helm collector doesn't forward to `otelcol-fingerprint` by default. Patch the relay ConfigMap to add an `otlphttp/fingerprint` exporter pointing to `http://otelcol-fingerprint:4318` and add it to the traces pipeline exporters list. See the [New Cluster Setup](DEMO_GUIDE.md#step-4--wire-the-splunk-otel-collector-to-forward-traces-to-the-fingerprint-processor) section in the Demo Guide for the full patch script.
+The OTel Operator's `Instrumentation` CR controls where auto-instrumented app pods send traces. Patch it to point at `otelcol-fingerprint` so traces flow directly through the fingerprint processor before reaching Splunk APM — no Helm relay patch needed:
+
+```bash
+kubectl patch instrumentation splunk-otel-collector --type=merge -p \
+  '{"spec":{"exporter":{"endpoint":"http://otelcol-fingerprint.default.svc.cluster.local:4317"},
+    "java":{"env":[{"name":"OTEL_EXPORTER_OTLP_ENDPOINT",
+      "value":"http://otelcol-fingerprint.default.svc.cluster.local:4318"}]}}}'
+
+# Restart app pods so the webhook re-injects with the updated endpoint
+kubectl rollout restart deployment/<your-app-deployments>
+```
+
+`deploy.sh` does this automatically. If the cluster uses a different auto-instrumentation mechanism (e.g. manual `OTEL_EXPORTER_OTLP_ENDPOINT` env vars on deployments), set those to point at `otelcol-fingerprint:4317` (gRPC) or `:4318` (HTTP) instead.
 
 ### Keeping the baseline in sync
 
