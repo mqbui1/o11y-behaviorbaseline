@@ -103,6 +103,7 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 
 | Path | How | Latency |
 |------|-----|---------|
+| **OTel edge → `poll_drift_events --triage` → `agent.py`** | Tails collector logs via SSH — no Splunk indexing wait. Kill-to-verdict in demo mode. | **~15–30s** (10s detect + 5s settle + ~10s Claude) |
 | **OTel edge → `triage-agent`** | Processor detects on first affected trace, event lands in Splunk, triage-agent inline-correlates and calls LLM | **~60–90s** (15s detect + 30s index + 60s poll cycle) |
 | **OTel edge → inline `correlate.py`** | Tier 2/3 events joined with Tier 1 AutoDetect incidents inside triage-agent | **~1–2 min** (triage-agent poll cycle) |
 | **Python APM polling → `agent.py`** | `trace_fingerprint.py watch` samples APM traces directly | **~1–5 min** (manual/scripted) |
@@ -157,7 +158,8 @@ o11y-behaviorbaseline/
 ├── onboard.py                ← provisioning + detector management
 ├── notify_deployment.py      ← CI/CD hook (emits deployment.started + triggers re-learn)
 ├── watch_otel_events.py      ← fast-path triage: queries OTel edge events from Splunk
-├── poll_drift_events.py      ← live terminal display: tails OTel collector logs via SSH
+├── poll_drift_events.py      ← tails OTel collector logs via SSH — live display or --triage (pipe to agent.py)
+├── demo_watch.py             ← hands-off demo loop: detect → triage → correlate, autonomous
 │
 ├── core/                     ← detection engine
 │   ├── trace_fingerprint.py        ← Tier 2: trace path drift
@@ -373,19 +375,24 @@ python notify_deployment.py \
 
 ```bash
 # Build / rebuild
-python core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes 120
-python core/error_fingerprint.py --environment petclinicmbtest learn --window-minutes 120
+python3 core/trace_fingerprint.py --environment petclinicmbtest learn --window-minutes 120
+python3 core/error_fingerprint.py --environment petclinicmbtest learn --window-minutes 120
+
+# Cold-start: fresh cluster with <30 min of traffic (min=1 with consolidation pass)
+python3 core/trace_fingerprint.py --environment petclinicmbtest learn --bootstrap --window-minutes 30
 
 # Inspect
-python core/trace_fingerprint.py --environment petclinicmbtest show
-python core/error_fingerprint.py --environment petclinicmbtest show
+python3 core/trace_fingerprint.py --environment petclinicmbtest show
+python3 core/error_fingerprint.py --environment petclinicmbtest show
 
 # Promote after a known deployment (skips auto-promotion wait)
-python core/trace_fingerprint.py --environment petclinicmbtest promote
-python core/error_fingerprint.py --environment petclinicmbtest promote
+python3 core/trace_fingerprint.py --environment petclinicmbtest promote
+python3 core/error_fingerprint.py --environment petclinicmbtest promote
 ```
 
 **Auto-promotion:** A new fingerprint seen in `AUTO_PROMOTE_THRESHOLD` consecutive watch runs (default: 5, ~25 min at 5m cron) is automatically promoted and stops alerting.
+
+**Bootstrap mode (`--bootstrap`):** On fresh clusters without enough traffic to meet the normal `MIN_BASELINE_OCCURRENCES=3` threshold, use `--bootstrap` to accept fingerprints seen ≥1 time. After learning, a consolidation pass drops fingerprints seen exactly once (likely transients). Also merges any `auto_promoted` entries from the OTel ConfigMap. Implies `--reset`.
 
 Baseline files live in `data/` and are gitignored. Override locations via env vars:
 
@@ -430,7 +437,7 @@ Tiers 2, 3, and C emit **custom events** queryable via SignalFlow:
 | `DEPLOYMENT_CORRELATION_WINDOW_MINUTES` | `60` | How far back to look for deployment events |
 | `RELEARN_DELAY_MINUTES` | `5` | Minutes after a deploy before background re-learn fires |
 | `MISSING_SERVICE_DOMINANCE_THRESHOLD` | `0.6` | Fraction of baseline patterns a service must appear in to trigger `MISSING_SERVICE` |
-| `WATCH_SAMPLE_LIMIT` | `50` | Max traces fetched per watch run |
+| `WATCH_SAMPLE_LIMIT` | `200` | Max traces fetched per watch run |
 | `AGENT_WINDOW_MINUTES` | `30` | Anomaly lookback window for `agent.py` |
 | `AWS_REGION` | `us-west-2` | AWS region for Bedrock (Claude) calls |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key (triage-agent fallback if Bedrock unavailable) |
@@ -543,20 +550,37 @@ Events emitted:
 
 ### Fast-path triage from OTel events
 
-`watch_otel_events.py` queries Splunk SignalFlow for recent `trace.path.drift` and `error.signature.drift` events and formats them as `agent.py`-compatible JSON — skipping the slow APM polling path entirely. Kill-to-INCIDENT time: **~50 seconds** (15s OTel detection + 30s indexing lag + 5s triage).
+Two approaches — use the direct log-tail path for demos (no Splunk indexing wait):
 
+**Primary (no Splunk wait) — `poll_drift_events.py --triage`:**
 ```bash
-# Watch for live drift events in a separate terminal (tails collector logs via SSH)
+# Live stream (monitoring terminal):
 python3 -u poll_drift_events.py
 
-# After an anomaly appears, triage immediately:
-python3 watch_otel_events.py --environment <env> | python3 agent.py --environment <env>
+# Triage mode — blocks until events arrive, then pipes to agent.py:
+python3 poll_drift_events.py --triage --environment <env> | python3 agent.py --environment <env>
+```
 
+Kill-to-INCIDENT time: **~15–30s** (10s OTel detect + 5s settle + Claude triage). No Splunk indexing lag.
+
+**Hands-off demo loop — `demo_watch.py`:**
+```bash
+# Runs continuously: detect → triage → correlate, one loop per scenario
+python3 demo_watch.py --environment <env>
+python3 demo_watch.py --environment <env> --no-correlate   # triage only
+python3 demo_watch.py --environment <env> --quiet           # minimal output
+```
+
+**Alternative (queries Splunk) — `watch_otel_events.py`:**
+```bash
+python3 watch_otel_events.py --environment <env> | python3 agent.py --environment <env>
 # Options:
 #   --window-minutes N    how far back to query (default: 5)
 #   --dedup-ttl N         suppress re-alerts for same hash within N seconds (default: 120)
 #   --no-dedup            show all events in window regardless of dedup state
 ```
+
+Kill-to-INCIDENT time: **~50s** (15s detect + 30s indexing lag + 5s triage).
 
 Hash deduplication is persisted to `data/otel_dedup_state.<env>.json` so repeated runs don't re-triage the same events within the TTL window.
 
@@ -611,7 +635,7 @@ The sidecar requires a `ServiceAccount` with `get/patch/update` on the `behavior
 # Done. Collector pods will reload within 60 seconds.
 ```
 
-It uses `kubectl create configmap --dry-run=client -o yaml | kubectl apply -f -` so it is safe to run repeatedly (creates or updates idempotently).
+It uses `kubectl delete + create` (not `kubectl apply`) to ensure ConfigMap data is always updated — `apply` silently uses the last-applied-configuration annotation and may not reflect new data.
 
 ### Directory layout
 
@@ -642,37 +666,50 @@ otel-processor/
 **Step 1 — Learn baseline**
 
 ```bash
-python3 core/trace_fingerprint.py --environment <env> learn
-python3 core/error_fingerprint.py --environment <env> learn
+# Standard (cluster with 30+ min of traffic):
+python3 core/trace_fingerprint.py --environment <env> learn --window-minutes 30
+python3 core/error_fingerprint.py --environment <env> learn --window-minutes 30
+
+# Cold-start (fresh cluster, <30 min of traffic):
+python3 core/trace_fingerprint.py --environment <env> learn --bootstrap --window-minutes 30
 ```
 
-**Step 2 — Build, seed, and deploy (one command)**
+**Step 2 — Build and push the image (on the cluster node)**
 
 ```bash
-./otel-processor/deploy.sh <env>
-# Builds image → pushes to registry → seeds ConfigMap → applies RBAC → restarts DaemonSet
+# Copy source to EC2 and build
+scp -P 2222 -r otel-processor/ splunk@<ec2-ip>:/home/splunk/
+ssh -p 2222 splunk@<ec2-ip> "cd /home/splunk/otel-processor && \
+  docker build -t localhost:9999/otelcol-fingerprint:latest . && \
+  docker push localhost:9999/otelcol-fingerprint:latest"
 ```
 
-Or manually:
+**Step 3 — Seed ConfigMap and deploy**
+
 ```bash
-docker build -t localhost:9999/otelcol-fingerprint:latest otel-processor/
-docker push localhost:9999/otelcol-fingerprint:latest
-./otel-processor/sync-baseline.sh <env>
-kubectl create configmap baseline-sync-scripts \
-  --from-file=baseline-sync-sidecar.py=otel-processor/k8s/baseline-sync-sidecar.py \
-  --dry-run=client -o yaml | kubectl apply -f -
+# Push baseline files to EC2
+scp -P 2222 data/baseline.<env>.json splunk@<ec2-ip>:/tmp/baseline.json
+scp -P 2222 data/error_baseline.<env>.json splunk@<ec2-ip>:/tmp/error_baseline.json
+
+# Create ConfigMap (delete+create, not apply — apply ignores data updates)
+kubectl delete configmap behavioral-baseline --ignore-not-found
+kubectl create configmap behavioral-baseline \
+  --from-file=baseline.json=/tmp/baseline.json \
+  --from-file=error_baseline.json=/tmp/error_baseline.json
+
 kubectl apply -f otel-processor/k8s/daemonset.yaml
 kubectl rollout restart daemonset/otelcol-fingerprint
-```
 
-**Step 3 — Redirect app spans through the processor**
-
-```bash
-for svc in api-gateway customers-service vets-service visits-service; do
-  kubectl set env deployment/$svc \
-    OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol-fingerprint.default.svc.cluster.local:4317
+# Inject baseline directly into running pods (active immediately, no 60s wait)
+B64=$(base64 -w 0 /tmp/baseline.json)
+for pod in $(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl exec $pod -c otelcol -- sh -c "echo '$B64' | base64 -d > /baseline/baseline.json"
 done
 ```
+
+**Step 4 — Wire the Splunk collector to forward spans to the processor**
+
+The standard Splunk Helm collector doesn't forward to `otelcol-fingerprint` by default. Patch the relay ConfigMap to add an `otlphttp/fingerprint` exporter pointing to `http://otelcol-fingerprint:4318` and add it to the traces pipeline exporters list. See the [New Cluster Setup](DEMO_GUIDE.md#step-4--wire-the-splunk-otel-collector-to-forward-traces-to-the-fingerprint-processor) section in the Demo Guide for the full patch script.
 
 ### Keeping the baseline in sync
 

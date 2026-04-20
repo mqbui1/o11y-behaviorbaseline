@@ -8,45 +8,39 @@ Use this section when deploying to a brand-new EC2/k3d cluster. Skip to **Prereq
 
 ### What you need
 - New EC2 instance running k3d with petclinic + splunk-otel-collector already deployed
-- Splunk workshop environment name, ingest token, and user API token
+- Splunk workshop environment credentials from the `workshop-secret` ConfigMap (on the cluster)
 
-### Step 1 — Update `.env` (local Mac)
+### Step 1 — Extract tokens from the cluster (on EC2)
+```bash
+# SSH into EC2
+ssh -p 2222 splunk@<ec2-ip>  # password: Sp1unkH00di3
+
+# Decode workshop tokens
+kubectl get secret workshop-secret -o jsonpath='{.data.access_token}' | base64 -d && echo  # INGEST token
+kubectl get secret workshop-secret -o jsonpath='{.data.api_token}'    | base64 -d && echo  # API token
+kubectl get secret workshop-secret -o jsonpath='{.data.env}'          | base64 -d && echo  # environment name
+```
+
+### Step 2 — Update `.env` (local Mac)
 ```bash
 # Edit .env:
 EC2_IP=<new-ec2-ip>
 EC2_PASSWORD=Sp1unkH00di3
-ENVIRONMENT=<env-name>              # e.g. mbtest-45a9-workshop
-SPLUNK_INGEST_TOKEN=<ingest-token>
-SPLUNK_ACCESS_TOKEN=<user-api-token>
-```
+ENV=<env-name>                      # e.g. mqbtest-f0d4-workshop
+SPLUNK_INGEST_TOKEN=<ingest-token>   # from access_token above
+SPLUNK_ACCESS_TOKEN=<api-token>      # from api_token above
+SPLUNK_REALM=us1
 
-### Step 2 — Create required K8s secrets (on EC2)
-```bash
-source .env  # or paste values directly
+source .env
 
-# SSH alias
+# SSH alias for cluster commands
 alias k='sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no splunk@$EC2_IP'
-
-# workshop-secret — env name + Splunk endpoints + ingest token
-k "kubectl create secret generic workshop-secret \
-  --from-literal=env=$ENVIRONMENT \
-  --from-literal=ingest-url=https://ingest.us1.signalfx.com \
-  --from-literal=api-url=https://api.us1.signalfx.com \
-  --from-literal=access-token=$SPLUNK_INGEST_TOKEN"
-
-# splunk-api-token — user API token (used by fingerprint processor emitter)
-k "kubectl create secret generic splunk-api-token \
-  --from-literal=token=$SPLUNK_ACCESS_TOKEN"
-
-# splunk-otel-collector — ingest token for the Helm-deployed agent
-k "kubectl create secret generic splunk-otel-collector \
-  --from-literal=splunk_observability_access_token=$SPLUNK_INGEST_TOKEN"
 ```
 
 ### Step 3 — Build and push the OTel processor image (on EC2)
 ```bash
 # Copy otel-processor source to EC2
-sshpass -p "$EC2_PASSWORD" scp -P 2222 -r otel-processor/ splunk@$EC2_IP:/home/splunk/otel-processor/
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -r otel-processor/ splunk@$EC2_IP:/home/splunk/
 
 # Build and push to local k3d registry
 k "cd /home/splunk/otel-processor && \
@@ -54,54 +48,145 @@ k "cd /home/splunk/otel-processor && \
    docker push localhost:9999/otelcol-fingerprint:latest"
 ```
 
-### Step 4 — Learn baseline (local Mac)
-Wait ~5 minutes for petclinic loadgen to generate APM data, then:
+### Step 4 — Wire the splunk-otel-collector to forward traces to the fingerprint processor
+The standard Splunk Helm collector doesn't forward to otelcol-fingerprint by default. Patch it:
+```bash
+# Find the relay ConfigMap name (usually splunk-otel-collector-otel-agent)
+k "kubectl get configmap | grep otel"
+
+# Patch it to add the fingerprint exporter + add it to the traces pipeline
+python3 - <<'EOF'
+import json, subprocess, os, re
+
+EC2_IP   = os.environ["EC2_IP"]
+EC2_PASS = os.environ["EC2_PASSWORD"]
+
+def ssh(cmd):
+    r = subprocess.run(
+        ["sshpass", f"-p{EC2_PASS}", "ssh", "-T", "-p", "2222",
+         "-o", "StrictHostKeyChecking=no", f"splunk@{EC2_IP}", cmd],
+        capture_output=True, text=True)
+    return r.stdout.strip()
+
+# Get current config
+raw = ssh("kubectl get configmap splunk-otel-collector-otel-agent -o jsonpath='{.data.relay}'")
+
+# Inject fingerprint exporter
+if "otlphttp/fingerprint" not in raw:
+    # Add exporter definition after existing exporters section
+    raw = re.sub(
+        r'(exporters:\n)',
+        r'\1  otlphttp/fingerprint:\n    endpoint: "http://otelcol-fingerprint:4318"\n    tls:\n      insecure: true\n',
+        raw, count=1)
+    # Add to traces pipeline exporters
+    raw = re.sub(
+        r'(traces:\s*\n\s*exporters:\s*\[)([^\]]+)(\])',
+        lambda m: m.group(1) + m.group(2).rstrip() + ', otlphttp/fingerprint' + m.group(3),
+        raw)
+
+# Apply via patch
+patch = json.dumps({"data": {"relay": raw}})
+ssh(f"kubectl patch configmap splunk-otel-collector-otel-agent --type=merge -p '{patch}'")
+ssh("kubectl rollout restart daemonset/splunk-otel-collector-agent")
+print("Done — traces now forwarded to otelcol-fingerprint")
+EOF
+```
+
+### Step 5 — Learn baseline (local Mac)
+Wait ~10 minutes for petclinic loadgen to generate APM data, then bootstrap a baseline:
 ```bash
 source .env
-python3 core/trace_fingerprint.py --environment $ENVIRONMENT learn --window-minutes 30
-python3 core/trace_fingerprint.py --environment $ENVIRONMENT promote
 
-# Copy baseline to EC2
-sshpass -p "$EC2_PASSWORD" scp -P 2222 \
-  data/baseline.$ENVIRONMENT.json splunk@$EC2_IP:/tmp/baseline.json
+# Bootstrap mode: accepts fingerprints seen ≥1 time, then drops seen-once noise.
+# Use for fresh clusters where traffic hasn't accumulated enough for the standard min=3 threshold.
+# Also merges auto-promoted entries from the OTel ConfigMap automatically.
+python3 core/trace_fingerprint.py --environment $ENV learn --bootstrap --window-minutes 30
+python3 core/trace_fingerprint.py --environment $ENV promote
+
+# For more established clusters (30+ min of traffic), use standard learn:
+# python3 core/trace_fingerprint.py --environment $ENV learn --window-minutes 30
+# python3 core/trace_fingerprint.py --environment $ENV promote
+
+# Verify fingerprints were learned
+python3 core/trace_fingerprint.py --environment $ENV show
 ```
 
-### Step 5 — Deploy (on EC2)
+> **Expected (bootstrap):** 15–20 fingerprints from ~20 minutes of traffic. The output includes
+> a line like `  Merged N OTel-promoted fingerprint(s) from ConfigMap` when the OTel baseline
+> already has auto-promoted entries.
+
+> **Bootstrap consolidation:** After the min=1 pass, fingerprints seen exactly once are dropped.
+> These are startup transients or stray spans that won't appear again in steady state.
+
+### Step 6 — Seed and deploy the OTel processor (on EC2)
 ```bash
-# Copy full repo to EC2 (for deploy.sh + data/ directory)
-sshpass -p "$EC2_PASSWORD" scp -P 2222 -r . splunk@$EC2_IP:/home/splunk/repo/
+# Push baseline to EC2
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
 
-# On EC2:
-k "cd /home/splunk/repo && \
-   ./otel-processor/deploy.sh $ENVIRONMENT --skip-learn --skip-build"
+# Create required secrets (if not already present)
+k "kubectl create secret generic splunk-api-token \
+  --from-literal=token=$SPLUNK_ACCESS_TOKEN --dry-run=client -o yaml | kubectl apply -f -"
+
+k "kubectl create secret generic workshop-secret \
+  --from-literal=env=$ENV \
+  --from-literal=ingest-url=https://ingest.us1.signalfx.com \
+  --from-literal=api-url=https://api.us1.signalfx.com \
+  --from-literal=access_token=$SPLUNK_INGEST_TOKEN \
+  --dry-run=client -o yaml | kubectl apply -f -"
+
+# Create empty error baseline
+python3 -c "
+import json, pathlib, datetime
+e = '$ENV'
+pathlib.Path(f'data/error_baseline.{e}.json').write_text(
+    json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})
+)
+print(f'Empty error baseline created: data/error_baseline.{e}.json')
+"
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.json
+
+# Seed ConfigMap + apply DaemonSet
+k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
+   kubectl create configmap behavioral-baseline \
+     --from-file=baseline.json=/tmp/baseline.json \
+     --from-file=error_baseline.json=/tmp/error_baseline.json"
+
+k "kubectl apply -f /home/splunk/otel-processor/k8s/daemonset.yaml"
+k "kubectl rollout restart daemonset/otelcol-fingerprint"
+k "kubectl rollout status daemonset/otelcol-fingerprint --timeout=120s"
+
+# Inject baseline directly into running pods (active immediately, no 60s wait)
+k "B64=\$(base64 -w 0 /tmp/baseline.json); \
+   for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
+     kubectl exec \$pod -c otelcol -- sh -c \"echo '\$B64' | base64 -d > /baseline/baseline.json\"; \
+     echo \"  Injected into \$pod\"; \
+   done"
 ```
 
-`--skip-learn` — baseline was already learned locally in Step 4.
-`--skip-build` — image was already built in Step 3.
-
-**What `deploy.sh` does:**
-1. Seeds the `behavioral-baseline` ConfigMap (delete+create, not apply)
-2. Patches the `splunk-otel-collector-agent` relay to forward traces to the fingerprint processor
-3. Applies daemonset.yaml (DaemonSet, RBAC, Service)
-4. Restarts the DaemonSet
-5. Injects the baseline directly into running pods (active immediately, no 60s wait)
-
-### Step 6 — Verify (local Mac)
+### Step 7 — Verify (local Mac)
 ```bash
 # Should be silent (no false positives):
 python3 -u poll_drift_events.py
 
 # Kill visits-service to confirm Demo 1 fires within ~20s:
 k "kubectl scale deployment visits-service --replicas=0"
-# Expected: trace.path.drift + error.signature.drift events appear
+# Expected: trace.path.drift event appears in poll_drift_events.py within ~20s
 # Restore:
 k "kubectl scale deployment visits-service --replicas=1"
 ```
 
 ### Re-deploy (subsequent sessions, image already built)
 ```bash
-# On EC2 — config-only re-deploy:
-k "cd /home/splunk/repo && ./otel-processor/deploy.sh $ENVIRONMENT --skip-learn --skip-build"
+# Push updated baseline + restart (config-only re-deploy)
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
+k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
+   kubectl create configmap behavioral-baseline \
+     --from-file=baseline.json=/tmp/baseline.json \
+     --from-file=error_baseline.json=/tmp/error_baseline.json"
+k "kubectl rollout restart daemonset/otelcol-fingerprint"
 ```
 
 ---
@@ -112,9 +197,7 @@ k "cd /home/splunk/repo && ./otel-processor/deploy.sh $ENVIRONMENT --skip-learn 
 ```bash
 cd /Users/mbui/Documents/o11y-behaviorbaseline
 source .env
-
-# Set the target environment — update this for each workshop/demo session
-export ENV=bdf-7fdc-workshop
+# ENV is set in .env — update before each workshop session
 
 # SSH alias for cluster commands
 # EC2_IP and EC2_PASSWORD are set in .env — update before each demo session
@@ -181,7 +264,7 @@ visits-service-569b6f8c77-xxxxx                        Running
 
 ### Reset and verify baselines are clean
 
-Run **`demo-reset.sh`** — it handles everything in one command (~2-3 minutes):
+**Full reset** (before first demo or after a messy run — ~2-3 minutes):
 
 ```bash
 # Refresh AWS credentials first (in Claude Code terminal)
@@ -204,6 +287,19 @@ source .env
 8. Verify 0 OTel events in Splunk (last 3m)
 
 > **If step 8 shows OTel events still present:** the previous demo's events haven't aged out of the 3m window yet. Wait 3 minutes and re-run `./demo-reset.sh` — it is idempotent.
+
+**Quick reset** (between demos, no cluster ops — ~5 seconds):
+
+```bash
+./demo-quick-reset.sh
+```
+
+`demo-quick-reset.sh` clears local state only:
+1. Clear `data/alerts.log`
+2. Wipe error baseline (local file only)
+3. Clear dedup state
+
+Does NOT restore services or push to cluster. Use between clean demo runs where services were already restored.
 
 > **If trace anomalies persist after reset:** re-learn the baseline:
 > ```bash
@@ -243,8 +339,9 @@ k "kubectl scale deployment vets-service --replicas=1"
 **What `demo_watch.py` does on each event:**
 1. Tails OTel collector logs over SSH — detects drift in ~10–15s, no Splunk wait
 2. Pipes events directly to `agent.py` — Claude triage runs immediately
-3. Waits 60s for Splunk indexing, then runs `correlate.py` — shows TIER2_TIER3
-4. Clears dedup state — ready for next scenario without any manual reset
+3. Prints elapsed time: `Triage complete in Xs.`
+4. Waits 60s for Splunk indexing, then runs `correlate.py` — shows TIER2_TIER3
+5. Clears dedup state — ready for next scenario without any manual reset
 
 **Expected output (kill vets-service → watch terminal):**
 ```
@@ -262,14 +359,15 @@ k "kubectl scale deployment vets-service --replicas=1"
     Recommended action: PAGE_ONCALL
     [TRIAGE SUMMARY] written to alerts.log
 
-[22:47:28 UTC] Triage complete. Waiting 60s for Splunk indexing before cross-tier correlation...
+[22:47:34 UTC] Triage complete in 26s.
+[22:47:34 UTC] Waiting 60s for Splunk indexing before cross-tier correlation...
 
 [correlate] Fetching anomaly + deployment events in parallel (environment '<env>')...
   Found 4 anomaly events across 2 tier(s)
   [Major] TIER2_TIER3 — api-gateway
     ...
 
-[22:48:32 UTC] Ready for next scenario. Kill a service to trigger again.
+[22:48:38 UTC] Ready for next scenario. Kill a service to trigger again.
 ```
 
 **Options:**
@@ -311,14 +409,15 @@ python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 
 **Expected output (trace show):**
 ```
-Baseline (environment '<env>'): 8 fingerprints
+Baseline (environment '<env>'): 18 fingerprints
   Services: [admin-server, api-gateway, customers-service, vets-service, visits-service]
 
-  admin-server:GET                               (1 pattern)
-  api-gateway:GET /api/gateway/owners/{ownerId}  (2 patterns)
-  api-gateway:GET customers-service              (3 patterns)
-  api-gateway:GET vets-service                   (1 pattern)
+  api-gateway:GET /api/gateway/owners/{ownerId}  (3 patterns)
+  api-gateway:GET customers-service              (2 patterns)
+  api-gateway:GET vets-service                   (2 patterns)
+  api-gateway:GET visits-service                 (3 patterns)
   api-gateway:PUT customers-service              (1 pattern)
+  ...
 ```
 
 **Expected output (kubectl get deployments):**
@@ -340,7 +439,7 @@ triage-agent     1/1     1            1
 
 **Key talking points:**
 - *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
-- *"8 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"~18 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
 - *"Two autonomous Deployments run continuously: `baseline-agent` re-learns every 2h and heals baselines after incidents; `triage-agent` polls every 60s, correlates all three detection tiers, and calls Claude for triage."*
 - *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
 
@@ -815,7 +914,7 @@ b = json.loads(p.read_text())
 fps = b['fingerprints']
 removed = [h for h, info in fps.items()
            if info.get('root_op','').startswith('vets-service:')
-           or info.get('root_op','').startswith('api-gateway:GET vets')]
+           or 'vets' in info.get('root_op','').lower()]
 for h in removed: del fps[h]
 p.write_text(json.dumps(b, indent=2))
 print(f'Removed {len(removed)} vets fingerprint(s) — simulating new deploy')
@@ -859,7 +958,7 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
     Event sent (trace.path.drift)
 
   AUTO-PROMOTED: 31ddc9717bc4e16a... (seen 2 watch runs) root_op=api-gateway:GET vets-service
-  Baseline saved -> data/baseline.<env>.json  (9 fingerprints)
+  Baseline saved -> data/baseline.<env>.json  (19 fingerprints)
 
   Checked 18 traces, 182 skipped, 1 anomalies detected, 1 auto-promoted
 ```
@@ -1002,9 +1101,14 @@ echo "Onboarding state restored."
 ## How it works (30-second explanation)
 
 ```
-LEARN  →  Search each service independently (50 traces each, parallel)
+LEARN  →  Search each service independently (up to 200 traces each, parallel)
           Build fingerprints: "api-gateway always calls vets-service on GET /vets"
           Build error signatures: "customers-service has no DB errors in healthy state"
+
+          --bootstrap flag: for fresh clusters with <30 min of traffic
+            Accepts fingerprints seen ≥1 time (vs default min=3)
+            Drops seen-once entries after learning (consolidation pass)
+            Merges auto-promoted entries from OTel ConfigMap automatically
 
 WATCH  →  Two paths:
 
@@ -1041,8 +1145,13 @@ Slow path — Python APM polling (used in Demo 6 auto-promotion only):
 
 ## Restore / Reset
 
-Use `demo-reset.sh` for a full reset between demos:
+**Quick reset between demos** (local state only, ~5 seconds):
+```bash
+./demo-quick-reset.sh
+```
+Clears alerts.log, wipes error baseline, clears dedup state. No cluster ops.
 
+**Full reset** (before first demo or after a messy run):
 ```bash
 ./demo-reset.sh
 ```
@@ -1063,4 +1172,10 @@ k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
      kubectl exec \$pod -c otelcol -- sh -c \"echo '\$B64' | base64 -d > /baseline/baseline.json\"; \
    done && echo 'Baseline pushed to all pods'"
+```
+
+For cold-start re-learn on a fresh cluster:
+```bash
+python3 core/trace_fingerprint.py --environment $ENV learn --bootstrap --window-minutes 30
+python3 core/trace_fingerprint.py --environment $ENV promote
 ```
