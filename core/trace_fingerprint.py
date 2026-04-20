@@ -54,6 +54,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -95,10 +96,10 @@ INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 # Minimum span count for a trace to be fingerprint-worthy.
 MIN_SPANS = 2
 
-# Traces to sample per service per learn run. 50 is plenty — each service
-# only needs MIN_BASELINE_OCCURRENCES hits and most root_ops repeat every few
-# seconds. Keeping this low makes learn ~4x faster than using 200.
-LEARN_SAMPLE_LIMIT = int(os.environ.get("LEARN_SAMPLE_LIMIT", "50"))
+# Traces to sample per service per learn run. 200 gives enough repetitions
+# for each fingerprint hash to reach MIN_BASELINE_OCCURRENCES even for
+# infrequent endpoints in a short learn window.
+LEARN_SAMPLE_LIMIT = int(os.environ.get("LEARN_SAMPLE_LIMIT", "200"))
 
 # Traces to sample per watch run — lower is faster; new patterns are detected
 # after the first occurrence so high volume adds little signal.
@@ -702,6 +703,75 @@ def save_baseline(baseline: dict, environment: str | None = None) -> None:
           f"({len(baseline['fingerprints'])} fingerprints)")
 
 
+# ── OTel baseline merge ────────────────────────────────────────────────────────
+
+def _merge_otel_baseline(fingerprints: dict, environment: str | None) -> int:
+    """
+    Fetch the behavioral-baseline ConfigMap from the cluster and merge any
+    OTel-promoted fingerprint hashes that are absent from the Python baseline.
+
+    The OTel processor auto-promotes fingerprints after 10 detections and
+    writes them back via the baseline-sync sidecar → ConfigMap. These cover
+    paths the Python APM-query approach may miss (low-frequency endpoints,
+    direct service-to-service calls routed through the cluster but sampled
+    sparsely in Splunk). Merging them prevents watch from firing NEW_FINGERPRINT
+    for paths the cluster-side processor already considers stable.
+
+    Requires EC2_IP + EC2_PASSWORD (or EC2_PASS) in env — silently skips if
+    not configured or if kubectl/sshpass are unavailable.
+
+    Returns the number of fingerprints merged.
+    """
+    ec2_ip   = os.environ.get("EC2_IP", "")
+    ec2_pass = os.environ.get("EC2_PASSWORD") or os.environ.get("EC2_PASS", "")
+    ec2_port = os.environ.get("EC2_PORT", "2222")
+    if not ec2_ip or not ec2_pass:
+        return 0
+
+    try:
+        result = subprocess.run(
+            ["sshpass", f"-p{ec2_pass}",
+             "ssh", "-T", "-p", ec2_port,
+             "-o", "StrictHostKeyChecking=no",
+             "-o", "ConnectTimeout=10",
+             f"splunk@{ec2_ip}",
+             "kubectl get configmap behavioral-baseline "
+             "-o jsonpath='{.data.baseline\\.json}' 2>/dev/null"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+        otel_data = json.loads(result.stdout.strip())
+    except Exception:
+        return 0
+
+    merged = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for h, entry in otel_data.get("fingerprints", {}).items():
+        if h in fingerprints:
+            continue
+        if not entry.get("auto_promoted"):
+            continue
+        # Ensure required fields present before merging
+        if not entry.get("root_op") or not entry.get("path"):
+            continue
+        fingerprints[h] = {
+            "hash":          h,
+            "path":          entry.get("path", ""),
+            "root_op":       entry.get("root_op", ""),
+            "services":      entry.get("services", []),
+            "span_count":    entry.get("span_count", 0),
+            "edge_count":    entry.get("edge_count", 0),
+            "occurrences":   entry.get("occurrences", 1),
+            "watch_hits":    0,
+            "auto_promoted": True,
+            "promoted_at":   entry.get("updated_at") or now_iso,
+            "first_seen":    entry.get("first_seen") or now_iso,
+        }
+        merged += 1
+    return merged
+
+
 # ── Commands ───────────────────────────────────────────────────────────────────
 
 def cmd_discover(environment: str | None = None) -> None:
@@ -900,6 +970,31 @@ def cmd_learn(window_minutes: int = 120,
     rare = len([h for h in staged if h not in fingerprints])
     if rare:
         print(f"  Excluded {rare} rare fingerprint(s) seen < {effective_min_occurrences}x in window")
+
+    # Bootstrap consolidation pass: after accepting everything seen ≥ 1 time,
+    # re-scan the staged set and drop any hashes seen exactly once — these are
+    # one-off structural variants (cache miss, cold-start span) that won't
+    # recur in steady state. Hashes seen ≥ 2 times stay. This gives a cleaner
+    # baseline than min=1 without requiring a full second learn run.
+    if bootstrap:
+        single_hit = [h for h, info in fingerprints.items()
+                      if not info.get("auto_promoted") and info.get("occurrences", 0) == 1]
+        if single_hit:
+            for h in single_hit:
+                del fingerprints[h]
+            print(f"  Bootstrap consolidation: dropped {len(single_hit)} seen-once "
+                  f"fingerprint(s) — run regular learn to re-add if they recur")
+
+    # Merge OTel-promoted hashes from the cluster ConfigMap. The OTel processor
+    # auto-promotes fingerprints after 10 detections and writes them to
+    # /baseline/baseline.json (synced to the behavioral-baseline ConfigMap by the
+    # baseline-sync sidecar). These hashes represent confirmed-stable paths that
+    # the Python APM-query approach may have missed (low-frequency endpoints,
+    # direct service-to-service calls). Merging them closes the sync gap so
+    # watch runs don't fire NEW_FINGERPRINT for paths the OTel layer already knows.
+    otel_merged = _merge_otel_baseline(fingerprints, environment)
+    if otel_merged:
+        print(f"  Merged {otel_merged} OTel-promoted fingerprint(s) from cluster ConfigMap")
 
     print(f"  Summary: {new_count} new, {updated_count} updated, "
           f"{skipped} skipped (noise/shallow)")
