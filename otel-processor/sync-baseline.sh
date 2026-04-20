@@ -38,9 +38,11 @@ echo "Syncing baseline for environment: $ENVIRONMENT"
 echo "  Trace baseline:  $BASELINE"
 echo "  Error baseline:  $ERROR_BASELINE"
 
+# delete+create instead of apply — apply silently uses the last-applied-configuration
+# annotation and ignores new data when the ConfigMap already exists.
+kubectl delete configmap behavioral-baseline --ignore-not-found
 kubectl create configmap behavioral-baseline \
   --from-file=baseline.json="$BASELINE" \
-  --from-file=error_baseline.json="$ERROR_BASELINE" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --from-file=error_baseline.json="$ERROR_BASELINE"
 
 echo "Done. Collector pods will reload within 60 seconds."

@@ -48,48 +48,28 @@ k "cd /home/splunk/otel-processor && \
    docker push localhost:9999/otelcol-fingerprint:latest"
 ```
 
-### Step 4 — Wire the splunk-otel-collector to forward traces to the fingerprint processor
-The standard Splunk Helm collector doesn't forward to otelcol-fingerprint by default. Patch it:
+### Step 4 — Point app traces directly at otelcol-fingerprint
+The OTel Operator's `Instrumentation` CR controls where auto-instrumented app pods send their traces. Patch it to point at `otelcol-fingerprint` so the flow is:
+
+```
+app pod → otelcol-fingerprint (fingerprint inline) → Splunk APM
+```
+
+No Helm relay patch needed. `deploy.sh` does this automatically in Step 4, but you can also run it manually:
+
 ```bash
-# Find the relay ConfigMap name (usually splunk-otel-collector-otel-agent)
-k "kubectl get configmap | grep otel"
+k "kubectl patch instrumentation splunk-otel-collector --type=merge -p \
+  '{\"spec\":{
+    \"exporter\":{\"endpoint\":\"http://otelcol-fingerprint.default.svc.cluster.local:4317\"},
+    \"java\":{\"env\":[{\"name\":\"OTEL_EXPORTER_OTLP_ENDPOINT\",
+      \"value\":\"http://otelcol-fingerprint.default.svc.cluster.local:4318\"}]}
+  }}'"
+```
 
-# Patch it to add the fingerprint exporter + add it to the traces pipeline
-python3 - <<'EOF'
-import json, subprocess, os, re
-
-EC2_IP   = os.environ["EC2_IP"]
-EC2_PASS = os.environ["EC2_PASSWORD"]
-
-def ssh(cmd):
-    r = subprocess.run(
-        ["sshpass", f"-p{EC2_PASS}", "ssh", "-T", "-p", "2222",
-         "-o", "StrictHostKeyChecking=no", f"splunk@{EC2_IP}", cmd],
-        capture_output=True, text=True)
-    return r.stdout.strip()
-
-# Get current config
-raw = ssh("kubectl get configmap splunk-otel-collector-otel-agent -o jsonpath='{.data.relay}'")
-
-# Inject fingerprint exporter
-if "otlphttp/fingerprint" not in raw:
-    # Add exporter definition after existing exporters section
-    raw = re.sub(
-        r'(exporters:\n)',
-        r'\1  otlphttp/fingerprint:\n    endpoint: "http://otelcol-fingerprint:4318"\n    tls:\n      insecure: true\n',
-        raw, count=1)
-    # Add to traces pipeline exporters
-    raw = re.sub(
-        r'(traces:\s*\n\s*exporters:\s*\[)([^\]]+)(\])',
-        lambda m: m.group(1) + m.group(2).rstrip() + ', otlphttp/fingerprint' + m.group(3),
-        raw)
-
-# Apply via patch
-patch = json.dumps({"data": {"relay": raw}})
-ssh(f"kubectl patch configmap splunk-otel-collector-otel-agent --type=merge -p '{patch}'")
-ssh("kubectl rollout restart daemonset/splunk-otel-collector-agent")
-print("Done — traces now forwarded to otelcol-fingerprint")
-EOF
+After patching, restart app deployments so the mutating webhook re-injects with the new endpoint:
+```bash
+k "kubectl rollout restart deployment/api-gateway deployment/customers-service \
+   deployment/vets-service deployment/visits-service deployment/admin-server"
 ```
 
 ### Step 5 — Learn baseline (local Mac)
@@ -179,9 +159,11 @@ k "kubectl scale deployment visits-service --replicas=1"
 
 ### Re-deploy (subsequent sessions, image already built)
 ```bash
-# Push updated baseline + restart (config-only re-deploy)
+# Push updated baseline + restart (config-only re-deploy, no build or Instrumentation patch needed)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 \
   data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.json
 k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
    kubectl create configmap behavioral-baseline \
      --from-file=baseline.json=/tmp/baseline.json \
