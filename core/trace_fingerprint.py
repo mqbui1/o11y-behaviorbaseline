@@ -861,6 +861,31 @@ def cmd_learn(window_minutes: int = 120,
                 del fingerprints[h]
             print(f"  Pruned {len(stale)} stale fingerprint(s) not seen in this window")
 
+    # Filter one-directional infrastructure traces: fingerprints whose non-root
+    # services never appear as a root service anywhere in the learned set are
+    # startup/init-only calls (config fetch, service registration, etc.) that
+    # won't appear in steady-state traffic. Keeping them causes false
+    # MISSING_SERVICE alerts after every service restart.
+    # This is generic — no hardcoded service names needed.
+    root_services = {
+        info["root_op"].split(":")[0]
+        for info in fingerprints.values()
+        if ":" in info.get("root_op", "")
+    }
+    infra_only = []
+    for h, info in fingerprints.items():
+        if info.get("auto_promoted"):
+            continue
+        root_svc = info["root_op"].split(":")[0] if ":" in info.get("root_op", "") else ""
+        non_root_svcs = {s for s in info.get("services", []) if s != root_svc}
+        if non_root_svcs and non_root_svcs.isdisjoint(root_services):
+            infra_only.append(h)
+    if infra_only:
+        for h in infra_only:
+            del fingerprints[h]
+        print(f"  Filtered {len(infra_only)} infra-only fingerprint(s) "
+              f"(non-root services never appear as roots — startup/init calls)")
+
     rare = len([h for h in staged if h not in fingerprints])
     if rare:
         print(f"  Excluded {rare} rare fingerprint(s) seen < {MIN_BASELINE_OCCURRENCES}x in window")
@@ -1098,6 +1123,14 @@ def cmd_watch(window_minutes: int = 10,
         if root_op_occurrences[info["root_op"]] >= SILENT_MIN_OCCURRENCES:
             fps_by_root[info["root_op"]].append(info)
 
+    # Root services known from the baseline — used to detect infra-only root_ops
+    # (their non-root services never appear as roots = startup/init-only calls).
+    bl_root_services = {
+        info["root_op"].split(":")[0]
+        for info in baseline.get("fingerprints", {}).values()
+        if ":" in info.get("root_op", "")
+    }
+
     for root_op, bl_entries in fps_by_root.items():
         if root_op in seen_root_ops:
             continue
@@ -1107,10 +1140,16 @@ def cmd_watch(window_minutes: int = 10,
         # (e.g. Eureka registration PUTs rooted at a service span like customers-service:PUT)
         if any(_is_noise_trace(info.get("path", "")) for info in bl_entries):
             continue
-        # Skip root_ops whose baseline entries exclusively contain config-server calls —
-        # these are pod-startup config fetches that only appear during restarts, never
-        # during steady-state traffic, so their absence is not an anomaly.
-        if all("config-server" in info.get("path", "") for info in bl_entries):
+        # Skip root_ops whose baseline entries are infra-only: all non-root services
+        # in every entry are absent from the set of known root services. These are
+        # startup/init-only calls (config fetch, service registration, etc.) that
+        # won't appear in steady-state — no hardcoded service names needed.
+        root_svc_here = root_op.split(":")[0] if ":" in root_op else root_op
+        if all(
+            bool(non_root := {s for s in info.get("services", []) if s != root_svc_here})
+            and non_root.isdisjoint(bl_root_services)
+            for info in bl_entries
+        ):
             continue
         total_patterns = len(bl_entries)
         service_counts: dict[str, int] = defaultdict(int)
