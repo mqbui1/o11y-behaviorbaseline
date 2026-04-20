@@ -2,7 +2,7 @@
 # deploy.sh — Build, push, and deploy the otelcol-fingerprint DaemonSet.
 #
 # Usage:
-#   Run Steps 0 (learn/promote) locally on your Mac, then Steps 1-7 on EC2.
+#   Run Steps 0 (learn/promote) locally on your Mac, then Steps 1-6 on EC2.
 #   Or run the whole script on EC2 if python3 + Splunk API access is available there.
 #
 #   Local (Mac) — learn + promote only:
@@ -23,8 +23,8 @@
 #   1. Build the collector image and push to the local k3d registry
 #   2. Seed the behavioral-baseline ConfigMap (delete+create, never apply)
 #   3. Create/update the baseline-sync-scripts ConfigMap
-#   4. Patch the splunk-otel-collector-agent relay to forward traces to the
-#      fingerprint processor via otlphttp/fingerprint
+#   4. Patch the OTel Operator Instrumentation CR so app pods send traces
+#      directly to otelcol-fingerprint (no Helm relay patch needed)
 #   5. Apply daemonset.yaml (DaemonSet, collector config, RBAC)
 #   6. Restart the DaemonSet so pods pick up all changes
 #   7. Inject baseline directly into running pods (no need to wait 60s reload)
@@ -115,63 +115,31 @@ kubectl create configmap baseline-sync-scripts \
   --from-file=baseline-sync-sidecar.py="$K8S_DIR/baseline-sync-sidecar.py"
 echo ""
 
-# ── Step 4: Patch splunk-otel-collector-agent relay ───────────────────────────
-# Adds otlphttp/fingerprint exporter to the agent's traces pipeline so petclinic
-# traces are forwarded to otelcol-fingerprint in addition to Splunk.
-# The patch is idempotent — safe to run on every deploy.
-echo "--- Step 4: Patch agent relay config ---"
-python3 - <<'PYEOF'
-import sys, yaml, json
-
-CM = "splunk-otel-collector-otel-agent"
-import subprocess
-
-result = subprocess.run(
-    ["kubectl", "get", "configmap", CM, "-o", "json"],
-    capture_output=True, text=True
-)
-if result.returncode != 0:
-    print(f"  Warning: ConfigMap {CM} not found — skipping relay patch")
-    sys.exit(0)
-
-cm = json.loads(result.stdout)
-relay_yaml = cm["data"].get("relay", "")
-if not relay_yaml:
-    print(f"  Warning: no 'relay' key in {CM} — skipping")
-    sys.exit(0)
-
-config = yaml.safe_load(relay_yaml)
-
-# Add fingerprint exporter
-config.setdefault("exporters", {})["otlphttp/fingerprint"] = {
-    "traces_endpoint": "http://otelcol-fingerprint.default.svc.cluster.local:4318/v1/traces"
-}
-
-# Add to traces pipeline exporters (idempotent)
-traces = config.get("service", {}).get("pipelines", {}).get("traces", {})
-exporters = traces.get("exporters", [])
-if "otlphttp/fingerprint" not in exporters:
-    exporters.append("otlphttp/fingerprint")
-    traces["exporters"] = exporters
-    print("  Added otlphttp/fingerprint to traces pipeline")
-else:
-    print("  otlphttp/fingerprint already in traces pipeline")
-
-cm["data"]["relay"] = yaml.dump(config, default_flow_style=False)
-
-patch_result = subprocess.run(
-    ["kubectl", "apply", "-f", "-"],
-    input=json.dumps(cm),
-    capture_output=True, text=True
-)
-if patch_result.returncode != 0:
-    print(f"  Warning: patch failed: {patch_result.stderr}")
-else:
-    print(f"  Patched {CM}")
-    # Restart agent pods to pick up new config
-    subprocess.run(["kubectl", "rollout", "restart", "daemonset/splunk-otel-collector-agent"], check=False)
-    print("  Restarted splunk-otel-collector-agent")
-PYEOF
+# ── Step 4: Point Instrumentation CR at otelcol-fingerprint ──────────────────
+# The OTel Operator's Instrumentation CR controls where auto-instrumented app
+# pods send their traces. We patch it to point at otelcol-fingerprint directly,
+# so traces go: app → otelcol-fingerprint (fingerprint+forward) → Splunk APM.
+# This replaces the old approach of patching the Helm relay ConfigMap.
+# Idempotent — safe to run on every deploy.
+echo "--- Step 4: Patch Instrumentation CR ---"
+INSTR_NAME=$(kubectl get instrumentation -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+if [ -z "$INSTR_NAME" ]; then
+  echo "  No Instrumentation CR found — skipping (apps may not be auto-instrumented)"
+else
+  FP_GRPC="http://otelcol-fingerprint.default.svc.cluster.local:4317"
+  FP_HTTP="http://otelcol-fingerprint.default.svc.cluster.local:4318"
+  CURRENT=$(kubectl get instrumentation "$INSTR_NAME" \
+    -o jsonpath='{.spec.exporter.endpoint}' 2>/dev/null || echo "")
+  if [ "$CURRENT" = "$FP_GRPC" ]; then
+    echo "  Instrumentation CR '$INSTR_NAME' already points to otelcol-fingerprint — skipping"
+  else
+    kubectl patch instrumentation "$INSTR_NAME" --type=merge -p \
+      "{\"spec\":{\"exporter\":{\"endpoint\":\"$FP_GRPC\"},\"java\":{\"env\":[{\"name\":\"OTEL_EXPORTER_OTLP_ENDPOINT\",\"value\":\"$FP_HTTP\"}]}}}"
+    echo "  Patched '$INSTR_NAME': exporter → otelcol-fingerprint"
+    echo "  NOTE: restart app deployments to pick up the new endpoint:"
+    echo "    kubectl rollout restart deployment/<your-app-deployments>"
+  fi
+fi
 echo ""
 
 # ── Step 5: Apply daemonset.yaml ──────────────────────────────────────────────
