@@ -54,6 +54,7 @@ def _run_triage(environment: str, quiet: bool) -> bool:
     Blocks until drift events arrive or timeout (120s).
     Returns True if triage ran, False if timeout (no events).
     """
+    t0 = time.monotonic()
     if not quiet:
         print(f"[{_ts()}] Waiting for drift events from OTel edge processor...", flush=True)
 
@@ -83,8 +84,10 @@ def _run_triage(environment: str, quiet: bool) -> bool:
         return False
 
     if output:
+        elapsed = int(time.monotonic() - t0)
         text = output.decode("utf-8", errors="replace")
         print(text, end="", flush=True)
+        print(f"[{_ts()}] Triage complete in {elapsed}s.", flush=True)
 
     return True
 
@@ -148,9 +151,8 @@ def main() -> None:
             # Triage ran — wait for Splunk to index events before correlate
             if not args.no_correlate:
                 if not args.quiet:
-                    print(f"\n[{_ts()}] Triage complete. "
-                          f"Waiting {args.correlate_delay}s for Splunk indexing "
-                          f"before cross-tier correlation...", flush=True)
+                    print(f"[{_ts()}] Waiting {args.correlate_delay}s for Splunk "
+                          f"indexing before cross-tier correlation...", flush=True)
                 time.sleep(args.correlate_delay)
                 _run_correlate(args.environment, args.correlate_window, args.quiet)
 

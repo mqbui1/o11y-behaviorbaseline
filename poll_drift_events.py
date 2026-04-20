@@ -134,26 +134,50 @@ def _parse_event(line: str) -> dict | None:
         }
 
 
-# Root ops that are direct service-to-service OTel auto-promotion noise.
-# These are NOT api-gateway-rooted and fire as NEW_FINGERPRINT continuously until
-# the OTel processor auto-promotes them (10 hits). Exclude from --triage output
-# to prevent steady-state false positives. Error signatures are always kept.
-_NOISE_ROOT_OP_PREFIXES = (
-    "customers-service:",
-    "visits-service:",
-    "vets-service:",
-    "config-server:",
-    "discovery-server:",
-    "admin-server:",
-)
+def _load_baseline_root_services(env: str) -> set[str]:
+    """
+    Load the set of root service names from the Python baseline for the given
+    environment. These are the services that appear as trace initiators in
+    steady-state traffic (e.g. the ingress/gateway layer).
+
+    OTel NEW_FINGERPRINT events whose root service is NOT in this set are
+    direct service-to-service calls being auto-promoted by the OTel processor —
+    not user-facing anomalies. Suppressing them prevents steady-state noise
+    without hardcoding any service names.
+
+    Falls back to an empty set (suppress nothing) if the baseline is missing.
+    """
+    baseline_path = _DATA_DIR / f"baseline.{env}.json"
+    if not baseline_path.exists():
+        return set()
+    try:
+        data = json.loads(baseline_path.read_text())
+        return {
+            info["root_op"].split(":")[0]
+            for info in data.get("fingerprints", {}).values()
+            if ":" in info.get("root_op", "")
+        }
+    except Exception:
+        return set()
 
 
-def _is_noise_fingerprint(event: dict) -> bool:
-    """Return True if this is a direct-service NEW_FINGERPRINT that should be suppressed."""
+def _is_noise_fingerprint(event: dict, baseline_root_services: set[str]) -> bool:
+    """
+    Return True if this NEW_FINGERPRINT event is OTel auto-promotion noise.
+
+    A NEW_FINGERPRINT is noise when its root service is not among the services
+    that initiate traces in steady-state traffic (as known from the Python
+    baseline). These are direct service-to-service calls that the OTel processor
+    fires continuously until it auto-promotes them after 10 detections.
+    Error signatures are never suppressed.
+    """
     if event.get("anomaly_type") != "NEW_FINGERPRINT":
         return False
+    if not baseline_root_services:
+        return False  # no baseline loaded — keep everything
     root_op = event.get("root_op", "")
-    return any(root_op.startswith(p) for p in _NOISE_ROOT_OP_PREFIXES)
+    root_svc = root_op.split(":")[0] if ":" in root_op else root_op
+    return root_svc not in baseline_root_services
 
 
 def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
@@ -171,6 +195,7 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
     since = "30s" if triage else "5s"
     dedup_state: dict = _load_dedup(environment) if triage else {}
     new_dedup:   dict = dict(dedup_state)
+    baseline_roots: set[str] = _load_baseline_root_services(environment) if triage else set()
 
     hash_last_seen: dict = {}  # in-memory dedup for live stream mode
     collected: list[dict] = []
@@ -194,8 +219,10 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
             now = time.time()
 
             if triage:
-                # Skip direct-service NEW_FINGERPRINT events (OTel auto-promotion noise)
-                if _is_noise_fingerprint(event):
+                # Skip direct-service NEW_FINGERPRINT events (OTel auto-promotion noise).
+                # Uses the Python baseline's root services as the reference — no
+                # hardcoded service names.
+                if _is_noise_fingerprint(event, baseline_roots):
                     continue
 
                 # Use shared dedup state (same file watch_otel_events.py writes)
