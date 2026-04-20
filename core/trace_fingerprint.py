@@ -737,8 +737,19 @@ def cmd_discover(environment: str | None = None) -> None:
 def cmd_learn(window_minutes: int = 120,
               window_offset_minutes: int = 0,
               reset: bool = False,
+              bootstrap: bool = False,
               environment: str | None = None) -> None:
     """Sample recent traces and build the baseline fingerprint DB."""
+    # Bootstrap mode: accept every fingerprint seen at least once (no occurrence
+    # gate). Intended for cold-start on a freshly deployed cluster where traffic
+    # has been running for only 10-30 minutes and most paths haven't repeated
+    # MIN_BASELINE_OCCURRENCES times yet. Always implies --reset.
+    effective_min_occurrences = 1 if bootstrap else MIN_BASELINE_OCCURRENCES
+    if bootstrap:
+        reset = True
+        print(f"[learn] Bootstrap mode — accepting fingerprints seen ≥ 1 time "
+              f"(overrides MIN_BASELINE_OCCURRENCES={MIN_BASELINE_OCCURRENCES})")
+
     env_desc = f"environment '{environment}'" if environment else "all environments"
     print(f"[learn] Discovering services for {env_desc}...")
     topo = discover_topology(environment=environment)
@@ -843,7 +854,7 @@ def cmd_learn(window_minutes: int = 120,
                         "first_seen":    datetime.now(timezone.utc).isoformat(),
                     }
                 staged[h]["occurrences"] += 1
-                if staged[h]["occurrences"] >= MIN_BASELINE_OCCURRENCES:
+                if staged[h]["occurrences"] >= effective_min_occurrences:
                     fingerprints[h] = staged[h]
                     new_count += 1
                     print(f"  [new] {fp['root_op']}  ->  "
@@ -888,7 +899,7 @@ def cmd_learn(window_minutes: int = 120,
 
     rare = len([h for h in staged if h not in fingerprints])
     if rare:
-        print(f"  Excluded {rare} rare fingerprint(s) seen < {MIN_BASELINE_OCCURRENCES}x in window")
+        print(f"  Excluded {rare} rare fingerprint(s) seen < {effective_min_occurrences}x in window")
 
     print(f"  Summary: {new_count} new, {updated_count} updated, "
           f"{skipped} skipped (noise/shallow)")
@@ -1368,6 +1379,10 @@ def main() -> None:
                          help="Shift the learn window back by N minutes (useful for re-baselining after an incident)")
     p_learn.add_argument("--reset", action="store_true",
                          help="Wipe the existing baseline before learning (start fresh)")
+    p_learn.add_argument("--bootstrap", action="store_true",
+                         help="Cold-start mode: accept every fingerprint seen ≥ 1 time. "
+                              "Use on a freshly deployed cluster (implies --reset). "
+                              "Run once, then switch to regular learn for ongoing updates.")
     p_watch = sub.add_parser("watch", help="Compare recent traces to baseline")
     p_watch.add_argument("--window-minutes", type=int, default=10)
     p_watch.add_argument("--json", action="store_true",
@@ -1388,7 +1403,8 @@ def main() -> None:
     if args.command == "discover":
         cmd_discover(environment=env)
     elif args.command == "learn":
-        cmd_learn(args.window_minutes, args.window_offset_minutes, args.reset, environment=env)
+        cmd_learn(args.window_minutes, args.window_offset_minutes, args.reset,
+                  args.bootstrap, environment=env)
     elif args.command == "watch":
         cmd_watch(args.window_minutes, environment=env, json_output=args.json)
     elif args.command == "show":
