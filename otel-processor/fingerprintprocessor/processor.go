@@ -44,6 +44,11 @@ type fingerprintProcessor struct {
 	activeDriftsMu sync.Mutex
 	activeDrifts   map[string]string // fp_hash -> root_op; cleared when fingerprint returns to baseline
 
+	// lastSeenMu guards lastSeenRootOp — updated every time a trace for a
+	// known root_op is flushed. Used by the missing-service checker.
+	lastSeenMu    sync.Mutex
+	lastSeenRootOp map[string]time.Time // root_op -> last time a trace was seen
+
 	startTime time.Time // used for warm-up window check
 
 	stopCh chan struct{}
@@ -51,16 +56,17 @@ type fingerprintProcessor struct {
 
 func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Traces) (*fingerprintProcessor, error) {
 	p := &fingerprintProcessor{
-		logger:       logger,
-		cfg:          cfg,
-		next:         next,
-		baseline:     newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
-		emitter:      newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken),
-		buffers:      make(map[string]*traceBuffer),
-		seenCounts:   make(map[string]int),
-		activeDrifts: make(map[string]string),
-		startTime:    time.Now(),
-		stopCh:       make(chan struct{}),
+		logger:         logger,
+		cfg:            cfg,
+		next:           next,
+		baseline:       newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
+		emitter:        newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken),
+		buffers:        make(map[string]*traceBuffer),
+		seenCounts:     make(map[string]int),
+		activeDrifts:   make(map[string]string),
+		lastSeenRootOp: make(map[string]time.Time),
+		startTime:      time.Now(),
+		stopCh:         make(chan struct{}),
 	}
 	if cfg.PromotionThreshold > 0 {
 		p.logger.Info("auto-promotion enabled",
@@ -83,6 +89,9 @@ func (p *fingerprintProcessor) inWarmup() bool {
 
 func (p *fingerprintProcessor) Start(_ context.Context, _ component.Host) error {
 	go p.flushLoop()
+	if p.cfg.MissingServiceCheckInterval > 0 {
+		go p.missingServiceLoop()
+	}
 	return nil
 }
 
@@ -210,6 +219,67 @@ func (p *fingerprintProcessor) flushAll() {
 	}
 }
 
+// missingServiceLoop periodically checks whether any baseline root_ops have
+// gone completely silent — no traces seen for longer than MissingServiceCheckInterval.
+// When detected, emits trace.path.drift with anomaly_type=MISSING_SERVICE.
+func (p *fingerprintProcessor) missingServiceLoop() {
+	ticker := time.NewTicker(p.cfg.MissingServiceCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.checkMissingServices()
+		case <-p.stopCh:
+			return
+		}
+	}
+}
+
+func (p *fingerprintProcessor) checkMissingServices() {
+	if p.inWarmup() {
+		return
+	}
+	if p.baseline.isEmpty() {
+		return
+	}
+
+	threshold := p.cfg.MissingServiceCheckInterval
+	now := time.Now()
+
+	// Get all established root_ops from the baseline
+	rootOps := p.baseline.establishedRootOps(p.cfg.MinBaselineOccurrences)
+
+	p.lastSeenMu.Lock()
+	defer p.lastSeenMu.Unlock()
+
+	for _, rootOp := range rootOps {
+		lastSeen, ok := p.lastSeenRootOp[rootOp]
+		if !ok {
+			// Never seen since startup — only alert if we've been running longer
+			// than the check interval (gives time for initial traffic to arrive).
+			if time.Since(p.startTime) < threshold*2 {
+				continue
+			}
+			lastSeen = p.startTime
+		}
+		if now.Sub(lastSeen) < threshold {
+			continue
+		}
+
+		// Root op has been silent — infer missing services from baseline
+		missingServices := p.baseline.servicesForRootOp(rootOp, p.cfg.MinBaselineOccurrences)
+		p.logger.Info("missing service detected",
+			zap.String("root_op", rootOp),
+			zap.Strings("missing_services", missingServices),
+			zap.Duration("silent_for", now.Sub(lastSeen).Truncate(time.Second)),
+			zap.String("environment", p.cfg.Environment),
+		)
+		if err := p.emitter.emitMissingService(p.cfg.Environment, rootOp, missingServices, lastSeen.Unix()); err != nil {
+			p.logger.Warn("failed to emit missing service event", zap.Error(err))
+		}
+	}
+}
+
 // analyzeTrace runs both trace structure and error signature detection on a
 // flushed trace buffer.
 //
@@ -230,6 +300,12 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 	if fp == nil {
 		return
 	}
+
+	// Always update last-seen for this root_op so the missing-service checker
+	// knows traffic is still flowing, regardless of whether this hash is known.
+	p.lastSeenMu.Lock()
+	p.lastSeenRootOp[fp.rootOp] = time.Now()
+	p.lastSeenMu.Unlock()
 
 	entry := p.baseline.lookupTrace(fp.hash)
 

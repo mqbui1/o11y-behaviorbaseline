@@ -367,3 +367,44 @@ func (bs *baselineStore) recordErrorAndCheckSpike(hash string, window time.Durat
 	spiked := currentRate >= rw.baselineRate*multiplier
 	return spiked, currentRate, rw.baselineRate
 }
+
+// establishedRootOps returns all distinct root_ops that have at least one
+// established fingerprint in the baseline. Used by the missing-service checker.
+func (bs *baselineStore) establishedRootOps(minOccurrences int) []string {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	seen := make(map[string]struct{})
+	for _, e := range bs.traceFingerprints {
+		if e.Occurrences >= minOccurrences || e.AutoPromoted {
+			seen[e.RootOp] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for rootOp := range seen {
+		result = append(result, rootOp)
+	}
+	return result
+}
+
+// servicesForRootOp returns the union of all services seen across established
+// baseline fingerprints for the given root_op.
+func (bs *baselineStore) servicesForRootOp(rootOp string, minOccurrences int) []string {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	seen := make(map[string]struct{})
+	for _, e := range bs.traceFingerprints {
+		if e.RootOp != rootOp {
+			continue
+		}
+		if e.Occurrences >= minOccurrences || e.AutoPromoted {
+			for _, svc := range e.Services {
+				seen[svc] = struct{}{}
+			}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for svc := range seen {
+		result = append(result, svc)
+	}
+	return result
+}

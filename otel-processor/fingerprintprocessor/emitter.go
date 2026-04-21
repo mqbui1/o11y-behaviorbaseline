@@ -19,7 +19,7 @@ type splunkEvent struct {
 
 type emitter struct {
 	ingestURL string
-	token     string // ingest token for /v2/event
+	token     string // token for /v2/event — ingest token works, API token does not
 	client    *http.Client
 }
 
@@ -86,6 +86,29 @@ func (e *emitter) emitErrorDrift(env, traceID string, sig errorSignature) error 
 			"hash":        sig.hash,
 			"detector":    "otel-collector-edge",
 			"environment": env,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (e *emitter) emitMissingService(env, rootOp string, missingServices []string, lastSeenSec int64) error {
+	// Emits trace.path.drift with anomaly_type=MISSING_SERVICE so correlate.py
+	// picks it up as tier2 — same event type as NEW_FINGERPRINT drift.
+	return e.send(splunkEvent{
+		EventType: "trace.path.drift",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"anomaly_type":   "MISSING_SERVICE",
+			"root_operation": rootOp,
+			"service":        rootService(rootOp),
+		},
+		Properties: map[string]string{
+			"root_op":          rootOp,
+			"missing_services": joinStrings(missingServices),
+			"last_seen_sec":    fmt.Sprintf("%d", lastSeenSec),
+			"detector":         "otel-collector-edge",
+			"environment":      env,
 		},
 		Timestamp: time.Now().UnixMilli(),
 	})
