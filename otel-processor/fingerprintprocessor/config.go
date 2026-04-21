@@ -87,21 +87,29 @@ type Config struct {
 	// above its baseline rate within ErrorRateWindow triggers an
 	// error.signature.spike event. Default: 5.0.
 	ErrorRateSpikeMultiplier float64 `mapstructure:"error_rate_spike_multiplier"`
+
+	// MissingServiceCheckInterval controls how often the processor checks for
+	// baseline root_ops that have gone completely silent. When a root_op with
+	// established baseline fingerprints has not been seen for longer than this
+	// interval, a trace.path.drift event with anomaly_type=MISSING_SERVICE is
+	// emitted. Default: 30s. Set to 0 to disable.
+	MissingServiceCheckInterval time.Duration `mapstructure:"missing_service_check_interval"`
 }
 
 func createDefaultConfig() component.Config {
 	return &Config{
-		TraceBufferTimeout:       10 * time.Second,
-		MinSpans:                 2,
-		MinBaselineOccurrences:   2,
-		BaselineReloadInterval:   60 * time.Second,
-		SplunkIngestURL:          "https://ingest.us1.signalfx.com",
-		PartialTraceThreshold:    0.7,
-		PromotionThreshold:       10,
-		PromotionWriteback:       true,
-		WarmupDuration:           2 * time.Minute,
-		SpanCountPercentileGuard: true,
-		ErrorRateWindow:          5 * time.Minute,
-		ErrorRateSpikeMultiplier: 5.0,
+		TraceBufferTimeout:          10 * time.Second,
+		MinSpans:                    2,
+		MinBaselineOccurrences:      2,
+		BaselineReloadInterval:      60 * time.Second,
+		SplunkIngestURL:             "https://ingest.us1.signalfx.com",
+		PartialTraceThreshold:       0.7,
+		PromotionThreshold:          10,
+		PromotionWriteback:          true,
+		WarmupDuration:              2 * time.Minute,
+		SpanCountPercentileGuard:    true,
+		ErrorRateWindow:             5 * time.Minute,
+		ErrorRateSpikeMultiplier:    5.0,
+		MissingServiceCheckInterval: 30 * time.Second,
 	}
 }
