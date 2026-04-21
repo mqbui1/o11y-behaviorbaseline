@@ -121,16 +121,16 @@ for f in pathlib.Path(f'{repo}/data').glob(f'*dedup*{e}*'):
     f.write_text('{}')
 " "$_REPO"
 
-# ── Verify OTel processor quiet ────────────────────────────────────────────────
-echo "[5] Verifying OTel processor steady state..."
-sleep 5
-DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=5s 2>/dev/null; done" 2>/dev/null \
+# ── Wait for OTel processor to reload baseline (60s interval) ─────────────────
+echo "[5] Waiting for OTel processor to reload clean baseline (~15s)..."
+sleep 15
+DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=10s 2>/dev/null; done" 2>/dev/null \
     | grep -cE 'trace drift detected|new trace fingerprint|new error signature' || echo "0")
 DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
 if [ "${DRIFT_COUNT:-0}" -eq 0 ] 2>/dev/null; then
     echo "  OTel processor: 0 drift events — steady state"
 else
-    echo "  NOTE: ${DRIFT_COUNT} drift event(s) in last 5s — processor reloads within 60s, proceed when ready"
+    echo "  WARNING: ${DRIFT_COUNT} drift event(s) still firing — wait another 30s before starting next demo"
 fi
 
 echo ""
