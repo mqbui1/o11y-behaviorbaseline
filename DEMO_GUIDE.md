@@ -73,7 +73,7 @@ k "kubectl rollout restart deployment/api-gateway deployment/customers-service \
 ```
 
 ### Step 5 — Learn baseline (local Mac)
-Wait ~10 minutes for petclinic loadgen to generate APM data, then bootstrap a baseline:
+Wait **~15 minutes** for petclinic loadgen to generate APM data and for DB query patterns to stabilize, then bootstrap a baseline:
 ```bash
 source .env
 
@@ -91,12 +91,17 @@ python3 core/trace_fingerprint.py --environment $ENV promote
 python3 core/trace_fingerprint.py --environment $ENV show
 ```
 
-> **Expected (bootstrap):** 15–20 fingerprints from ~20 minutes of traffic. The output includes
+> **Expected (bootstrap):** 30–50 fingerprints from 15+ minutes of traffic. The output includes
 > a line like `  Merged N OTel-promoted fingerprint(s) from ConfigMap` when the OTel baseline
 > already has auto-promoted entries.
 
 > **Bootstrap consolidation:** After the min=1 pass, fingerprints seen exactly once are dropped.
 > These are startup transients or stray spans that won't appear again in steady state.
+
+> **If baseline is sparse (<15 fingerprints):** DB query patterns may not have fully varied yet.
+> Wait another 5–10 minutes and re-run `learn --bootstrap --window-minutes 30`. The owners list
+> endpoint generates varying numbers of `SELECT petclinic` spans depending on data volume, and
+> needs a few minutes of warm traffic to produce all variants.
 
 ### Step 6 — Seed and deploy the OTel processor (on EC2)
 ```bash
@@ -208,41 +213,28 @@ This writes the tokens into `.env` so all scripts pick them up automatically. Do
 - **APM Service Map**: https://app.us1.signalfx.com/#/apm?environments=$ENV
 - **Behavioral Baseline Dashboard**: https://app.us1.signalfx.com/#/dashboard/HERM9jxA1po
 
-### Verify cluster is healthy
+### Pre-flight check
 ```bash
-k "kubectl get pods --no-headers | awk '{print \$1, \$3}'"
+./check-ready.sh
 ```
 
-> If any `otelcol-fingerprint` pod shows `CrashLoopBackOff`, the OTel edge processor is not running and Demos 1–5 will produce 0 drift events. Fix before proceeding:
+This checks all 6 pre-demo conditions in one pass:
+1. **AWS credentials** — valid STS token (required for Claude/Bedrock triage)
+2. **Cluster pods** — all Running, 3 otelcol-fingerprint pods present
+3. **Baseline fingerprints** — ≥10 fingerprints loaded in the OTel processor
+4. **Splunk API** — reachable and authenticated
+5. **0 trace anomalies** — Python watch returns clean baseline
+6. **0 stale OTel events** — no drift events in Splunk in the last 3 minutes
+
+If any check fails, the script prints what to fix and exits 1.
+
+> If `otelcol-fingerprint` pods show `CrashLoopBackOff`, fix before proceeding:
 > ```bash
 > k "kubectl logs daemonset/otelcol-fingerprint --tail=20"
 > # Most common cause: baseline ConfigMap missing. Recreate it:
 > ./otel-processor/sync-baseline.sh $ENV
 > k "kubectl rollout restart daemonset/otelcol-fingerprint"
 > ```
-
-**Expected output (all pods Running):**
-```
-admin-server-746f7cf586-xxxxx                          Running
-api-gateway-77f9c8c45f-xxxxx                           Running
-config-server-84f46dc66c-xxxxx                         Running
-customers-service-665b5ff795-xxxxx                     Running
-discovery-server-5b597b57bc-xxxxx                      Running
-otelcol-fingerprint-xxxxx                              Running
-otelcol-fingerprint-xxxxx                              Running
-otelcol-fingerprint-xxxxx                              Running
-petclinic-db-758f495756-xxxxx                          Running
-petclinic-loadgen-deployment-6954c49d9-xxxxx           Running
-splunk-otel-collector-agent-xxxxx                      Running
-splunk-otel-collector-agent-xxxxx                      Running
-splunk-otel-collector-agent-xxxxx                      Running
-splunk-otel-collector-k8s-cluster-receiver-xxxxx       Running
-splunk-otel-collector-operator-67ff5f79b8-xxxxx        Running
-vets-service-54c99c9df4-xxxxx                          Running
-visits-service-569b6f8c77-xxxxx                        Running
-```
-> Pod name suffixes will differ — focus on the deployment prefix and `Running` status. If any pod shows `CrashLoopBackOff` or `Pending`, resolve before proceeding.
-> The 3 `otelcol-fingerprint` pods are the custom OTel edge processor DaemonSet — one per node.
 
 ### Reset and verify baselines are clean
 
@@ -270,18 +262,23 @@ source .env
 
 > **If step 8 shows OTel events still present:** the previous demo's events haven't aged out of the 3m window yet. Wait 3 minutes and re-run `./demo-reset.sh` — it is idempotent.
 
+**Between-demo reset** (after a demo that killed a service — ~30 seconds with DB, ~5 seconds without):
+
+```bash
+./demo-between.sh          # after demos where only a service was killed (no DB)
+./demo-between.sh --db     # after demos where DB was killed (adds 30s wait for reconnect)
+./demo-between.sh --quick  # local state only, no cluster ops (same as demo-quick-reset.sh)
+```
+
+`demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state. By default also restores all services to replicas=1 and wipes OTel error baseline in-memory.
+
 **Quick reset** (between demos, no cluster ops — ~5 seconds):
 
 ```bash
 ./demo-quick-reset.sh
 ```
 
-`demo-quick-reset.sh` clears local state only:
-1. Clear `data/alerts.log`
-2. Wipe error baseline (local file only)
-3. Clear dedup state
-
-Does NOT restore services or push to cluster. Use between clean demo runs where services were already restored.
+Clears alerts.log, wipes error baseline and dedup state locally. No cluster ops. Use between clean demo runs where services were already restored.
 
 > **If trace anomalies persist after reset:** re-learn the baseline:
 > ```bash
@@ -513,32 +510,12 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 
 ### Step 4 — Restore
 ```bash
-k "kubectl scale deployment petclinic-db --replicas=1"
-
-# Wait for DB to come up and services to reconnect (~30s)
-k "kubectl rollout status deployment/petclinic-db --timeout=60s"
-
-# Verify services are responding again
-k "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-gateway:82/api/vet/vets --max-time 8 | head -c 50"
-# Expected: JSON list of vets (not 404 or timeout)
-
-# Wipe error baseline locally
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
-
-# Push wiped error baseline to cluster and restart OTel processor
-# (The OTel processor auto-promotes after 10 detections — without this step,
-#  re-running Demo 1 will show 0 anomalies because signatures are already known)
-sshpass -p "$EC2_PASSWORD" scp -P 2222 \
-  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.json
-k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
-   kubectl create configmap behavioral-baseline \
-     --from-file=baseline.json=/tmp/baseline.json \
-     --from-file=error_baseline.json=/tmp/error_baseline.json"
-k "kubectl rollout restart daemonset/otelcol-fingerprint"
-k "kubectl rollout status daemonset/otelcol-fingerprint --timeout=90s"
+./demo-between.sh --db
 ```
 
-> **Critical:** Services (customers-service, visits-service) take ~30s to reconnect to the DB after it comes back. Don't start the next demo until the curl above returns data. If traces are missing from subsequent learn runs, regenerate traffic and relearn (see Restore/Reset section).
+`--db` restores petclinic-db to replicas=1, waits 30s for services to reconnect, then wipes the error baseline locally and on the cluster so Demo 1 can be repeated cleanly.
+
+> **If the curl verify in demo-between.sh fails:** wait another 30s and re-run `./demo-between.sh --db`. customers-service and visits-service need the DB fully up before accepting requests.
 
 ---
 
@@ -582,8 +559,7 @@ APM still has no alert at this point.
 
 ### Restore
 ```bash
-k "kubectl scale deployment vets-service --replicas=1"
-k "kubectl rollout status deployment/vets-service --timeout=60s"
+./demo-between.sh
 ```
 
 ---
@@ -594,8 +570,7 @@ k "kubectl rollout status deployment/vets-service --timeout=60s"
 
 ### Prerequisites
 ```bash
-# Clear alert log
-cat /dev/null > data/alerts.log
+./demo-quick-reset.sh
 ```
 
 ### Step 1 — Kill vets-service
@@ -674,8 +649,7 @@ python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --en
 
 ### Step 4 — Restore
 ```bash
-k "kubectl scale deployment vets-service --replicas=1"
-k "kubectl rollout status deployment/vets-service --timeout=60s"
+./demo-between.sh
 ```
 
 ---
@@ -686,11 +660,7 @@ k "kubectl rollout status deployment/vets-service --timeout=60s"
 
 ### Prerequisites
 ```bash
-# Clear alert log
-cat /dev/null > data/alerts.log
-
-# Reset error baseline to 0
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
+./demo-quick-reset.sh
 
 # Verify 0 trace anomalies
 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
@@ -782,8 +752,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 ### Step 4 — Restore
 ```bash
-k "kubectl scale deployment vets-service petclinic-db --replicas=1"
-k "kubectl rollout status deployment/vets-service deployment/petclinic-db --timeout=90s"
+./demo-between.sh --db
 ```
 
 ---
@@ -794,9 +763,7 @@ k "kubectl rollout status deployment/vets-service deployment/petclinic-db --time
 
 ### Prerequisites
 ```bash
-# Clear alert log and reset error baseline
-cat /dev/null > data/alerts.log
-python3 -c "import json,pathlib,datetime,os; e=os.environ['ENV']; pathlib.Path(f'data/error_baseline.{e}.json').write_text(json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})); print('Error baseline wiped.')"
+./demo-quick-reset.sh
 
 # Verify 0 anomalies
 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
@@ -873,7 +840,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 
 ### Step 4 — Restore
 ```bash
-k "kubectl scale deployment vets-service --replicas=1"
+./demo-between.sh
 ```
 
 ---
@@ -884,9 +851,9 @@ k "kubectl scale deployment vets-service --replicas=1"
 
 ### Prerequisites
 ```bash
-cat /dev/null > data/alerts.log
+./demo-quick-reset.sh
 
-# Simulate a deploy: remove vets-service fingerprint from baseline
+# Simulate a deploy: remove vets-service fingerprints from baseline
 # (represents a deployment that changed the call path)
 python3 -c "
 import json, pathlib, os

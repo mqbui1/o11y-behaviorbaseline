@@ -586,6 +586,28 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         # needing explicit configuration.
         if _is_noise_trace(fp["path"]):
             return None
+
+        # Suppress NEW_FINGERPRINT for "degraded-path" variants: same root_op as
+        # established auto_promoted baseline entries, no new services introduced,
+        # and fewer spans than the minimum known baseline entry. This handles
+        # shallow single-span traces that occasionally appear for well-known root_ops
+        # (e.g. static asset requests that sometimes complete before child spans are
+        # emitted). These are not structural drift — just partial trace captures.
+        auto_promoted_for_root = {
+            h: info for h, info in baseline.get("fingerprints", {}).items()
+            if info.get("root_op") == root_op and info.get("auto_promoted")
+        }
+        if auto_promoted_for_root:
+            all_known_services: set[str] = set()
+            for info in auto_promoted_for_root.values():
+                all_known_services.update(info.get("services", []))
+            new_services = set(fp["services"]) - all_known_services
+            min_known_spans = min(
+                info.get("span_count", 0) for info in auto_promoted_for_root.values()
+            )
+            if not new_services and fp["span_count"] <= min_known_spans:
+                return None
+
         return {
             "type":    "NEW_FINGERPRINT",
             "message": f"Unknown execution path for '{root_op}'",

@@ -6,7 +6,8 @@
 #   Or run the whole script on EC2 if python3 + Splunk API access is available there.
 #
 #   Local (Mac) — learn + promote only:
-#     python3 core/trace_fingerprint.py --environment <env> learn --window-minutes 30
+#     # Wait ~15 min after app pod restart for DB query patterns to stabilize
+#     python3 core/trace_fingerprint.py --environment <env> learn --bootstrap --window-minutes 30
 #     python3 core/trace_fingerprint.py --environment <env> promote
 #     sshpass scp -P 2222 data/baseline.<env>.json splunk@<EC2_IP>:/tmp/
 #     # Then on EC2: ./otel-processor/deploy.sh <environment> --skip-learn
@@ -71,8 +72,10 @@ ERROR_BASELINE="$DATA_DIR/error_baseline.${ENVIRONMENT}.json"
 
 if [ "$SKIP_LEARN" = "false" ]; then
   echo "--- Step 0: Learn + promote baseline ---"
+  echo "  NOTE: Run this at least 15 min after app pods start — DB query patterns"
+  echo "  need warm traffic to stabilize. If you get <15 fingerprints, wait and rerun."
   cd "$REPO_DIR"
-  python3 core/trace_fingerprint.py --environment "$ENVIRONMENT" learn --window-minutes 30
+  python3 core/trace_fingerprint.py --environment "$ENVIRONMENT" learn --bootstrap --window-minutes 30
   python3 core/trace_fingerprint.py --environment "$ENVIRONMENT" promote
   echo ""
 fi
