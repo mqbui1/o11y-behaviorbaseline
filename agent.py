@@ -79,10 +79,6 @@ The input may include several enrichment fields — use all of them:
     A shared dependency (many callers) failing is more severe than a leaf service failing.
   - "hypothesis_context": ranked root cause hypotheses from graph analysis.
     Use the highest-confidence hypothesis as your starting point for root_cause.
-  - "recent_incidents": past incidents with similar anomaly patterns and their confirmed causes.
-    Use ONLY as a tiebreaker when direct structural evidence is ambiguous.
-    NEVER let past incidents override direct evidence: if MISSING_SERVICE or a "5xx on GET <svc>"
-    error signature is present, that service IS the root cause — past history is irrelevant.
   - "recent_deployments": services deployed recently. If the affected service was deployed
     within the last hour, downgrade severity unless symptoms are severe.
 
@@ -475,19 +471,12 @@ def main() -> None:
     if _topo_ctx and _topo_ctx[0]:
         watch_result["topology_context"] = _topo_ctx[0]
 
-    # Fetch hypothesis context and past incidents in parallel —
-    # both are I/O bound (API calls + disk read) and independent.
-    print("  Building enriched context (hypothesis engine + feedback loop)...")
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        hyp_future  = pool.submit(_build_hypothesis_context, anomalies, env)
-        past_future = pool.submit(load_similar_past_incidents, anomalies)
-        hyp_ctx   = hyp_future.result()
-        past_incs = past_future.result()
+    # Fetch hypothesis context (past incidents dropped — hypothesis engine covers root cause)
+    print("  Building enriched context (hypothesis engine)...")
+    hyp_ctx = _build_hypothesis_context(anomalies, env)
 
     if hyp_ctx:
         watch_result["hypothesis_context"] = hyp_ctx
-    if past_incs:
-        watch_result["recent_incidents"] = past_incs
 
     print("  Reasoning with Claude...")
     try:
