@@ -539,15 +539,17 @@ Anomaly types:
 
 ROOT CAUSE REASONING RULES — follow these in order:
 1. MISSING_SERVICE is direct evidence: the named service is absent from traces. It is down.
-   Name it as the root cause directly — do NOT speculate about shared dependencies unless
-   the missing service itself depends on something that also shows anomaly signals.
-2. NEW_ERROR_SIGNATURE on a specific service (e.g. CannotCreateTransactionException) points
-   directly to that service's dependency (e.g. the database). Name the specific dependency.
-3. Shared dependency hypotheses (discovery-server, mysql:petclinic) are only HIGH confidence
-   when multiple independent services show anomalies simultaneously AND the shared dep
-   itself has signals, or when no service is directly missing from traces.
-4. Do not hedge between two candidates when one has direct trace evidence and the other does not.
-   Choose the one with direct evidence.
+   Name it as the root cause directly — do NOT speculate about shared dependencies.
+2. NEW_ERROR_SIGNATURE saying "5xx on GET <service-name>" means that specific service is
+   unreachable or crashing. Name THAT SERVICE as the root cause — not its dependencies,
+   unless the error message contains a specific exception (e.g. CannotCreateTransactionException)
+   that points to a dependency failure.
+3. CannotCreateTransactionException, DataAccessException, or similar DB exceptions point
+   directly to the database (mysql:petclinic). Name the database as root cause.
+4. Shared dependency hypotheses are only valid when multiple INDEPENDENT services show
+   anomalies AND no single service is directly named in the error signatures.
+5. Do not hedge between two candidates. Pick the one with the most direct evidence.
+   "503 on GET vets-service" = vets-service is down. Full stop.
 
 Be concise. Structure your response as:
 1. **Incident Summary** (1-2 sentences: what happened)
