@@ -86,7 +86,7 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 │  pushes to ConfigMap +        │  │  inline correlate.py (Tier 1+2+3 join)     │
 │  injects into DaemonSet pods  │  │  recovery detection (clears suppression)   │
 └───────────────────────────────┘  │  dedup: suppress same anomaly for 30m      │
-                                   │  LLM triage: Bedrock → Anthropic → Groq    │
+                                   │  LLM triage: AWS Bedrock (Claude)          │
                                    │                                             │
                                    │  severity: INCIDENT                         │
                                    │  root_cause: ...                            │
@@ -440,8 +440,8 @@ Tiers 2, 3, and C emit **custom events** queryable via SignalFlow:
 | `WATCH_SAMPLE_LIMIT` | `200` | Max traces fetched per watch run |
 | `AGENT_WINDOW_MINUTES` | `30` | Anomaly lookback window for `agent.py` |
 | `AWS_REGION` | `us-west-2` | AWS region for Bedrock (Claude) calls |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key (triage-agent fallback if Bedrock unavailable) |
-| `GROQ_API_KEY` | — | Groq API key (triage-agent second fallback, free tier) |
+| `ANTHROPIC_API_KEY` | — | Anthropic direct API key — fallback if Bedrock IAM unavailable (set in `triage-secret`) |
+| `GROQ_API_KEY` | — | Groq API key — last-resort fallback, free tier (set in `triage-secret`) |
 | `LEARN_INTERVAL_MINUTES` | `120` | `baseline-agent`: minutes between learn cycles |
 | `ONBOARD_INTERVAL_MINUTES` | `360` | `baseline-agent`: minutes between onboard discovery cycles |
 | `HEAL_POLL_INTERVAL_S` | `120` | `baseline-agent`: seconds between anomaly rate checks |
@@ -488,7 +488,7 @@ Two agents run as Kubernetes Deployments in the cluster:
 | Deployment | Manifest | Purpose |
 |------------|----------|---------|
 | `baseline-agent` | `otel-processor/k8s/baseline-agent-deployment.yaml` | Learn/promote baselines every 2h, onboard new environments every 6h, monitor anomaly rate every 2m and auto-heal. Runs all post-learn steps inline (noise pruning, coverage audit, adaptive thresholds, baseline monitor, runbook gen). Pushes updated baseline to ConfigMap + injects into DaemonSet pods. |
-| `triage-agent` | `otel-processor/k8s/triage-agent-deployment.yaml` | Polls every 60s. Runs `correlate.py` inline to join Tier 1+2+3 signals. Calls Claude (Bedrock → Anthropic → Groq) for LLM triage. Deduplicates persistent anomalies (30m suppression). Detects recovery events and clears suppression state. |
+| `triage-agent` | `otel-processor/k8s/triage-agent-deployment.yaml` | Polls every 60s. Runs `correlate.py` inline to join Tier 1+2+3 signals. Calls Claude via AWS Bedrock for LLM triage. Deduplicates persistent anomalies (30m suppression). Detects recovery events and clears suppression state. |
 
 Deploy both:
 ```bash
@@ -771,5 +771,5 @@ All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprin
 - **Auto-promotion lag**: New patterns after a deployment will alert until `baseline-agent` completes its next learn cycle (default: 2h). Use `notify_deployment.py` in your CI/CD pipeline to trigger an immediate re-learn via the running `baseline-agent` pod.
 - **Trace search cap**: The Splunk APM trace search API returns at most 200 traces per query, regardless of `WATCH_SAMPLE_LIMIT`. Low-frequency paths may need multiple learn windows to achieve full coverage.
 - **AutoDetect parent detectors**: Tiers 1b, 3, and 4 create `AutoDetectCustomization` children. The org-wide parent detectors must exist in your org — they are created automatically by Splunk Observability in all orgs with APM enabled.
-- **LLM credentials**: `triage-agent` tries Bedrock → Anthropic → Groq in order. At least one must have valid credentials and available credits. Groq offers a free tier — set `GROQ_API_KEY` in `triage-secret` as a fallback.
+- **LLM credentials**: `triage-agent` uses AWS Bedrock via ambient IAM credentials (no API key needed in workshop clusters). If Bedrock is unavailable, it falls back to `ANTHROPIC_API_KEY` then `GROQ_API_KEY` — set these in `triage-secret` only if running outside AWS.
 - **Edge processor baseline sync**: After auto-promotion, the updated baseline is written to the mounted path on that pod only. Other DaemonSet pods pick it up on their next `baseline_reload_interval` tick. `baseline-agent` also pushes the baseline directly into each running pod every learn cycle via `kubectl cp`.
