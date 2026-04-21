@@ -156,10 +156,19 @@ o11y-behaviorbaseline/
 ├── collect.py                ← all data fetching (topology, anomalies, SLO, deployments)
 ├── baseline.py               ← baseline data layer (load, summarize, health, learn, promote)
 ├── onboard.py                ← provisioning + detector management
-├── notify_deployment.py      ← CI/CD hook (emits deployment.started + triggers re-learn)
 ├── watch_otel_events.py      ← fast-path triage: queries OTel edge events from Splunk
-├── poll_drift_events.py      ← tails OTel collector logs via SSH — live display or --triage (pipe to agent.py)
-├── demo_watch.py             ← hands-off demo loop: detect → triage → correlate, autonomous
+│
+├── demo/                     ← demo scripts, guides, and presentation assets
+│   ├── DEMO_GUIDE.md               ← step-by-step demo walkthrough
+│   ├── check-ready.sh              ← pre-flight check (6 conditions)
+│   ├── demo-reset.sh               ← full reset before first demo
+│   ├── demo-between.sh             ← between-demo reset (--db / --quick flags)
+│   ├── demo-quick-reset.sh         ← fast local-only reset (~5s)
+│   ├── demo_watch.py               ← hands-off loop: detect → triage → correlate
+│   ├── poll_drift_events.py        ← tails OTel logs via SSH — live or --triage mode
+│   ├── notify_deployment.py        ← CI/CD hook (emits deployment.started + re-learn)
+│   ├── build_deck.py               ← generates Behavioral_Baseline_Deck.pptx
+│   └── Behavioral_Baseline_Deck.pptx
 │
 ├── core/                     ← detection engine
 │   ├── trace_fingerprint.py        ← Tier 2: trace path drift
@@ -357,10 +366,10 @@ python3 agents/runbook_generator.py --environment petclinicmbtest --force
 
 ## Deployment-aware correlation
 
-Instrument your CI/CD pipeline with `notify_deployment.py` so anomalies that fire shortly after a deploy are automatically annotated and downgraded in severity:
+Instrument your CI/CD pipeline with `demo/notify_deployment.py` so anomalies that fire shortly after a deploy are automatically annotated and downgraded in severity:
 
 ```bash
-python notify_deployment.py \
+python demo/notify_deployment.py \
     --service api-gateway \
     --environment production \
     --version v2.4.1 \
@@ -552,23 +561,23 @@ Events emitted:
 
 Two approaches — use the direct log-tail path for demos (no Splunk indexing wait):
 
-**Primary (no Splunk wait) — `poll_drift_events.py --triage`:**
+**Primary (no Splunk wait) — `demo/poll_drift_events.py --triage`:**
 ```bash
 # Live stream (monitoring terminal):
-python3 -u poll_drift_events.py
+python3 -u demo/poll_drift_events.py
 
 # Triage mode — blocks until events arrive, then pipes to agent.py:
-python3 poll_drift_events.py --triage --environment <env> | python3 agent.py --environment <env>
+python3 demo/poll_drift_events.py --triage --environment <env> | python3 agent.py --environment <env>
 ```
 
 Kill-to-INCIDENT time: **~15–30s** (10s OTel detect + 5s settle + Claude triage). No Splunk indexing lag.
 
-**Hands-off demo loop — `demo_watch.py`:**
+**Hands-off demo loop — `demo/demo_watch.py`:**
 ```bash
 # Runs continuously: detect → triage → correlate, one loop per scenario
-python3 demo_watch.py --environment <env>
-python3 demo_watch.py --environment <env> --no-correlate   # triage only
-python3 demo_watch.py --environment <env> --quiet           # minimal output
+python3 demo/demo_watch.py --environment <env>
+python3 demo/demo_watch.py --environment <env> --no-correlate   # triage only
+python3 demo/demo_watch.py --environment <env> --quiet           # minimal output
 ```
 
 **Alternative (queries Splunk) — `watch_otel_events.py`:**

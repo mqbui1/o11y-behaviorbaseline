@@ -15,7 +15,7 @@
 
 set -eo pipefail
 
-_REPO="$(cd "$(dirname "$0")" && pwd)"
+_REPO="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -f "$_REPO/.env" ]; then
     set -a; source "$_REPO/.env"; set +a
 fi
@@ -31,25 +31,27 @@ cat /dev/null > "$_REPO/data/alerts.log"
 # ── Step 2: Wipe error baseline (local only) ──────────────────────────────────
 echo "[2/3] Wiping error baseline..."
 python3 -c "
-import json, pathlib, datetime, os
+import json, pathlib, datetime, os, sys
+repo = sys.argv[1]
 e = os.environ['ENV']
-pathlib.Path('data/error_baseline.' + e + '.json').write_text(
+pathlib.Path(f'{repo}/data/error_baseline.{e}.json').write_text(
     json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})
 )
 print(f'  Error baseline wiped (data/error_baseline.{e}.json)')
-"
+" "$_REPO"
 
 # ── Step 3: Clear dedup state ─────────────────────────────────────────────────
 echo "[3/3] Clearing dedup state..."
 python3 -c "
-import json, pathlib, os
+import json, pathlib, os, sys
+repo = sys.argv[1]
 e = os.environ['ENV']
 cleared = []
-for f in pathlib.Path('data').glob('*dedup*' + e + '*'):
+for f in pathlib.Path(f'{repo}/data').glob('*dedup*' + e + '*'):
     f.write_text('{}')
     cleared.append(f.name)
 print(f'  Cleared: {cleared}')
-"
+" "$_REPO"
 
 echo ""
 echo "=== Quick reset done. Ready for next demo. ==="

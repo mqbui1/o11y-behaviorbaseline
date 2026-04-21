@@ -63,8 +63,8 @@ from typing import Any
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-# Load .env file from script directory if present (fallback for cron/non-shell contexts)
-_env_file = Path(__file__).parent / ".env"
+# Load .env file from repo root if present (fallback for cron/non-shell contexts)
+_env_file = Path(__file__).parent.parent / ".env"
 if _env_file.exists():
     for _line in _env_file.read_text().splitlines():
         _line = _line.strip()
@@ -84,7 +84,7 @@ if not ACCESS_TOKEN:
 BASE_URL   = f"https://api.{REALM}.signalfx.com"
 INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).parent.parent  # demo/ -> repo root
 
 # How long to wait after a deployment before re-learning the baseline.
 # Should be long enough for new-version traces to start flowing.
