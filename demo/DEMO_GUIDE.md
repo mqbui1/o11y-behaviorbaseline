@@ -496,6 +496,11 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 
 **Story:** *"vets-service is killed. Open the APM Service Map — it shows green. No alert. No incident. APM doesn't know yet. Meanwhile, the OTel edge processor detected the structural absence on the very first affected trace and fired in ~10 seconds. This is the gap the framework fills."*
 
+### Prerequisites
+```bash
+./demo/demo-between.sh --db
+```
+
 ### Step 1 — Open APM Service Map
 Point browser at the Splunk APM Service Map for this environment. Confirm all services green, no incidents.
 
