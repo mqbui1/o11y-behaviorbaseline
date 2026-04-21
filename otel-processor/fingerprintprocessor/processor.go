@@ -44,10 +44,11 @@ type fingerprintProcessor struct {
 	activeDriftsMu sync.Mutex
 	activeDrifts   map[string]string // fp_hash -> root_op; cleared when fingerprint returns to baseline
 
-	// lastSeenMu guards lastSeenRootOp — updated every time a trace for a
-	// known root_op is flushed. Used by the missing-service checker.
-	lastSeenMu    sync.Mutex
+	// lastSeenMu guards lastSeenRootOp and missingEmitted — updated every time
+	// a trace for a known root_op is flushed. Used by the missing-service checker.
+	lastSeenMu     sync.Mutex
 	lastSeenRootOp map[string]time.Time // root_op -> last time a trace was seen
+	missingEmitted map[string]bool      // root_op -> true if MISSING_SERVICE already emitted (reset when seen again)
 
 	startTime time.Time // used for warm-up window check
 
@@ -65,6 +66,7 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		seenCounts:     make(map[string]int),
 		activeDrifts:   make(map[string]string),
 		lastSeenRootOp: make(map[string]time.Time),
+		missingEmitted: make(map[string]bool),
 		startTime:      time.Now(),
 		stopCh:         make(chan struct{}),
 	}
@@ -266,6 +268,11 @@ func (p *fingerprintProcessor) checkMissingServices() {
 			continue
 		}
 
+		// Only emit once per absence period — reset when root_op is seen again
+		if p.missingEmitted[rootOp] {
+			continue
+		}
+
 		// Root op has been silent — infer missing services from baseline
 		missingServices := p.baseline.servicesForRootOp(rootOp, p.cfg.MinBaselineOccurrences)
 		p.logger.Info("missing service detected",
@@ -276,6 +283,8 @@ func (p *fingerprintProcessor) checkMissingServices() {
 		)
 		if err := p.emitter.emitMissingService(p.cfg.Environment, rootOp, missingServices, lastSeen.Unix()); err != nil {
 			p.logger.Warn("failed to emit missing service event", zap.Error(err))
+		} else {
+			p.missingEmitted[rootOp] = true
 		}
 	}
 }
@@ -303,8 +312,10 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 
 	// Always update last-seen for this root_op so the missing-service checker
 	// knows traffic is still flowing, regardless of whether this hash is known.
+	// Clear missingEmitted so the checker re-fires if the service goes silent again.
 	p.lastSeenMu.Lock()
 	p.lastSeenRootOp[fp.rootOp] = time.Now()
+	delete(p.missingEmitted, fp.rootOp)
 	p.lastSeenMu.Unlock()
 
 	entry := p.baseline.lookupTrace(fp.hash)
