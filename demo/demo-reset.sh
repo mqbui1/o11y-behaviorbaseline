@@ -110,14 +110,22 @@ echo "  Cleaned baselines pushed to cluster."
 
 # ── Step 7: Verify 0 trace anomalies ─────────────────────────────────────────
 echo "[7/8] Verifying 0 trace anomalies (Python watch)..."
-result=$(python3 "$_REPO/core/trace_fingerprint.py" --environment "$ENV" watch --window-minutes 5 2>&1)
-if echo "$result" | grep -q "All trace paths match baseline"; then
-    echo "  0 trace anomalies"
-elif echo "$result" | grep -q "0 anomalies"; then
+_watch_clean() {
+    result=$(python3 "$_REPO/core/trace_fingerprint.py" --environment "$ENV" watch --window-minutes 5 2>&1)
+    echo "$result" | grep -qE "All trace paths match baseline|0 anomalies detected"
+}
+if _watch_clean; then
     echo "  0 trace anomalies"
 else
-    echo "  WARNING: Anomalies detected — may need to wait longer or re-learn baseline"
-    echo "$result" | grep "ANOMALY\|anomalies detected" | head -5
+    echo "  Transient anomaly — waiting 15s and retrying..."
+    sleep 15
+    result=$(python3 "$_REPO/core/trace_fingerprint.py" --environment "$ENV" watch --window-minutes 5 2>&1)
+    if echo "$result" | grep -qE "All trace paths match baseline|0 anomalies detected"; then
+        echo "  0 trace anomalies (clear on retry)"
+    else
+        echo "  WARNING: Anomalies still detected — may need to wait longer or re-learn baseline"
+        echo "$result" | grep "ANOMALY\|anomalies detected" | head -5
+    fi
 fi
 
 # ── Step 8: Verify 0 OTel events ─────────────────────────────────────────────
