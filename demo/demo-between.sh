@@ -89,9 +89,64 @@ for f in pathlib.Path(f'{repo}/data').glob(f'*dedup*{e}*'):
     f.write_text('{}')
 " "$_REPO"
 
-# ── Verify OTel processor is quiet (wait for in-flight traces to flush) ───────
-echo "[5] Verifying OTel processor steady state (waiting 20s for startup flush)..."
+# ── Wait for startup flush, then sync any newly auto-promoted hashes back ─────
+echo "[5] Waiting 20s for OTel processor startup flush..."
 sleep 20
+
+# Pull auto-promoted hashes from one pod and merge into local baseline.
+# This ensures steady-state direct-call paths are baked in for future resets.
+PROMOTED_JSON=$($K "
+  pod=\$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[0].metadata.name}')
+  kubectl exec \$pod -c otelcol -- cat /baseline/baseline.json 2>/dev/null" 2>/dev/null | \
+  grep -v '▀\|█\|▄' || echo "{}")
+python3 -c "
+import json, sys, os
+from pathlib import Path
+from datetime import datetime, timezone
+
+repo = sys.argv[1]; e = os.environ['ENV']
+local_path = Path(f'{repo}/data/baseline.{e}.json')
+if not local_path.exists():
+    sys.exit(0)
+
+try:
+    otel = json.loads(sys.argv[2])
+except Exception:
+    sys.exit(0)
+
+local = json.loads(local_path.read_text())
+now = datetime.now(timezone.utc).isoformat()
+added = 0
+for h, entry in otel.get('fingerprints', {}).items():
+    if h not in local['fingerprints'] and entry.get('auto_promoted'):
+        local['fingerprints'][h] = {
+            'hash': h,
+            'root_op': entry.get('root_op', ''),
+            'path': entry.get('path', entry.get('root_op', '')),
+            'services': entry.get('services', []),
+            'span_count': entry.get('span_count', 1),
+            'edge_count': entry.get('edge_count', 0),
+            'occurrences': 1, 'watch_hits': 0,
+            'auto_promoted': True,
+            'promoted_at': now, 'first_seen': now,
+        }
+        added += 1
+if added:
+    local_path.write_text(json.dumps(local, indent=2))
+    print(f'  Synced {added} auto-promoted hash(es) from cluster into local baseline')
+else:
+    print(f'  Local baseline already in sync with cluster')
+" "$_REPO" "$PROMOTED_JSON"
+
+# Re-push updated baseline to all pods so they all have the merged set
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
+  "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
+$K "BB64=\$(base64 -w 0 /tmp/baseline.json); \
+    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
+      kubectl exec \$pod -c otelcol -- sh -c \"echo '\$BB64' | base64 -d > /baseline/baseline.json\" 2>/dev/null; \
+    done" 2>/dev/null | grep -v '▀\|█\|▄' || true
+
+# Verify quiet
 DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=10s 2>/dev/null; done" 2>/dev/null \
     | grep -cE 'trace drift detected|new trace fingerprint|new error signature' || echo "0")
 DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
