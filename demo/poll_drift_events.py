@@ -20,8 +20,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+_REPO = Path(__file__).parent.parent  # demo/ -> repo root
+
 # Load .env
-_env = Path(__file__).parent / ".env"
+_env = _REPO / ".env"
 if _env.exists():
     for line in _env.read_text().splitlines():
         line = line.strip()
@@ -39,7 +41,7 @@ if not EC2_IP or not EC2_PASS:
 
 DAEMONSET_LABEL = os.environ.get("OTEL_POD_LABEL", "app=otelcol-fingerprint")
 OTEL_CONTAINER  = os.environ.get("OTEL_CONTAINER", "otelcol")
-_DATA_DIR       = Path(__file__).parent / "data"
+_DATA_DIR       = _REPO / "data"
 
 def _make_ssh_cmd(since: str = "5s") -> str:
     return (

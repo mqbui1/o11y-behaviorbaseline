@@ -153,7 +153,7 @@ k "B64=\$(base64 -w 0 /tmp/baseline.json); \
 ### Step 7 — Verify (local Mac)
 ```bash
 # Should be silent (no false positives):
-python3 -u poll_drift_events.py
+python3 -u demo/poll_drift_events.py
 
 # Kill visits-service to confirm Demo 1 fires within ~20s:
 k "kubectl scale deployment visits-service --replicas=0"
@@ -182,6 +182,7 @@ k "kubectl rollout restart daemonset/otelcol-fingerprint"
 
 ### Terminal setup (run once before demo)
 ```bash
+# All commands in this guide are run from the repo root
 cd /Users/mbui/Documents/o11y-behaviorbaseline
 source .env
 # ENV is set in .env — update before each workshop session
@@ -215,7 +216,7 @@ This writes the tokens into `.env` so all scripts pick them up automatically. Do
 
 ### Pre-flight check
 ```bash
-./check-ready.sh
+./demo/check-ready.sh
 ```
 
 This checks all 6 pre-demo conditions in one pass:
@@ -247,7 +248,7 @@ python3 refresh_aws_creds.py
 source .env
 
 # Run the reset script
-./demo-reset.sh
+./demo/demo-reset.sh
 ```
 
 `demo-reset.sh` does all of this automatically:
@@ -260,14 +261,14 @@ source .env
 7. Verify 0 Python trace anomalies
 8. Verify 0 OTel events in Splunk (last 3m)
 
-> **If step 8 shows OTel events still present:** the previous demo's events haven't aged out of the 3m window yet. Wait 3 minutes and re-run `./demo-reset.sh` — it is idempotent.
+> **If step 8 shows OTel events still present:** the previous demo's events haven't aged out of the 3m window yet. Wait 3 minutes and re-run `./demo/demo-reset.sh` — it is idempotent.
 
 **Between-demo reset** (after a demo that killed a service — ~30 seconds with DB, ~5 seconds without):
 
 ```bash
-./demo-between.sh          # after demos where only a service was killed (no DB)
-./demo-between.sh --db     # after demos where DB was killed (adds 30s wait for reconnect)
-./demo-between.sh --quick  # local state only, no cluster ops (same as demo-quick-reset.sh)
+./demo/demo-between.sh          # after demos where only a service was killed (no DB)
+./demo/demo-between.sh --db     # after demos where DB was killed (adds 30s wait for reconnect)
+./demo/demo-between.sh --quick  # local state only, no cluster ops (same as demo-quick-reset.sh)
 ```
 
 `demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state. By default also restores all services to replicas=1 and wipes OTel error baseline in-memory.
@@ -275,7 +276,7 @@ source .env
 **Quick reset** (between demos, no cluster ops — ~5 seconds):
 
 ```bash
-./demo-quick-reset.sh
+./demo/demo-quick-reset.sh
 ```
 
 Clears alerts.log, wipes error baseline and dedup state locally. No cluster ops. Use between clean demo runs where services were already restored.
@@ -304,7 +305,7 @@ Run `demo_watch.py` in one terminal. Kill services in another. Everything else i
 
 ```bash
 # Terminal 1 — leave running throughout the demo
-python3 demo_watch.py --environment $ENV
+python3 demo/demo_watch.py --environment $ENV
 ```
 
 ```bash
@@ -352,13 +353,13 @@ k "kubectl scale deployment vets-service --replicas=1"
 **Options:**
 ```bash
 # Skip correlate step (faster, triage only)
-python3 demo_watch.py --environment $ENV --no-correlate
+python3 demo/demo_watch.py --environment $ENV --no-correlate
 
 # Adjust correlate delay (default 60s — Splunk indexing lag)
-python3 demo_watch.py --environment $ENV --correlate-delay 90
+python3 demo/demo_watch.py --environment $ENV --correlate-delay 90
 
 # Suppress poll/status messages (cleaner output)
-python3 demo_watch.py --environment $ENV --quiet
+python3 demo/demo_watch.py --environment $ENV --quiet
 ```
 
 > **Tip:** Keep `tail -f data/alerts.log` open in a third terminal — this shows the structured log that `demo_watch.py` writes via `agent.py`, which has cleaner formatting for screen sharing.
@@ -436,14 +437,14 @@ k "kubectl scale deployment petclinic-db --replicas=0"
 ### Step 1b — Watch OTel real-time detection (while the countdown runs)
 In a third terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
-python3 -u poll_drift_events.py
+python3 -u demo/poll_drift_events.py
 ```
 
 Within **10–15 seconds** of the kill, you'll see `error.signature.drift` events printed — the OTel processor detected new error signatures on the first affected trace.
 
 ### Step 3 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 Waits for events from the OTel log stream, collects for 5s, then pipes directly to agent.py — no Splunk indexing lag.
@@ -510,12 +511,12 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 
 ### Step 4 — Restore
 ```bash
-./demo-between.sh --db
+./demo/demo-between.sh --db
 ```
 
 `--db` restores petclinic-db to replicas=1, waits 30s for services to reconnect, then wipes the error baseline locally and on the cluster so Demo 1 can be repeated cleanly.
 
-> **If the curl verify in demo-between.sh fails:** wait another 30s and re-run `./demo-between.sh --db`. customers-service and visits-service need the DB fully up before accepting requests.
+> **If the curl verify in demo-between.sh fails:** wait another 30s and re-run `./demo/demo-between.sh --db`. customers-service and visits-service need the DB fully up before accepting requests.
 
 ---
 
@@ -533,14 +534,14 @@ k "kubectl scale deployment vets-service --replicas=0"
 
 ### Step 3 — Watch framework fire in real time
 ```bash
-python3 -u poll_drift_events.py
+python3 -u demo/poll_drift_events.py
 ```
 
 Within **10–15 seconds** you'll see `trace.path.drift` printed here. Refresh APM — still green.
 
 ### Step 4 — Run triage
 ```bash
-python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected output:**
@@ -559,7 +560,7 @@ APM still has no alert at this point.
 
 ### Restore
 ```bash
-./demo-between.sh
+./demo/demo-between.sh
 ```
 
 ---
@@ -570,7 +571,7 @@ APM still has no alert at this point.
 
 ### Prerequisites
 ```bash
-./demo-quick-reset.sh
+./demo/demo-quick-reset.sh
 ```
 
 ### Step 1 — Kill vets-service
@@ -581,7 +582,7 @@ k "kubectl scale deployment vets-service --replicas=0"
 ### Step 1b — Watch OTel real-time detection (while the countdown runs)
 In a third terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
-python3 -u poll_drift_events.py
+python3 -u demo/poll_drift_events.py
 ```
 
 Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event for `api-gateway:GET vets-service` printed to this terminal — the OTel Collector edge processor detected the structural change as the first truncated trace flowed through.
@@ -590,7 +591,7 @@ Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event fo
 
 ### Step 3 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
@@ -649,7 +650,7 @@ python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --en
 
 ### Step 4 — Restore
 ```bash
-./demo-between.sh
+./demo/demo-between.sh
 ```
 
 ---
@@ -660,7 +661,7 @@ python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --en
 
 ### Prerequisites
 ```bash
-./demo-quick-reset.sh
+./demo/demo-quick-reset.sh
 
 # Verify 0 trace anomalies
 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
@@ -675,14 +676,14 @@ k "kubectl scale deployment vets-service --replicas=0 && kubectl scale deploymen
 ### Step 1b — Watch OTel real-time detection (while the countdown runs)
 In a third terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
-python3 -u poll_drift_events.py
+python3 -u demo/poll_drift_events.py
 ```
 
 Within **10–15 seconds** you'll see both `trace.path.drift` (vets-service gone) and `error.signature.drift` (DB errors) fire simultaneously.
 
 ### Step 3 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected terminal output:**
@@ -752,7 +753,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 ### Step 4 — Restore
 ```bash
-./demo-between.sh --db
+./demo/demo-between.sh --db
 ```
 
 ---
@@ -763,7 +764,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 ### Prerequisites
 ```bash
-./demo-quick-reset.sh
+./demo/demo-quick-reset.sh
 
 # Verify 0 anomalies
 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
@@ -773,7 +774,7 @@ python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ### Step 1 — Announce the deployment, then immediately kill vets-service
 ```bash
 # Notify the framework that a deploy is happening
-python3 notify_deployment.py --service vets-service --environment $ENV \
+python3 demo/notify_deployment.py --service vets-service --environment $ENV \
   --version v2.1.0 --description "Update vet specialties endpoint"
 
 # Simulate bad deploy (service crashes on startup)
@@ -782,7 +783,7 @@ k "kubectl scale deployment vets-service --replicas=0"
 
 ### Step 2 — Run triage directly from OTel logs (no Splunk wait)
 ```bash
-python3 poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 This blocks until drift events arrive from the OTel processor (~10-15s after the kill), collects for 5s, then triages immediately.
@@ -840,7 +841,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 
 ### Step 4 — Restore
 ```bash
-./demo-between.sh
+./demo/demo-between.sh
 ```
 
 ---
@@ -851,7 +852,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 
 ### Prerequisites
 ```bash
-./demo-quick-reset.sh
+./demo/demo-quick-reset.sh
 
 # Simulate a deploy: remove vets-service fingerprints from baseline
 # (represents a deployment that changed the call path)
@@ -1064,7 +1065,7 @@ WATCH  →  Two paths:
   Fast path (OTel edge, ~10s latency):
           OTel Collector processor fingerprints every trace as it flows through
           DRIFT → emits trace.path.drift / error.signature.drift to its own logs
-          poll_drift_events.py --triage tails logs directly → JSON (no Splunk wait)
+          demo/poll_drift_events.py --triage tails logs directly → JSON (no Splunk wait)
 
   Slow path (Python APM polling, ~1-5 min):
           Sample traces from the last N minutes via Splunk APM API
@@ -1079,7 +1080,7 @@ TRIAGE →  Claude reads the JSON anomaly list
 
 Fast path — triage directly from OTel logs (used in all demos, no Splunk indexing wait):
 ```bash
-python3 poll_drift_events.py --triage --environment $ENV \
+python3 demo/poll_drift_events.py --triage --environment $ENV \
   | python3 agent.py --environment $ENV
 ```
 
@@ -1096,13 +1097,13 @@ Slow path — Python APM polling (used in Demo 6 auto-promotion only):
 
 **Quick reset between demos** (local state only, ~5 seconds):
 ```bash
-./demo-quick-reset.sh
+./demo/demo-quick-reset.sh
 ```
 Clears alerts.log, wipes error baseline, clears dedup state. No cluster ops.
 
 **Full reset** (before first demo or after a messy run):
 ```bash
-./demo-reset.sh
+./demo/demo-reset.sh
 ```
 
 If you need to also re-learn the trace baseline from scratch (e.g. after a full topology change):

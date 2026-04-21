@@ -11,7 +11,7 @@
 set -eo pipefail
 
 # Load .env if vars not already in environment
-_REPO="$(cd "$(dirname "$0")" && pwd)"
+_REPO="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -f "$_REPO/.env" ]; then
     set -a; source "$_REPO/.env"; set +a
 fi
@@ -36,22 +36,23 @@ sleep 30
 
 # ── Step 3: Clear alert log ───────────────────────────────────────────────────
 echo "[3/8] Clearing alert log..."
-cat /dev/null > data/alerts.log
+cat /dev/null > "$_REPO/data/alerts.log"
 
 # ── Step 4: Wipe error baseline ───────────────────────────────────────────────
 echo "[4/8] Wiping error baseline..."
 python3 -c "
-import json, pathlib, datetime, os
+import json, pathlib, datetime, os, sys
+repo = sys.argv[1]
 e = os.environ['ENV']
-pathlib.Path(f'data/error_baseline.{e}.json').write_text(
+pathlib.Path(f'{repo}/data/error_baseline.{e}.json').write_text(
     json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})
 )
 print(f'  Error baseline wiped (data/error_baseline.{e}.json)')
-"
+" "$_REPO"
 
 # Stage error baseline on cluster (ConfigMap+inject happens after step 6)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
-  "data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
+  "$_REPO/data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
 # Also wipe OTel in-memory error baseline on each pod so demo error signatures fire fresh
 $K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
       kubectl exec \$pod -c otelcol -- sh -c 'echo \"{\\\"signatures\\\":{}}\" > /baseline/error_baseline.json' 2>/dev/null && echo \"  OTel error baseline wiped: \$pod\"; \
@@ -61,21 +62,23 @@ echo "  Error baseline staged + OTel pods wiped."
 # ── Step 5: Clear dedup state ─────────────────────────────────────────────────
 echo "[5/8] Clearing dedup state..."
 python3 -c "
-import json, pathlib, os
+import json, pathlib, os, sys
+repo = sys.argv[1]
 e = os.environ['ENV']
 cleared = []
-for f in pathlib.Path('data').glob(f'*dedup_state*{e}*'):
+for f in pathlib.Path(f'{repo}/data').glob(f'*dedup_state*{e}*'):
     f.write_text('{}')
     cleared.append(f.name)
 print(f'  Cleared: {cleared}')
-"
+" "$_REPO"
 
 # ── Step 6: Strip watch-contaminated trace fingerprints + push to cluster ─────
 echo "[6/8] Cleaning trace baseline (removing watch-contaminated entries)..."
 python3 -c "
-import json, pathlib, os
+import json, pathlib, os, sys
+repo = sys.argv[1]
 e = os.environ['ENV']
-p = pathlib.Path(f'data/baseline.{e}.json')
+p = pathlib.Path(f'{repo}/data/baseline.{e}.json')
 if not p.exists():
     print('  No trace baseline found — skipping')
     exit()
@@ -89,10 +92,10 @@ d['fingerprints'] = {h: fp for h, fp in d['fingerprints'].items()
                         (fp.get('watch_hits', 0) == 0 and fp.get('occurrences', fp.get('seen', 0)) >= 2)}
 p.write_text(json.dumps(d, indent=2))
 print(f'  Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
-"
+" "$_REPO"
 # Push both baselines to cluster (single ConfigMap update after all local cleanup)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
-  "data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
+  "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
 $K "kubectl delete configmap behavioral-baseline --ignore-not-found && \
     kubectl create configmap behavioral-baseline \
       --from-file=baseline.json=/tmp/baseline.json \
@@ -107,7 +110,7 @@ echo "  Cleaned baselines pushed to cluster."
 
 # ── Step 7: Verify 0 trace anomalies ─────────────────────────────────────────
 echo "[7/8] Verifying 0 trace anomalies (Python watch)..."
-result=$(python3 core/trace_fingerprint.py --environment "$ENV" watch --window-minutes 5 2>&1)
+result=$(python3 "$_REPO/core/trace_fingerprint.py" --environment "$ENV" watch --window-minutes 5 2>&1)
 if echo "$result" | grep -q "All trace paths match baseline"; then
     echo "  0 trace anomalies"
 elif echo "$result" | grep -q "0 anomalies"; then
@@ -119,7 +122,7 @@ fi
 
 # ── Step 8: Verify 0 OTel events ─────────────────────────────────────────────
 echo "[8/8] Verifying 0 OTel events in Splunk (last 3m)..."
-n=$(python3 watch_otel_events.py --environment "$ENV" --window-minutes 3 --no-dedup 2>/dev/null | \
+n=$(python3 "$_REPO/watch_otel_events.py" --environment "$ENV" --window-minutes 3 --no-dedup 2>/dev/null | \
     python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['anomalies']))" 2>/dev/null || echo "?")
 if [ "$n" = "0" ]; then
     echo "  0 OTel events"
@@ -133,6 +136,6 @@ echo ""
 echo "=== Reset complete. Ready for demo. ==="
 echo ""
 echo "Quick check commands:"
-echo "  python3 core/trace_fingerprint.py --environment \$ENV show"
-echo "  python3 core/error_fingerprint.py --environment \$ENV show"
-echo "  python3 core/trace_fingerprint.py --environment \$ENV watch --window-minutes 5"
+echo "  python3 \$_REPO/core/trace_fingerprint.py --environment \$ENV show"
+echo "  python3 \$_REPO/core/error_fingerprint.py --environment \$ENV show"
+echo "  python3 \$_REPO/core/trace_fingerprint.py --environment \$ENV watch --window-minutes 5"
