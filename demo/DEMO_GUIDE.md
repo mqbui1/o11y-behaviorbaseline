@@ -548,7 +548,7 @@ APM still has no alert at this point.
 
 ### Prerequisites
 ```bash
-./demo/demo-quick-reset.sh
+./demo/demo-between.sh
 ```
 
 ### Step 1 — Kill vets-service
@@ -638,11 +638,7 @@ python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py
 
 ### Prerequisites
 ```bash
-./demo/demo-quick-reset.sh
-
-# Verify 0 trace anomalies
-python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
-# Expected: "All trace paths match baseline"
+./demo/demo-between.sh
 ```
 
 ### Step 1 — Kill both vets-service and petclinic-db simultaneously
@@ -741,11 +737,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 ### Prerequisites
 ```bash
-./demo/demo-quick-reset.sh
-
-# Verify 0 anomalies
-python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
-# Expected: "All trace paths match baseline"
+./demo/demo-between.sh --db
 ```
 
 ### Step 1 — Announce the deployment, then immediately kill vets-service
@@ -829,7 +821,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 
 ### Prerequisites
 ```bash
-./demo/demo-quick-reset.sh
+./demo/demo-between.sh
 
 # Simulate a deploy: remove vets-service fingerprints from baseline
 # (represents a deployment that changed the call path)
