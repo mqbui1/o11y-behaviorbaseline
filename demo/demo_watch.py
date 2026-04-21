@@ -33,15 +33,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Load .env ──────────────────────────────────────────────────────────────────
-_env_file = Path(__file__).parent / ".env"
+_REPO = Path(__file__).parent.parent  # demo/ -> repo root
+
+_env_file = _REPO / ".env"
 if _env_file.exists():
     for _line in _env_file.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip())
-
-_REPO = Path(__file__).parent
 
 
 def _ts() -> str:
@@ -59,7 +59,7 @@ def _run_triage(environment: str, quiet: bool) -> bool:
         print(f"[{_ts()}] Waiting for drift events from OTel edge processor...", flush=True)
 
     poll_cmd = [
-        sys.executable, str(_REPO / "poll_drift_events.py"),
+        sys.executable, str(_REPO / "demo" / "poll_drift_events.py"),
         "--triage", "--environment", environment,
         "--timeout-seconds", "120",
         "--settle-seconds", "5",
