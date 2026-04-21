@@ -80,7 +80,9 @@ The input may include several enrichment fields — use all of them:
   - "hypothesis_context": ranked root cause hypotheses from graph analysis.
     Use the highest-confidence hypothesis as your starting point for root_cause.
   - "recent_incidents": past incidents with similar anomaly patterns and their confirmed causes.
-    If a similar past incident was resolved as "deployment" or "database outage", factor that in.
+    Use ONLY as a tiebreaker when direct structural evidence is ambiguous.
+    NEVER let past incidents override direct evidence: if MISSING_SERVICE or a "5xx on GET <svc>"
+    error signature is present, that service IS the root cause — past history is irrelevant.
   - "recent_deployments": services deployed recently. If the affected service was deployed
     within the last hour, downgrade severity unless symptoms are severe.
 
