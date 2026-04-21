@@ -54,10 +54,12 @@ fi
 # ── Restore all services ──────────────────────────────────────────────────────
 echo "[2] Restoring services to replicas=1..."
 $K "kubectl scale deployment petclinic-db vets-service visits-service customers-service --replicas=1 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+$K "kubectl rollout status deployment/vets-service visits-service customers-service --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
 
 # ── DB wait (only when DB was killed) ─────────────────────────────────────────
 if [ "$DB_WAIT" = "true" ]; then
     echo "[3] Waiting 30s for DB reconnect..."
+    $K "kubectl rollout status deployment/petclinic-db --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
     sleep 30
     $K "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-gateway:82/api/vet/vets --max-time 8 | head -c 50" 2>/dev/null | grep -v '▀\|█\|▄' || true
     echo "  (check above for JSON vets data)"
