@@ -28,6 +28,7 @@ Optional env vars:
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -274,12 +275,30 @@ def _build_hypothesis_context(anomalies: list[dict], env: str) -> str:
     """
     if not anomalies:
         return ""
-    # Determine primary service from the first MISSING_SERVICE or any anomaly
+    # Determine primary service — prefer most directly evidenced:
+    # 1. Service with "5xx on GET <x>" message (entry point with named downstream failure)
+    # 2. MISSING_SERVICE anomaly
+    # 3. api-gateway (best entry point for graph walk)
+    # 4. First anomaly's service
     primary_service = None
     for a in anomalies:
-        if a.get("anomaly_type") == "MISSING_SERVICE":
-            primary_service = a.get("root_op", "").split(":")[0]
+        msg = a.get("message", "")
+        if re.search(r"\b5\d\d on GET [a-z0-9_\-]+", msg, re.IGNORECASE):
+            svc = a.get("service") or a.get("root_op", "").split(":")[0]
+            primary_service = svc.split(":")[0] if ":" in svc else svc
             break
+    if not primary_service:
+        for a in anomalies:
+            if a.get("anomaly_type") == "MISSING_SERVICE":
+                primary_service = a.get("root_op", "").split(":")[0]
+                break
+    if not primary_service:
+        for a in anomalies:
+            svc = a.get("service") or a.get("root_op", "").split(":")[0]
+            svc = svc.split(":")[0] if ":" in svc else svc
+            if svc == "api-gateway":
+                primary_service = svc
+                break
     if not primary_service:
         svc = anomalies[0].get("service") or anomalies[0].get("root_op", "")
         primary_service = svc.split(":")[0] if ":" in svc else svc
