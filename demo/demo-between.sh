@@ -72,5 +72,16 @@ $K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.ite
       && echo \"  wiped: \$pod\"; \
     done" 2>/dev/null | grep -v '▀\|█\|▄' || true
 
+# ── Verify OTel processor is quiet ───────────────────────────────────────────
+echo "[5] Verifying OTel processor steady state (last 30s)..."
+DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=30s 2>/dev/null; done" 2>/dev/null \
+    | grep -cE 'trace drift detected|new trace fingerprint|new error signature' || echo "0")
+DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
+if [ "${DRIFT_COUNT:-0}" -eq 0 ] 2>/dev/null; then
+    echo "  OTel processor: 0 drift events — steady state"
+else
+    echo "  WARNING: ${DRIFT_COUNT} drift event(s) still firing — wait 30s before starting next demo"
+fi
+
 echo ""
 echo "=== Ready for next demo. ==="
