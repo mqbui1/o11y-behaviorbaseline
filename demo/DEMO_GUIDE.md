@@ -371,23 +371,11 @@ python3 demo/demo_watch.py --environment $ENV --quiet
 **Story:** *"This is what the framework looks like before we break anything. Every component is autonomous — no manual alerting rules, no hardcoded thresholds."*
 
 ```bash
-# Pre-flight: verify all systems healthy before starting
+# Verify all systems healthy — proves steady state from the OTel processor's perspective
 ./demo/check-ready.sh
-
-# Known call patterns learned from real traffic
-python3 core/trace_fingerprint.py --environment $ENV show
-
-# Known error signatures
-python3 core/error_fingerprint.py --environment $ENV show
-
-# Show autonomous agents running in the cluster
-k "kubectl get deployment baseline-agent triage-agent"
-
-# Show what the OTel processor has loaded (ground truth — what the live detector sees)
-k "kubectl get configmap behavioral-baseline -o jsonpath='{.data.baseline\.json}' | python3 -c \"import json,sys; d=json.load(sys.stdin); fps=d.get('fingerprints',{}); print(f'OTel ConfigMap: {len(fps)} fingerprints loaded')\""
 ```
 
-**Expected output (check-ready):**
+**Expected output:**
 ```
 === Pre-flight check: env=<env> ===
   ✓  AWS credentials valid
@@ -399,34 +387,13 @@ k "kubectl get configmap behavioral-baseline -o jsonpath='{.data.baseline\.json}
   ✓  OTel processor: 0 drift events in last 30s — steady state
   ✓  No stale OTel events in Splunk
 === Results: 8 passed, 0 failed ===
-```
-
-**Expected output (trace show):**
-```
-Baseline (environment '<env>'): 52 fingerprints
-  Services: [admin-server, api-gateway, customers-service, vets-service, visits-service]
-
-  api-gateway:GET /api/gateway/owners/{ownerId}  (3 patterns)
-  api-gateway:GET customers-service              (2 patterns)
-  api-gateway:GET vets-service                   (2 patterns)
-  api-gateway:GET visits-service                 (3 patterns)
-  api-gateway:PUT customers-service              (1 pattern)
-  ...
-```
-
-**Expected output (kubectl get deployments):**
-```
-NAME             READY   UP-TO-DATE   AVAILABLE
-baseline-agent   1/1     1            1
-triage-agent     1/1     1            1
+    Ready to demo. Start with: demo/demo-reset.sh
 ```
 
 **Key talking points:**
-- *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
-- *"~52 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
-- *"The OTel processor on each node has the same baseline loaded — that's what fires in ~10 seconds when a service goes down."*
-- *"Two autonomous Deployments run continuously: `baseline-agent` re-learns every 2h and heals baselines after incidents; `triage-agent` polls every 60s, correlates all three detection tiers, and calls Claude for triage."*
-- *"check-ready confirms the detector is quiet: 0 drift events from the OTel pods, 0 stale events in Splunk. This is the baseline we'll break in the next demos."*
+- *"One command — 8 checks. No alert rules written, no thresholds set. The framework learned call patterns from live traffic and pushed them to every collector node."*
+- *"53 fingerprints in the ConfigMap — that's what the OTel processor on each node has loaded. Anything that deviates fires in ~10 seconds."*
+- *"0 drift events in the last 30s from the collector pods. 0 stale events in Splunk. The detector is quiet — this is the baseline we'll break in the next demos."*
 
 ---
 
