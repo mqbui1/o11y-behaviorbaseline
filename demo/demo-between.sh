@@ -90,8 +90,8 @@ for f in pathlib.Path(f'{repo}/data').glob(f'*dedup*{e}*'):
 " "$_REPO"
 
 # ── Verify OTel processor is quiet (wait for in-flight traces to flush) ───────
-echo "[5] Verifying OTel processor steady state..."
-sleep 10
+echo "[5] Verifying OTel processor steady state (waiting 20s for startup flush)..."
+sleep 20
 DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=10s 2>/dev/null; done" 2>/dev/null \
     | grep -cE 'trace drift detected|new trace fingerprint|new error signature' || echo "0")
 DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
