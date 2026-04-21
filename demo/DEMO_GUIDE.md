@@ -371,8 +371,8 @@ python3 demo/demo_watch.py --environment $ENV --quiet
 **Story:** *"This is what the framework looks like before we break anything. Every component is autonomous — no manual alerting rules, no hardcoded thresholds."*
 
 ```bash
-# What environments are provisioned and their health
-python3 onboard.py --show-state
+# Pre-flight: verify all systems healthy before starting
+./demo/check-ready.sh
 
 # Known call patterns learned from real traffic
 python3 core/trace_fingerprint.py --environment $ENV show
@@ -383,13 +383,27 @@ python3 core/error_fingerprint.py --environment $ENV show
 # Show autonomous agents running in the cluster
 k "kubectl get deployment baseline-agent triage-agent"
 
-# Confirm 0 anomalies right now
-python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
+# Show what the OTel processor has loaded (ground truth — what the live detector sees)
+k "kubectl get configmap behavioral-baseline -o jsonpath='{.data.baseline\.json}' | python3 -c \"import json,sys; d=json.load(sys.stdin); fps=d.get('fingerprints',{}); print(f'OTel ConfigMap: {len(fps)} fingerprints loaded')\""
+```
+
+**Expected output (check-ready):**
+```
+=== Pre-flight check: env=<env> ===
+  ✓  AWS credentials valid
+  ✓  All pods Running
+  ✓  otelcol-fingerprint: 3/3 pods running
+  ✓  Local baseline: 52 fingerprints (52 promoted)
+  ✓  Cluster ConfigMap baseline: 53 fingerprints loaded
+  ✓  Splunk API reachable (HTTP 200)
+  ✓  OTel processor: 0 drift events in last 30s — steady state
+  ✓  No stale OTel events in Splunk
+=== Results: 8 passed, 0 failed ===
 ```
 
 **Expected output (trace show):**
 ```
-Baseline (environment '<env>'): 18 fingerprints
+Baseline (environment '<env>'): 52 fingerprints
   Services: [admin-server, api-gateway, customers-service, vets-service, visits-service]
 
   api-gateway:GET /api/gateway/owners/{ownerId}  (3 patterns)
@@ -407,21 +421,12 @@ baseline-agent   1/1     1            1
 triage-agent     1/1     1            1
 ```
 
-**Expected output (trace watch — 0 anomalies):**
-```
-[watch] Discovering topology + searching traces in parallel (environment '<env>')...
-  Topology: 7 services | Traces: 200 candidates
-  Fetching 200 traces (20 parallel)...
-    ...
-  Checked 23 traces, 177 skipped, 0 anomalies detected
-  All trace paths match baseline
-```
-
 **Key talking points:**
 - *"No alert rules written. No thresholds set. The framework learned the normal call graph by sampling live traffic."*
-- *"~18 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"~52 structural fingerprints cover every known request path. Anything that deviates fires immediately."*
+- *"The OTel processor on each node has the same baseline loaded — that's what fires in ~10 seconds when a service goes down."*
 - *"Two autonomous Deployments run continuously: `baseline-agent` re-learns every 2h and heals baselines after incidents; `triage-agent` polls every 60s, correlates all three detection tiers, and calls Claude for triage."*
-- *"0 anomalies = the system is healthy. This is the baseline we'll break in the next demos."*
+- *"check-ready confirms the detector is quiet: 0 drift events from the OTel pods, 0 stale events in Splunk. This is the baseline we'll break in the next demos."*
 
 ---
 
