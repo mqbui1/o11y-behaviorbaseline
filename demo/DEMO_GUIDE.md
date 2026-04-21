@@ -438,7 +438,7 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 ```
 
 > Severity shows `DEGRADED` (not `INCIDENT`) because only the customer/owner path is affected —
-> vets-service is still up. Demo 4 (both DB + vets down) produces `INCIDENT`.
+> vets-service is still up. Demo 3 (both DB + vets down) produces `INCIDENT`.
 
 **Expected alerts.log:**
 ```
@@ -492,9 +492,9 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 
 ---
 
-## Demo 2: Gap Demo — APM Has No Alert, Framework Fires in 10s
+## Demo 2: Gap Demo — APM Still Green, Framework Already Paged
 
-**Story:** *"vets-service is killed. Open the APM Service Map — it shows green. No alert. No incident. APM doesn't know yet. Meanwhile, the OTel edge processor detected the structural absence on the very first affected trace and fired in ~10 seconds. This is the gap the framework fills."*
+**Story:** *"vets-service is killed. The APM Service Map shows green — no alert, no incident. APM metrics need time to accumulate before any threshold fires. Meanwhile, the OTel edge processor detected the structural absence on the very first affected trace and fired in ~10 seconds. Claude reads that signal, names vets-service as the root cause, and calls PAGE_ONCALL — all before APM knows anything happened."*
 
 ### Prerequisites
 ```bash
@@ -510,30 +510,41 @@ k "kubectl scale deployment vets-service --replicas=0"
 ```
 
 ### Step 3 — Watch framework fire in real time
+In a second terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
 python3 -u demo/poll_drift_events.py
 ```
 
-Within **10–15 seconds** you'll see `trace.path.drift` printed here. Refresh APM — still green.
+Within **10–15 seconds** you'll see `trace.path.drift` and/or `error.signature.drift` printed here. Refresh APM — still green.
 
-### Step 4 — Run triage
+> *"The OTel processor fires in ~10 seconds — it fingerprints every trace as it flows through the collector, no polling interval. No alert rule was written. No threshold was set."*
+
+### Step 4 — Run triage (pipe OTel events directly to Claude)
 ```bash
 python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
 **Expected output:**
 ```
-[agent] env=<env> | 1 anomaly(s) from watch
+[agent] env=<env> | 2 anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — vets-service is absent from traces. Root cause: vets-service is down.
+[!!] INCIDENT — vets-service is absent from traces, causing api-gateway to return 503
+    on all GET vets-service requests.
+    Root cause: vets-service is down or unreachable.
     Confidence: HIGH | Affected: vets-service, api-gateway
     Recommended action: PAGE_ONCALL
+
+    [TRIAGE SUMMARY] written to alerts.log
+    [PAGE_ONCALL] event emitted to Splunk
 ```
 
 APM still has no alert at this point.
 
-**Key talking point:** *"APM metrics need time to accumulate before thresholds fire — minutes, not seconds. The OTel edge processor sees structural changes in the first affected trace. That's the gap."*
+**Key talking points:**
+- *"APM metrics need time to accumulate before thresholds fire — minutes, not seconds. The OTel edge processor sees structural changes in the first affected trace. That's the gap."*
+- *"No alert rules. No thresholds. The processor learned the normal call graph at baseline time and detected the deviation on the first affected trace."*
+- *"Claude reads exactly what was detected — one structural signal — and reasons about it: INCIDENT, HIGH confidence, PAGE_ONCALL. Total time from kill to triage: under 1 minute."*
 
 ### Restore
 ```bash
@@ -542,97 +553,7 @@ APM still has no alert at this point.
 
 ---
 
-## Demo 3: Missing Service — Structural Trace Absence + AI Triage
-
-**Story:** *"vets-service goes down. The framework detects the structural absence from traces and calls Claude (via AWS Bedrock) to reason about it — producing an INCIDENT verdict with root cause and recommended action, written to a log file in under 1 minute."*
-
-### Prerequisites
-```bash
-./demo/demo-between.sh
-```
-
-### Step 1 — Kill vets-service
-```bash
-k "kubectl scale deployment vets-service --replicas=0"
-```
-
-### Step 1b — Watch OTel real-time detection (while the countdown runs)
-In a third terminal tab, stream drift events directly from the OTel edge processor:
-```bash
-python3 -u demo/poll_drift_events.py
-```
-
-Within **10–15 seconds** of the kill, you'll see a `trace.path.drift` event for `api-gateway:GET vets-service` printed to this terminal — the OTel Collector edge processor detected the structural change as the first truncated trace flowed through.
-
-> **Talking point:** *"The OTel processor fires in ~10 seconds — it fingerprints every trace as it flows through the collector, no polling interval. Those events land in Splunk immediately. The next step pulls them from Splunk and calls Claude for triage — no window to wait for."*
-
-### Step 3 — Run triage directly from OTel logs (no Splunk wait)
-```bash
-python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
-```
-
-**Expected terminal output:**
-```
-[agent] env=<env> | 1 anomaly(s) from watch
-  Reasoning with Claude...
-
-[!!] INCIDENT — The vets-service is unreachable, causing api-gateway to return
-    sustained errors on all GET vets-service calls.
-    Root cause: vets-service is down or network-isolated — the OTel edge processor
-    detected the trace path for 'api-gateway:GET vets-service' has changed,
-    indicating vets-service is no longer reachable.
-    Confidence: HIGH | Affected: vets-service, api-gateway
-    Recommended action: PAGE_ONCALL
-
-    [TRIAGE SUMMARY] written to alerts.log
-    [PAGE_ONCALL] event emitted to Splunk
-```
-
-> The anomaly comes from the OTel edge processor — it detected that the trace fingerprint
-> for `api-gateway:GET vets-service` changed (vets-service spans absent). Claude reasons
-> from that structural signal to INCIDENT + PAGE_ONCALL.
-
-**Expected alerts.log:**
-```
-════════════════════════════════════════════════════════════════════════
-[2026-04-01 05:47:30 UTC]  DETECTION
-  anomaly type         : NEW_FINGERPRINT
-  environment          : <env>
-  service              : api-gateway
-  message              : Trace path drift on 'api-gateway:GET vets-service' (OTel edge detector)
-  detail               : Path: api-gateway:GET vets-service
-────────────────────────────────────────────────────────────────────────
-
-════════════════════════════════════════════════════════════════════════
-[2026-04-01 05:47:30 UTC]  TRIAGE
-  severity             : INCIDENT
-  confidence           : HIGH
-  environment          : <env>
-  affected services    : vets-service, api-gateway
-  root cause           : vets-service is down or network-isolated — trace path drift
-                         detected by OTel edge processor on 'api-gateway:GET vets-service'
-  action               : PAGE_ONCALL
-  narrative            : The OTel collector edge processor detected a structural change
-                         in the 'api-gateway:GET vets-service' trace path 10 seconds after
-                         vets-service became unreachable. The on-call engineer should
-                         immediately check the health and pod status of vets-service.
-────────────────────────────────────────────────────────────────────────
-```
-
-**Key talking points:**
-- *"No alert rules. No thresholds. The OTel processor learned the normal call graph at baseline time — api-gateway always calls vets-service on this path — and detected the deviation as the first affected trace flowed through."*
-- *"There's no poll interval. The event fired at the edge, inside the collector, within 10 seconds. We queried Splunk for it 30 seconds later — just to cover indexing lag."*
-- *"Claude reads exactly what was detected — one clean anomaly — and reasons about it: INCIDENT, HIGH confidence, PAGE_ONCALL."*
-- *"Total time from kill to triage: under 1 minute."*
-
-### Step 4 — Restore
-```bash
-./demo/demo-between.sh
-```
-
----
-
-## Demo 4: Correlated Anomaly — Two Tiers Fire Simultaneously
+## Demo 3: Correlated Anomaly — Two Tiers Fire Simultaneously
 
 **Story:** *"Both vets-service AND the database go down at the same time. The trace tier detects MISSING_SERVICE across multiple paths. The error tier detects new CannotCreateTransactionException signatures. `correlate.py` joins trace + error signals on the same service and emits a `[Major] TIER2_TIER3` correlated event — the framework immediately maps the blast radius across all affected services from a single command."*
 
@@ -731,7 +652,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 ---
 
-## Demo 5: Deploy-Correlated Severity Downgrade
+## Demo 4: Deploy-Correlated Severity Downgrade
 
 **Story:** *"A deploy of vets-service is announced via `notify_deployment.py`. The deploy is bad — vets-service crashes immediately on startup. Anomalies fire: trace tier detects MISSING_SERVICE, error tier detects new WebClientRequestException and 503 signatures. On its own, agent.py calls it INCIDENT + PAGE_ONCALL. But `correlate.py` finds the deployment event in its window and downgrades severity from Major → Minor, annotating it as `[deployment-correlated]`. The on-call gets context: this looks like a deploy regression, not a random outage."*
 
@@ -815,7 +736,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 
 ---
 
-## Demo 6: Self-Healing — Live Auto-Promotion
+## Demo 5: Self-Healing — Live Auto-Promotion
 
 **Story:** *"A deploy of vets-service changes its trace structure. The new call path fires NEW_FINGERPRINT on the first watch run — then again on the second. On the second hit, the framework auto-promotes it: the new path is accepted as baseline with zero human intervention. By the third watch run, silence. The framework learned the new normal entirely on its own."*
 
@@ -911,7 +832,7 @@ python3 core/trace_fingerprint.py --environment $ENV promote
 
 ---
 
-## Demo 7: Auto-Onboarding a New Environment
+## Demo 6: Auto-Onboarding a New Environment
 
 **Story:** *"A new environment shows up in Splunk APM — a team just deployed their first instrumented services. `onboard.py --auto` discovers it automatically, builds baselines from live traffic, creates a dashboard, and generates a runbook via Claude. Zero manual configuration. The framework is fully operational for the new environment in one command. In the cluster, `baseline-agent` picks it up on its next 6h onboard cycle."*
 
@@ -1053,7 +974,7 @@ python3 demo/poll_drift_events.py --triage --environment $ENV \
   | python3 agent.py --environment $ENV
 ```
 
-Slow path — Python APM polling (used in Demo 6 auto-promotion only):
+Slow path — Python APM polling (used in Demo 5 auto-promotion only):
 ```bash
 (python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
  python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
