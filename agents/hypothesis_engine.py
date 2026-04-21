@@ -363,6 +363,12 @@ def generate_hypotheses(service: str, graph: dict, signals: dict[str, dict],
             # Extract service names from "Expected service(s) absent from ...: ['x']"
             found = re.findall(r"'([a-z0-9_\-]+)'", msg)
             missing_svcs.update(found)
+    # Also check anomaly_types directly on the corr dict
+    if "MISSING_SERVICE" in set(corr.get("anomaly_types", [])):
+        # Extract service name from root_op "api-gateway:GET vets-service" pattern
+        for msg in corr.get("messages", []):
+            found = re.findall(r"'([a-z0-9_\-]+(?:-service)?)'", msg)
+            missing_svcs.update(found)
 
     for dep in downstream:
         dep_signals = signals.get(dep, {})
@@ -374,7 +380,9 @@ def generate_hypotheses(service: str, graph: dict, signals: dict[str, dict],
 
         evidence = []
         if is_missing:
-            evidence.append(f"{dep} not appearing in traces (MISSING_SERVICE)")
+            evidence.append(
+                f"DIRECT EVIDENCE: {dep} is absent from traces — it is not responding"
+            )
         if dep_signals.get("anomaly_types"):
             evidence.append(
                 f"{dep} has anomalies: {', '.join(dep_signals['anomaly_types'])}"
@@ -387,8 +395,12 @@ def generate_hypotheses(service: str, graph: dict, signals: dict[str, dict],
         hypotheses.append({
             "hypothesis_type": "DOWNSTREAM_FAILURE",
             "candidate":       dep,
+            "direct_evidence": is_missing,
             "summary":         (
-                f"{dep} (downstream of {service}) appears to be down or degraded. "
+                f"{dep} is absent from traces — it is down. "
+                f"This is direct evidence, not an inference."
+                if is_missing else
+                f"{dep} (downstream of {service}) appears degraded. "
                 f"{service} is executing fallback paths in response."
             ),
             "evidence":        evidence,
@@ -487,9 +499,10 @@ def generate_hypotheses(service: str, graph: dict, signals: dict[str, dict],
                 "confidence":      "Medium",
             })
 
-    # ── Rank by: confidence, then explains_services count ─────────────────────
+    # ── Rank by: direct_evidence first, then confidence, then explains_services ─
     conf_order = {"High": 0, "Medium": 1, "Low": 2}
     hypotheses.sort(key=lambda h: (
+        0 if h.get("direct_evidence") else 1,
         conf_order.get(h["confidence"], 9),
         -len(h["explains_services"]),
     ))
@@ -573,9 +586,10 @@ def format_for_prompt(analysis: dict) -> str:
 
     lines += ["", "## Root Cause Hypotheses (ranked)"]
     for h in analysis["hypotheses"]:
+        label = " ⚠ DIRECT TRACE EVIDENCE" if h.get("direct_evidence") else ""
         lines += [
             "",
-            f"### #{h['rank']} [{h['confidence']}] {h['hypothesis_type']} — {h['candidate']}",
+            f"### #{h['rank']} [{h['confidence']}] {h['hypothesis_type']} — {h['candidate']}{label}",
             h["summary"],
             f"Explains: {', '.join(h['explains_services'])}",
             "Evidence:",
