@@ -537,9 +537,21 @@ Anomaly types:
 - NEW_SIGNATURE: new error pattern never seen in baseline (new bug, unhandled edge case)
 - SIGNATURE_VANISHED: error that was common is now gone (possible fix, or service completely down)
 
+ROOT CAUSE REASONING RULES — follow these in order:
+1. MISSING_SERVICE is direct evidence: the named service is absent from traces. It is down.
+   Name it as the root cause directly — do NOT speculate about shared dependencies unless
+   the missing service itself depends on something that also shows anomaly signals.
+2. NEW_ERROR_SIGNATURE on a specific service (e.g. CannotCreateTransactionException) points
+   directly to that service's dependency (e.g. the database). Name the specific dependency.
+3. Shared dependency hypotheses (discovery-server, mysql:petclinic) are only HIGH confidence
+   when multiple independent services show anomalies simultaneously AND the shared dep
+   itself has signals, or when no service is directly missing from traces.
+4. Do not hedge between two candidates when one has direct trace evidence and the other does not.
+   Choose the one with direct evidence.
+
 Be concise. Structure your response as:
 1. **Incident Summary** (1-2 sentences: what happened)
-2. **Root Cause Hypothesis** (most likely cause based on the evidence)
+2. **Root Cause** (single most likely cause — be specific, no hedging)
 3. **Affected Services** (list with what's wrong for each)
 4. **Evidence** (key observations from traces and anomaly signals)
 5. **Recommended Actions** (specific, ordered steps to investigate or remediate)
