@@ -363,9 +363,11 @@ def generate_hypotheses(service: str, graph: dict, signals: dict[str, dict],
             # Extract service names from "Expected service(s) absent from ...: ['x']"
             found = re.findall(r"'([a-z0-9_\-]+)'", msg)
             missing_svcs.update(found)
+        # "5xx on GET <service-name>" — named service is directly unreachable
+        found = re.findall(r"\b5\d\d on GET ([a-z0-9_\-]+)", msg, re.IGNORECASE)
+        missing_svcs.update(found)
     # Also check anomaly_types directly on the corr dict
     if "MISSING_SERVICE" in set(corr.get("anomaly_types", [])):
-        # Extract service name from root_op "api-gateway:GET vets-service" pattern
         for msg in corr.get("messages", []):
             found = re.findall(r"'([a-z0-9_\-]+(?:-service)?)'", msg)
             missing_svcs.update(found)
