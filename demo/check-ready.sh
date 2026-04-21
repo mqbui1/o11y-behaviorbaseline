@@ -39,20 +39,21 @@ fi
 
 # ── 2. Cluster pods ───────────────────────────────────────────────────────────
 echo "[2/6] Cluster pod health..."
-NOT_RUNNING=$($K "kubectl get pods --no-headers 2>/dev/null | grep -v Running | grep -v Completed | grep -v '^$'" 2>/dev/null | grep -v '▀\|█\|▄' | wc -l | tr -d ' ')
-FP_PODS=$($K "kubectl get pods -l app=otelcol-fingerprint --no-headers 2>/dev/null | grep Running | wc -l" 2>/dev/null | grep -v '▀\|█\|▄' | tr -d ' \n')
-if [ "$NOT_RUNNING" -eq 0 ]; then
+_POD_OUT=$($K "kubectl get pods --no-headers 2>/dev/null" 2>/dev/null || true)
+NOT_RUNNING=$(echo "$_POD_OUT" | grep -vE 'Running|Completed|^$' | grep -cE '^[a-z]' || true)
+FP_PODS=$(echo "$_POD_OUT" | grep 'otelcol-fingerprint' | grep -c Running || true)
+if [ "${NOT_RUNNING:-0}" -eq 0 ] 2>/dev/null; then
     ok "All pods Running"
 else
-    fail "$NOT_RUNNING pod(s) not in Running state — check: kubectl get pods"
+    fail "${NOT_RUNNING} pod(s) not in Running state — check: kubectl get pods"
 fi
-if [ "$FP_PODS" -eq 3 ]; then
+if [ "${FP_PODS:-0}" -eq 3 ] 2>/dev/null; then
     ok "otelcol-fingerprint: 3/3 pods running"
 else
-    fail "otelcol-fingerprint: only $FP_PODS/3 pods running"
+    fail "otelcol-fingerprint: only ${FP_PODS:-0}/3 pods running"
 fi
 
-# ── 3. Baseline fingerprints ──────────────────────────────────────────────────
+# ── 3. Baseline fingerprints (local + cluster ConfigMap) ─────────────────────
 echo "[3/6] Baseline..."
 FP_COUNT=$(python3 -c "
 import json, sys
@@ -67,9 +68,16 @@ else:
     print('MISSING')
 " "$_REPO" 2>/dev/null)
 if echo "$FP_COUNT" | grep -q MISSING; then
-    fail "Baseline file missing — run learn + promote"
+    fail "Local baseline file missing — run learn + promote"
 else
-    ok "Baseline: $FP_COUNT"
+    ok "Local baseline: $FP_COUNT"
+fi
+# Also verify cluster ConfigMap has the baseline loaded (what OTel processor actually sees)
+CM_FP=$($K "kubectl get configmap behavioral-baseline -o jsonpath='{.data.baseline\\.json}' 2>/dev/null | python3 -c \"import json,sys; d=json.loads(sys.stdin.read()); print(len(d.get('fingerprints',{})))\" 2>/dev/null" 2>/dev/null | tr -d ' \n' || echo "0")
+if [ "${CM_FP:-0}" -gt 0 ] 2>/dev/null; then
+    ok "Cluster ConfigMap baseline: ${CM_FP} fingerprints loaded"
+else
+    fail "Cluster ConfigMap baseline empty or missing — run demo/demo-reset.sh to push baseline"
 fi
 
 # ── 4. Splunk API connectivity ────────────────────────────────────────────────
@@ -83,13 +91,15 @@ else
     fail "Splunk API returned HTTP $HTTP_CODE — check SPLUNK_ACCESS_TOKEN"
 fi
 
-# ── 5. Zero trace anomalies ───────────────────────────────────────────────────
-echo "[5/6] Trace baseline — checking for anomalies (takes ~30s)..."
-ANOM=$(python3 "$_REPO/core/trace_fingerprint.py" --environment "$ENV" watch --window-minutes 5 2>/dev/null | grep "anomalies detected" | grep -v "^0 " | grep -oE "[0-9]+ anomalies" | head -1)
-if [ -z "$ANOM" ]; then
-    ok "0 trace anomalies — baseline clean"
+# ── 5. OTel processor steady state (cluster pod logs, last 30s) ───────────────
+echo "[5/6] OTel processor steady state (cluster logs)..."
+DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=30s 2>/dev/null; done" 2>/dev/null \
+    | grep -cE 'trace drift detected|new trace fingerprint|new error signature' || echo "0")
+DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
+if [ "${DRIFT_COUNT:-0}" -eq 0 ] 2>/dev/null; then
+    ok "OTel processor: 0 drift events in last 30s — steady state"
 else
-    fail "$ANOM detected — run demo/demo-reset.sh before proceeding"
+    warn "OTel processor: ${DRIFT_COUNT} drift event(s) in last 30s — wait for steady state or run demo-reset.sh"
 fi
 
 # ── 6. OTel events in Splunk (last 3m) ───────────────────────────────────────
