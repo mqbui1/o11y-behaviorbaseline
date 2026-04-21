@@ -4,12 +4,19 @@
 # AI-powered triage happens cluster-natively without needing a laptop or VM.
 #
 # The agent polls Splunk every TRIAGE_POLL_INTERVAL seconds for new
-# behavioral_baseline.correlated_anomaly events, calls Claude via Anthropic API,
-# and routes the plain-English triage summary to a webhook (Slack, PagerDuty).
+# behavioral_baseline.correlated_anomaly events, calls Claude via AWS Bedrock
+# (ambient IAM — no API key needed), and routes the plain-English triage summary
+# to a webhook (Slack, PagerDuty).
+#
+# LLM backend (triage_agent.py fallback chain):
+#   1. AWS Bedrock — ambient IAM credentials (used in all workshop clusters)
+#   2. Anthropic direct API — ANTHROPIC_API_KEY (optional fallback)
+#   3. Groq — GROQ_API_KEY (optional fallback, free tier)
 #
 # Prerequisites:
 #   - workshop-secret: api_token, access_token, realm, env
-#   - triage-secret: ANTHROPIC_API_KEY
+#   - baseline-sync ServiceAccount must have IAM permissions for Bedrock
+#   - triage-secret: optional — only needed if Bedrock IAM is unavailable
 #
 # Deploy:
 #   kubectl apply -f triage-agent-deployment.yaml
@@ -90,13 +97,13 @@ spec:
                 secretKeyRef:
                   name: triage-secret
                   key: ANTHROPIC_API_KEY
-                  optional: true   # not required if using Groq
+                  optional: true   # fallback if Bedrock IAM unavailable
             - name: GROQ_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: triage-secret
                   key: GROQ_API_KEY
-                  optional: true   # not required if using Anthropic/Bedrock
+                  optional: true   # last-resort fallback (free tier)
             - name: TRIAGE_WEBHOOK_URL
               valueFrom:
                 secretKeyRef:
@@ -138,17 +145,13 @@ spec:
         - name: data
           emptyDir: {}   # triage_result events go to Splunk, not local disk
 ---
-# triage-secret template — create with whichever key(s) you have:
+# triage-secret — only needed if Bedrock IAM is unavailable.
+# Workshop clusters use ambient IAM (no secret required).
 #
-# Groq (free tier — get key at console.groq.com):
-#   kubectl create secret generic triage-secret \
-#     --from-literal=GROQ_API_KEY=gsk_...
-#
-# Anthropic:
+# Anthropic direct API fallback:
 #   kubectl create secret generic triage-secret \
 #     --from-literal=ANTHROPIC_API_KEY=sk-ant-...
 #
-# Both (Anthropic tried first, Groq as fallback):
+# Groq fallback (free tier):
 #   kubectl create secret generic triage-secret \
-#     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
 #     --from-literal=GROQ_API_KEY=gsk_...
