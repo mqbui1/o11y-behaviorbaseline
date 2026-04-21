@@ -74,6 +74,15 @@ $K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.ite
       && echo \"  wiped: \$pod\"; \
     done" 2>/dev/null | grep -v '▀\|█\|▄' || true
 
+# ── Re-clear local state (catch anything written during restore wait) ─────────
+cat /dev/null > "$_REPO/data/alerts.log"
+python3 -c "
+import json, pathlib, os, sys
+repo = sys.argv[1]; e = os.environ['ENV']
+for f in pathlib.Path(f'{repo}/data').glob(f'*dedup*{e}*'):
+    f.write_text('{}')
+" "$_REPO"
+
 # ── Verify OTel processor is quiet ───────────────────────────────────────────
 echo "[5] Verifying OTel processor steady state (last 30s)..."
 DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=30s 2>/dev/null; done" 2>/dev/null \
