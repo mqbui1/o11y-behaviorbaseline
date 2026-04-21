@@ -65,13 +65,17 @@ if [ "$DB_WAIT" = "true" ]; then
     echo "  (check above for JSON vets data)"
 fi
 
-# ── Wipe OTel error baseline in-memory ───────────────────────────────────────
-echo "[4] Wiping OTel error baseline on pods..."
+# ── Re-inject both baselines into OTel pods (clears dirty in-memory state) ───
+echo "[4] Re-injecting clean baselines into OTel pods..."
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
+  "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "$_REPO/data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
-$K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
-      kubectl exec \$pod -c otelcol -- sh -c 'echo \"{\\\"signatures\\\":{}}\" > /baseline/error_baseline.json' 2>/dev/null \
-      && echo \"  wiped: \$pod\"; \
+$K "BB64=\$(base64 -w 0 /tmp/baseline.json); \
+    EB64=\$(base64 -w 0 /tmp/error_baseline.json); \
+    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
+      kubectl exec \$pod -c otelcol -- sh -c \"echo '\$BB64' | base64 -d > /baseline/baseline.json && echo '\$EB64' | base64 -d > /baseline/error_baseline.json\" 2>/dev/null \
+      && echo \"  injected: \$pod\"; \
     done" 2>/dev/null | grep -v '▀\|█\|▄' || true
 
 # ── Re-clear local state (catch anything written during restore wait) ─────────
