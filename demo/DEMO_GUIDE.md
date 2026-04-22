@@ -103,52 +103,44 @@ python3 core/trace_fingerprint.py --environment $ENV show
 > endpoint generates varying numbers of `SELECT petclinic` spans depending on data volume, and
 > needs a few minutes of warm traffic to produce all variants.
 
-### Step 6 — Seed and deploy the OTel processor (on EC2)
-```bash
-# Push baseline to EC2
-sshpass -p "$EC2_PASSWORD" scp -P 2222 \
-  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
+### Step 6 — Seed and deploy the OTel processor
+`deploy.sh` handles everything: ConfigMap creation (including `baseline-sync-scripts`), DaemonSet apply, Instrumentation CR patch, and baseline injection. Run it on EC2 after SCP-ing the source and baseline files.
 
-# Create required secrets (if not already present)
+**On local Mac — copy files to EC2:**
+```bash
+# Copy otel-processor source (if not done in Step 3)
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -r otel-processor/ splunk@$EC2_IP:/home/splunk/
+
+# Copy baselines
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.$ENV.json
+sshpass -p "$EC2_PASSWORD" scp -P 2222 \
+  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.$ENV.json
+```
+
+**Create required secrets (on EC2, if not already present):**
+```bash
 k "kubectl create secret generic splunk-api-token \
   --from-literal=token=$SPLUNK_ACCESS_TOKEN --dry-run=client -o yaml | kubectl apply -f -"
-
-k "kubectl create secret generic workshop-secret \
-  --from-literal=env=$ENV \
-  --from-literal=ingest-url=https://ingest.us1.signalfx.com \
-  --from-literal=api-url=https://api.us1.signalfx.com \
-  --from-literal=access_token=$SPLUNK_INGEST_TOKEN \
-  --dry-run=client -o yaml | kubectl apply -f -"
-
-# Create empty error baseline
-python3 -c "
-import json, pathlib, datetime
-e = '$ENV'
-pathlib.Path(f'data/error_baseline.{e}.json').write_text(
-    json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e})
-)
-print(f'Empty error baseline created: data/error_baseline.{e}.json')
-"
-sshpass -p "$EC2_PASSWORD" scp -P 2222 \
-  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.json
-
-# Seed ConfigMap + apply DaemonSet
-k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
-   kubectl create configmap behavioral-baseline \
-     --from-file=baseline.json=/tmp/baseline.json \
-     --from-file=error_baseline.json=/tmp/error_baseline.json"
-
-k "kubectl apply -f /home/splunk/otel-processor/k8s/daemonset.yaml"
-k "kubectl rollout restart daemonset/otelcol-fingerprint"
-k "kubectl rollout status daemonset/otelcol-fingerprint --timeout=120s"
-
-# Inject baseline directly into running pods (active immediately, no 60s wait)
-k "B64=\$(base64 -w 0 /tmp/baseline.json); \
-   for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
-     kubectl exec \$pod -c otelcol -- sh -c \"echo '\$B64' | base64 -d > /baseline/baseline.json\"; \
-     echo \"  Injected into \$pod\"; \
-   done"
 ```
+
+**Run deploy.sh (on EC2):**
+```bash
+k "mkdir -p /home/splunk/otel-processor/data && \
+   cp /tmp/baseline.$ENV.json /home/splunk/otel-processor/data/baseline.$ENV.json && \
+   cp /tmp/error_baseline.$ENV.json /home/splunk/otel-processor/data/error_baseline.$ENV.json && \
+   cd /home/splunk/otel-processor && bash deploy.sh $ENV --skip-learn --skip-build"
+```
+
+`deploy.sh` runs these steps automatically:
+1. Seeds `behavioral-baseline` ConfigMap (baseline + error baseline)
+2. Creates `baseline-sync-scripts` ConfigMap from `k8s/baseline-sync-sidecar.py`
+3. Patches the OTel Instrumentation CR → otelcol-fingerprint
+4. Applies `daemonset.yaml` (DaemonSet, config, RBAC, Service)
+5. Restarts DaemonSet and waits for rollout
+6. Injects baseline directly into running pods (immediate — no 60s reload wait)
+
+> **Note:** `daemonset.yaml` includes `missing_service_check_interval: 15s` and `warmup_duration: 30s` in the collector config — no manual patching needed.
 
 ### Step 7 — Verify (local Mac)
 ```bash
@@ -164,16 +156,15 @@ k "kubectl scale deployment visits-service --replicas=1"
 
 ### Re-deploy (subsequent sessions, image already built)
 ```bash
-# Push updated baseline + restart (config-only re-deploy, no build or Instrumentation patch needed)
+# Push updated baselines + re-deploy config (no build or Instrumentation patch needed)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 \
-  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
+  data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.$ENV.json
 sshpass -p "$EC2_PASSWORD" scp -P 2222 \
-  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.json
-k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
-   kubectl create configmap behavioral-baseline \
-     --from-file=baseline.json=/tmp/baseline.json \
-     --from-file=error_baseline.json=/tmp/error_baseline.json"
-k "kubectl rollout restart daemonset/otelcol-fingerprint"
+  data/error_baseline.$ENV.json splunk@$EC2_IP:/tmp/error_baseline.$ENV.json
+k "mkdir -p /home/splunk/otel-processor/data && \
+   cp /tmp/baseline.$ENV.json /home/splunk/otel-processor/data/baseline.$ENV.json && \
+   cp /tmp/error_baseline.$ENV.json /home/splunk/otel-processor/data/error_baseline.$ENV.json && \
+   cd /home/splunk/otel-processor && bash deploy.sh $ENV --skip-learn --skip-build"
 ```
 
 ---
