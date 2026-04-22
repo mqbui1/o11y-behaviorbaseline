@@ -545,11 +545,12 @@ APM still has no alert at this point.
 
 ## Demo 3: Correlated Anomaly — Two Tiers Fire Simultaneously
 
-**Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new DB exception signatures from customers-service and api-gateway. Within ~60 seconds, the OTel processor's background checker notices vets-service has gone completely silent and emits MISSING_SERVICE. `correlate.py` joins both signals and emits a `[Major] TIER2_TIER3` correlated event — the framework maps the full blast radius from a single command."*
+**Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new DB exception signatures and Claude triages: mysql:petclinic is down, PAGE_ONCALL. Then ~60 seconds later, the structural absence detector independently fires MISSING_SERVICE for vets-service — no traces at all, not even failed ones. Two detection mechanisms, two latencies, one complete picture."*
 
 ### Prerequisites
 ```bash
-./demo/demo-between.sh --db```
+bash demo/demo-between.sh --db
+```
 
 ### Step 1 — Kill both vets-service and petclinic-db simultaneously
 ```bash
@@ -566,30 +567,38 @@ python3 -u demo/poll_drift_events.py
 - **~10–15 seconds:** `error.signature.drift` fires — DB errors hitting customers-service and api-gateway
 - **~60 seconds:** `trace.path.drift (MISSING_SERVICE)` fires — OTel background checker notices vets-service has gone completely silent
 
-> *"Two detection mechanisms, two different latencies. The error tier fires on the first affected span — ~10 seconds. The structural absence checker fires after 60 seconds of silence (4× the 15s check interval, tuned to avoid false positives from uneven DaemonSet routing). Together they cover the full failure signature."*
+> *"Two detection mechanisms, two different latencies. The error tier fires on the first affected span — ~10 seconds. The structural absence checker fires after 60 seconds of silence. Together they cover the full failure signature."*
 
-### Step 3 — Run triage
+### Step 3 — Run triage (fires in ~15s on error signals)
 ```bash
-python3 demo/poll_drift_events.py --triage --environment $ENV --min-collect-seconds 90 | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
-`--min-collect-seconds 90` keeps the collection window open for at least 90s after the first event, ensuring both the error signatures (~10s) and MISSING_SERVICE (~60s) are captured in the same triage batch before Claude reasons over them.
+Triage fires ~15s after the kill using the default 5s settle window. The error signatures alone are enough for Claude to identify `mysql:petclinic` as root cause with HIGH confidence.
 
 **Expected output:**
 ```
-[agent] env=<env> | 5+ anomaly(s) from watch
+[agent] env=<env> | 4+ anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — customers-service is failing on all database operations and vets-service
-    is completely absent from traces, indicating two simultaneous failures.
-    Root cause: mysql:petclinic database is down, cascading to customers-service and
-    api-gateway; vets-service is also down or unreachable.
-    Confidence: HIGH | Affected: api-gateway, customers-service, vets-service, mysql:petclinic
+[!!] INCIDENT — customers-service is failing on all database operations, cascading 500s through api-gateway.
+    Root cause: mysql:petclinic database is likely down — customers-service OwnerRepository.findAll is failing, cascading to api-gateway.
+    Confidence: HIGH | Affected: customers-service, api-gateway
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
     [PAGE_ONCALL] event emitted to Splunk
 ```
+
+> *"Root cause in 15 seconds. The error tier alone is enough to page on-call."*
+
+While triage ran on errors, keep watching the live stream terminal — ~60s after the kill:
+```
+[10:04:09] trace.path.drift (MISSING_SERVICE)
+  root_op=api-gateway:GET vets-service  missing=api-gateway,vets-service
+```
+
+> *"And now the structural detector fires — vets-service has gone completely silent. Not just erroring, but absent from traces entirely. The framework caught two independent failure modes."*
 
 ### Step 3b — Run correlate.py to see TIER2_TIER3 cross-tier correlation
 
