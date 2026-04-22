@@ -271,7 +271,9 @@ source .env
 ./demo/demo-between.sh --quick  # local state only, no cluster ops (same as demo-quick-reset.sh)
 ```
 
-`demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state. By default also restores all services to replicas=1 and wipes OTel error baseline in-memory.
+`demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state, restores all services to replicas=1, **restarts OTel pods** (clears in-memory `missingEmitted`/`seenCounts` state), then waits for steady state.
+
+> **After `demo-between.sh` completes, wait ~90 seconds before killing services.** The OTel processor has a 2-minute warmup window after restart during which MISSING_SERVICE detection is suppressed. If you kill a service too soon, the MISSING_SERVICE event won't fire until warmup expires.
 
 **Quick reset** (between demos, no cluster ops — ~5 seconds):
 
@@ -486,7 +488,7 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 ./demo/demo-between.sh --db
 ```
 
-`--db` restores petclinic-db to replicas=1, waits 30s for services to reconnect, then wipes the error baseline locally and on the cluster so Demo 1 can be repeated cleanly.
+`--db` restores petclinic-db to replicas=1, waits 30s for services to reconnect, restarts OTel pods, then wipes baselines and dedup state. Wait ~90s after the script completes before starting the next demo kill.
 
 > **If the curl verify in demo-between.sh fails:** wait another 30s and re-run `./demo/demo-between.sh --db`. customers-service and visits-service need the DB fully up before accepting requests.
 
@@ -499,6 +501,7 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 ### Prerequisites
 ```bash
 ./demo/demo-between.sh --db
+# Wait ~90s after script completes before killing services (OTel warmup)
 ```
 
 ### Step 1 — Open APM Service Map
@@ -555,11 +558,12 @@ APM still has no alert at this point.
 
 ## Demo 3: Correlated Anomaly — Two Tiers Fire Simultaneously
 
-**Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new CannotCreateTransactionException signatures. Within 30 seconds, the OTel processor's background checker notices vets-service has gone silent and emits MISSING_SERVICE as a tier2 event. `correlate.py` joins both signals on the same service and emits a `[Major] TIER2_TIER3` correlated event — the framework maps the full blast radius from a single command."*
+**Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new CannotCreateTransactionException signatures. Within 15 seconds, the OTel processor's background checker notices vets-service has gone silent and emits MISSING_SERVICE as a tier2 event. `correlate.py` joins both signals on the same service and emits a `[Major] TIER2_TIER3` correlated event — the framework maps the full blast radius from a single command."*
 
 ### Prerequisites
 ```bash
-./demo/demo-between.sh
+./demo/demo-between.sh --db
+# Wait ~90s after script completes before killing services (OTel warmup)
 ```
 
 ### Step 1 — Kill both vets-service and petclinic-db simultaneously
@@ -575,9 +579,9 @@ python3 -u demo/poll_drift_events.py
 
 **What you'll see:**
 - **~10–15 seconds:** `error.signature.drift` fires — DB errors hitting customers-service and api-gateway
-- **~30 seconds:** `trace.path.drift` (MISSING_SERVICE) fires — OTel background checker notices vets-service has gone completely silent
+- **~15 seconds:** `trace.path.drift (MISSING_SERVICE)` fires — OTel background checker notices vets-service has gone completely silent
 
-> *"Two detection mechanisms, two different latencies. The error tier fires on the first affected span — ~10 seconds. The structural absence checker fires when a baseline root_op has been silent for 30 seconds. Together they cover the full failure signature."*
+> *"Two detection mechanisms, two different latencies. The error tier fires on the first affected span — ~10 seconds. The structural absence checker fires after 15 seconds of silence. Together they cover the full failure signature."*
 
 ### Step 3 — Run triage
 ```bash
@@ -641,7 +645,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 **Key talking points:**
 - *"Tier 2 (structural absence) alone: could be a canary deploy. Tier 3 (new errors) alone: could be noise. Both firing on the same service simultaneously? That's high-confidence — TIER2_TIER3 escalates to Major immediately."*
-- *"The MISSING_SERVICE signal comes entirely from the OTel edge processor — no Python polling, no APM API call. The background checker fires at the edge in ~30 seconds."*
+- *"The MISSING_SERVICE signal comes entirely from the OTel edge processor — no Python polling, no APM API call. The background checker fires at the edge in ~15 seconds."*
 - *"correlate.py is the join layer. It groups trace drift + error signals by service and surfaces blast radius in one pass."*
 - *"If AutoDetect also fires later, it upgrades automatically to `[Critical] MULTI_TIER`. The framework gets sharper as more evidence accumulates."*
 
@@ -659,6 +663,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 ### Prerequisites
 ```bash
 ./demo/demo-between.sh --db
+# Wait ~90s after script completes before killing services (OTel warmup)
 ```
 
 ### Step 1 — Announce the deployment, then immediately kill vets-service
@@ -743,6 +748,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 ### Prerequisites
 ```bash
 ./demo/demo-between.sh
+# Wait ~90s after script completes (OTel warmup)
 
 # Simulate a deploy: remove vets-service fingerprints from baseline
 # (represents a deployment that changed the call path)
