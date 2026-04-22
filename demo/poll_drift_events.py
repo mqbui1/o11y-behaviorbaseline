@@ -202,6 +202,7 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
     hash_last_seen: dict = {}  # in-memory dedup for live stream mode
     collected: list[dict] = []
     first_event_time: float | None = None
+    last_event_time:  float | None = None
 
     proc = _make_proc(since)
     deadline = time.time() + timeout
@@ -209,6 +210,14 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
     try:
         for raw in proc.stdout:
             line = raw.decode("utf-8", errors="replace").rstrip()
+
+            # In triage mode: exit once we've had `settle` seconds of silence
+            # after the last event. This is a sliding window — new events extend
+            # the collection period, so MISSING_SERVICE (~15s) is captured even
+            # when error signatures fired earlier (~10s).
+            if triage and last_event_time is not None:
+                if time.time() - last_event_time >= settle:
+                    break
 
             if not triage and not drift_re.search(line):
                 continue
@@ -241,8 +250,7 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
                     first_event_time = now
                     print(f"  [{time.strftime('%H:%M:%S')}] {len(collected)} event(s) received — settling for {settle}s...",
                           file=sys.stderr)
-                elif now - first_event_time >= settle:
-                    break
+                last_event_time = now
                 if now >= deadline:
                     break
             else:
