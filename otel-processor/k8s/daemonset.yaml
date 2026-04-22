@@ -197,6 +197,12 @@ data:
         # baseline-sync sidecar patches the ConfigMap so all pods reload it.
         promotion_threshold: 10
         promotion_writeback: true
+        # Missing-service detection: fire if a baseline root_op goes silent
+        # for longer than this interval. 15s matches demo latency expectations.
+        missing_service_check_interval: 15s
+        # Suppress all drift events for 30s after pod start to avoid
+        # false positives from cold-start span bursts.
+        warmup_duration: 30s
 
     exporters:
       otlphttp/splunk:
