@@ -13,90 +13,50 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│  Your Application                                                               │
-│  service-a   service-b   service-c   ...                                        │
-└──────────────────────────┬──────────────────────────────────────────────────────┘
-                           │ OTLP spans
-                           ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│  OTel Collector DaemonSet  (otelcol-fingerprint, one pod per node)              │
-│                                                                                 │
-│  ┌──────────────────────────────────────────────────────────────────────────┐   │
-│  │  fingerprintprocessor  (custom Go processor)                             │   │
-│  │                                                                          │   │
-│  │  1. Buffer spans per traceId (10s window)                                │   │
-│  │  2. On flush:                                                            │   │
-│  │       ┌─ build trace fingerprint  (ordered parent→child edge hash)       │   │
-│  │       └─ build error signatures   (service + error_type + op hash)       │   │
-│  │  3. Compare each hash against baseline (emptyDir, seeded from ConfigMap) │   │
-│  │                                                                          │   │
-│  │  TRACE MATCH  ──▶  silent, pass through                                  │   │
-│  │  TRACE DRIFT  ──▶  emit trace.path.drift  (~10s latency)                 │   │
-│  │                    NEW HASH × 10  ──▶  promote into trace baseline        │   │
-│  │                                        write /baseline/baseline.json      │   │
-│  │                                        emit trace.fingerprint.promoted    │   │
-│  │                                                                          │   │
-│  │  ERROR MATCH  ──▶  silent, pass through                                  │   │
-│  │  ERROR DRIFT  ──▶  emit error.signature.drift  (~10s latency)            │   │
-│  │                    NEW HASH × 10  ──▶  promote into error baseline        │   │
-│  │                                        write /baseline/error_baseline.json│   │
-│  │                                        emit trace.fingerprint.promoted    │   │
-│  └──────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                 │
-│  ┌─────────────────────────────────┐   ┌──────────────────────────────────┐    │
-│  │  baseline-sync sidecar          │   │  baseline emptyDir               │    │
-│  │  (python:3.11-alpine)           │   │  /baseline/baseline.json         │    │
-│  │                                 │   │  /baseline/error_baseline.json   │    │
-│  │  polls SignalFlow every 30s     │◀──│  (writable — processor writes    │    │
-│  │  on trace.fingerprint.promoted: │   │   promoted entries here)         │    │
-│  │    PATCH behavioral-baseline    │   └──────────────────────────────────┘    │
-│  │    ConfigMap via K8s API        │                                           │
-│  └────────────────┬────────────────┘                                           │
-└───────────────────│─────────────────────────────────────────────────────────────┘
-                    │ ConfigMap patch                  │ all spans forwarded
-                    ▼                                  ▼
-┌───────────────────────────────┐    ┌─────────────────────────────────────────────┐
-│  behavioral-baseline          │    │  Splunk Observability Cloud                 │
-│  ConfigMap                    │    │                                             │
-│                               │    │  ┌─────────────────────────────────────┐   │
-│  baseline.json                │    │  │  Splunk APM  (traces, metrics)       │   │
-│  error_baseline.json          │    │  │  AutoDetect: error rate, latency,    │   │
-│                               │    │  │  request rate  ──▶  Tier 1 alerts   │   │
-│  all DaemonSet pods reload    │    │  └────────────────────┬────────────────┘   │
-│  within 60s (baseline_reload  │    │                       │                     │
-│  _interval)                   │    │  ┌────────────────────▼────────────────┐   │
-└───────────┬───────────────────┘    │  │  Custom Events (SignalFlow)          │   │
-            │ seeded by              │  │  trace.path.drift        (Tier 2)   │   │
-            │ baseline-agent         │  │  error.signature.drift   (Tier 3)   │   │
-            ▼                        │  │  trace.fingerprint.promoted          │   │
-┌───────────────────────────────┐    │  │  deployment.started                  │   │
-│  baseline-agent  (Deployment) │    │  │  behavioral_baseline.*               │   │
-│                               │    │  └────────────────────┬────────────────┘   │
-│  learn every 2h               │    └───────────────────────│─────────────────────┘
-│  onboard check every 6h       │                            │
-│  anomaly rate poll every 2m   │        ┌───────────────────┘
-│                               │        │
-│  post-learn: noise pruning,   │        ▼
-│  coverage audit, adaptive     │  ┌─────────────────────────────────────────────┐
-│  thresholds, baseline monitor,│  │  triage-agent  (Deployment)                 │
-│  runbook gen, self-healing    │  │                                             │
-│                               │  │  polls every 60s                            │
-│  pushes to ConfigMap +        │  │  inline correlate.py (Tier 1+2+3 join)     │
-│  injects into DaemonSet pods  │  │  recovery detection (clears suppression)   │
-└───────────────────────────────┘  │  dedup: suppress same anomaly for 30m      │
-                                   │  LLM triage: AWS Bedrock (Claude)          │
-                                   │                                             │
-                                   │  severity: INCIDENT                         │
-                                   │  root_cause: ...                            │
-                                   │  action: PAGE_ONCALL                        │
-                                   └────────────────┬────────────────────────────┘
-                                                    │
-                                    ┌───────────────┼───────────────┐
-                                    ▼               ▼               ▼
-                              alerts.log    PAGE_ONCALL event   Splunk Dashboard
-                                            (Splunk ingest)
+```mermaid
+flowchart TD
+    APP["🖥️  Your Application\nservice-a · service-b · service-c · ..."]
+
+    subgraph DAEMONSET["OTel Collector DaemonSet  (one pod per node)"]
+        direction TB
+        FP["⚙️  fingerprintprocessor  (Go)\n─────────────────────────────\n1. Buffer spans per traceId · 10s window\n2. Build trace fingerprint  (edge hash)\n   Build error signatures  (service+type+op hash)\n3. Compare against baseline\n\nMATCH → silent pass-through\nDRIFT → emit event  (~10s latency)\nNEW × 10 → auto-promote into baseline"]
+        SIDECAR["🔄  baseline-sync sidecar\n─────────────────────\npoll SignalFlow every 30s\non trace.fingerprint.promoted:\n  PATCH behavioral-baseline\n  ConfigMap via K8s API"]
+        EMPTYDIR[("📄  baseline emptyDir\n/baseline/baseline.json\n/baseline/error_baseline.json\n(writable — processor writes\npromoted entries here)")]
+        FP -- "writes promoted entries" --> EMPTYDIR
+        EMPTYDIR -- "reads on promotion event" --> SIDECAR
+    end
+
+    subgraph SPLUNK["☁️  Splunk Observability Cloud"]
+        direction TB
+        APM["📊  Splunk APM\nTraces · Metrics\nAutoDetect: error rate, latency,\nrequest rate  →  Tier 1 alerts"]
+        EVENTS["📡  Custom Events  (SignalFlow)\ntrace.path.drift          Tier 2\nerror.signature.drift     Tier 3\ntrace.fingerprint.promoted\ndeployment.started\nbehavioral_baseline.*"]
+        APM --> EVENTS
+    end
+
+    CM[("🗂️  behavioral-baseline\nConfigMap\nbaseline.json\nerror_baseline.json\n\nall pods reload within 60s")]
+
+    subgraph AGENTS["Python Agents  (Kubernetes Deployments)"]
+        direction LR
+        BA["🧠  baseline-agent\n───────────────────\nevery 2h: learn + promote\nevery 6h: onboard new envs\nevery 2m: anomaly rate poll\n\npost-learn:\nnoise pruning · coverage audit\nadaptive thresholds · runbook gen\nself-healing baseline\n\npushes to ConfigMap +\ninjects into DaemonSet pods"]
+        TA["🚨  triage-agent\n───────────────────\npolls every 60s\ninline correlate.py\n  Tier 1 + 2 + 3 join\nrecovery detection\ndedup  (30m suppression)\nLLM triage via Claude\n  (AWS Bedrock)"]
+    end
+
+    OUT1["📋  alerts.log"]
+    OUT2["🔔  PAGE_ONCALL\n(Splunk ingest)"]
+    OUT3["📈  Splunk Dashboard"]
+
+    APP -- "OTLP spans" --> DAEMONSET
+    DAEMONSET -- "all spans forwarded" --> APM
+    FP -- "trace.path.drift\nerror.signature.drift" --> EVENTS
+    SIDECAR -- "ConfigMap patch" --> CM
+    CM -- "seeded by" --> BA
+    CM -- "reloaded by pods" --> FP
+    EVENTS -- "Tier 2 + 3 events" --> TA
+    APM -- "Tier 1 incidents" --> TA
+    BA -- "pushes baseline" --> CM
+    TA --> OUT1
+    TA --> OUT2
+    TA --> OUT3
 ```
 
 ### Detection latency by path
@@ -106,7 +66,6 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 | **OTel edge → `poll_drift_events --triage` → `agent.py`** | Tails collector logs via SSH — no Splunk indexing wait. Kill-to-verdict in demo mode. | **~15–30s** (10s detect + 5s settle + ~10s Claude) |
 | **OTel edge → `triage-agent`** | Processor detects on first affected trace, event lands in Splunk, triage-agent inline-correlates and calls LLM | **~60–90s** (15s detect + 30s index + 60s poll cycle) |
 | **OTel edge → inline `correlate.py`** | Tier 2/3 events joined with Tier 1 AutoDetect incidents inside triage-agent | **~1–2 min** (triage-agent poll cycle) |
-| **Python APM polling → `agent.py`** | `trace_fingerprint.py watch` samples APM traces directly | **~1–5 min** (manual/scripted) |
 | **Splunk AutoDetect → inline `correlate.py`** | Native metric alerts joined with Tier 2/3 events | **~3–7 min** (metric aggregation + poll cycle) |
 
 ### Baseline lifecycle
@@ -531,7 +490,7 @@ The remaining scripts in `agents/` are available for targeted use or are called 
 
 ## OTel Collector edge processor (real-time detection)
 
-The default cron-based watch cycle detects anomalies with ~1–5 minute latency. For near-real-time detection (~10 seconds), deploy the custom OTel Collector processor in `otel-processor/`.
+The custom OTel Collector processor in `otel-processor/` is the detection layer — it fingerprints every trace inline as it flows through the collector, firing in **~10 seconds** with no poll interval and no Splunk indexing wait.
 
 ### How it works
 
