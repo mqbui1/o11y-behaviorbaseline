@@ -216,9 +216,16 @@ def walk_graph(service: str, topology: dict,
 
     reachable = visited_down | visited_up | {service}
 
+    # Infrastructure services that are always-on and never root cause candidates.
+    # Exclude them from shared-dependency hypotheses so they don't appear in
+    # triage output regardless of graph position.
+    _INFRA_EXCLUDE = {"discovery-server", "config-server", "eureka-server", "eureka"}
+
     # Shared deps within blast radius
     shared_in_blast: dict[str, list[str]] = {}
     for dep, callers in topology["shared_deps"].items():
+        if dep in _INFRA_EXCLUDE:
+            continue
         callers_in_blast = [c for c in callers if c in reachable]
         if len(set(callers_in_blast)) >= 2:
             shared_in_blast[dep] = callers_in_blast
