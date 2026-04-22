@@ -271,9 +271,7 @@ source .env
 ./demo/demo-between.sh --quick  # local state only, no cluster ops (same as demo-quick-reset.sh)
 ```
 
-`demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state, restores all services to replicas=1, **restarts OTel pods** (clears in-memory `missingEmitted`/`seenCounts` state), then waits for steady state.
-
-> **After `demo-between.sh` completes, wait ~90 seconds before killing services.** The OTel processor has a 2-minute warmup window after restart during which MISSING_SERVICE detection is suppressed. If you kill a service too soon, the MISSING_SERVICE event won't fire until warmup expires.
+`demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state, restores all services to replicas=1, **cycles OTel pods** (clears in-memory `missingEmitted`/`seenCounts` state), waits 35s for warmup + baseline reload, then verifies steady state. Script completes in ~90s with `--db`, ~60s without.
 
 **Quick reset** (between demos, no cluster ops — ~5 seconds):
 
@@ -488,7 +486,7 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 ./demo/demo-between.sh --db
 ```
 
-`--db` restores petclinic-db to replicas=1, waits 30s for services to reconnect, restarts OTel pods, then wipes baselines and dedup state. Wait ~90s after the script completes before starting the next demo kill.
+`--db` restores petclinic-db to replicas=1, waits 30s for services to reconnect, cycles OTel pods, then wipes baselines and dedup state. Script completes in ~90s — ready to kill services immediately after.
 
 > **If the curl verify in demo-between.sh fails:** wait another 30s and re-run `./demo/demo-between.sh --db`. customers-service and visits-service need the DB fully up before accepting requests.
 
@@ -500,9 +498,7 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 
 ### Prerequisites
 ```bash
-./demo/demo-between.sh --db
-# Wait ~90s after script completes before killing services (OTel warmup)
-```
+./demo/demo-between.sh --db```
 
 ### Step 1 — Open APM Service Map
 Point browser at the Splunk APM Service Map for this environment. Confirm all services green, no incidents.
@@ -562,9 +558,7 @@ APM still has no alert at this point.
 
 ### Prerequisites
 ```bash
-./demo/demo-between.sh --db
-# Wait ~90s after script completes before killing services (OTel warmup)
-```
+./demo/demo-between.sh --db```
 
 ### Step 1 — Kill both vets-service and petclinic-db simultaneously
 ```bash
@@ -662,9 +656,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 ### Prerequisites
 ```bash
-./demo/demo-between.sh --db
-# Wait ~90s after script completes before killing services (OTel warmup)
-```
+./demo/demo-between.sh --db```
 
 ### Step 1 — Announce the deployment, then immediately kill vets-service
 ```bash
@@ -748,8 +740,6 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 ### Prerequisites
 ```bash
 ./demo/demo-between.sh
-# Wait ~90s after script completes (OTel warmup)
-
 # Simulate a deploy: remove vets-service fingerprints from baseline
 # (represents a deployment that changed the call path)
 python3 -c "
