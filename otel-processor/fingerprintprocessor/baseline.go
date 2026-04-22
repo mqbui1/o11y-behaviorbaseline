@@ -386,6 +386,40 @@ func (bs *baselineStore) establishedRootOps(minOccurrences int) []string {
 	return result
 }
 
+// infraServices is the set of services that are always-on infrastructure
+// components (service registry, config, etc.). Root ops whose baseline
+// fingerprints contain ONLY these services are Eureka/Spring heartbeats —
+// they fire on a 30s cadence and should not trigger MISSING_SERVICE alerts.
+var infraServices = map[string]bool{
+	"discovery-server": true,
+	"config-server":    true,
+	"eureka-server":    true,
+}
+
+// isInfraOnlyRootOp returns true when every established baseline fingerprint
+// for rootOp contains only infrastructure services. These are heartbeat calls
+// that are not user-facing and should not generate MISSING_SERVICE alerts.
+func (bs *baselineStore) isInfraOnlyRootOp(rootOp string, minOccurrences int) bool {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	found := false
+	for _, e := range bs.traceFingerprints {
+		if e.RootOp != rootOp {
+			continue
+		}
+		if e.Occurrences < minOccurrences && !e.AutoPromoted {
+			continue
+		}
+		found = true
+		for _, svc := range e.Services {
+			if !infraServices[svc] {
+				return false // at least one non-infra service → not infra-only
+			}
+		}
+	}
+	return found // all services were infra (or no established fingerprints found)
+}
+
 // servicesForRootOp returns the union of all services seen across established
 // baseline fingerprints for the given root_op.
 func (bs *baselineStore) servicesForRootOp(rootOp string, minOccurrences int) []string {
@@ -406,5 +440,6 @@ func (bs *baselineStore) servicesForRootOp(rootOp string, minOccurrences int) []
 	for svc := range seen {
 		result = append(result, svc)
 	}
+	sort.Strings(result)
 	return result
 }
