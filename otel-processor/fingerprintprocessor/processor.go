@@ -257,9 +257,16 @@ func (p *fingerprintProcessor) checkMissingServices() {
 	for _, rootOp := range rootOps {
 		lastSeen, ok := p.lastSeenRootOp[rootOp]
 		if !ok {
-			// Never seen since startup — only alert if we've been running longer
-			// than the check interval (gives time for initial traffic to arrive).
-			if time.Since(p.startTime) < threshold*2 {
+			// Never seen since startup — wait for at least one full warmup
+			// duration after warmup ends before alerting. This ensures traffic
+			// has had time to flow through all root_ops before we declare them
+			// absent. Uses WarmupDuration as the reference (not threshold*2)
+			// so the guard stays in sync with inWarmup().
+			warmup := p.cfg.WarmupDuration
+			if warmup <= 0 {
+				warmup = threshold * 2
+			}
+			if time.Since(p.startTime) < warmup+threshold {
 				continue
 			}
 			lastSeen = p.startTime
