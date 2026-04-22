@@ -122,25 +122,23 @@ for f in pathlib.Path(f'{repo}/data').glob(f'*dedup*{e}*'):
     f.write_text('{}')
 " "$_REPO"
 
-# ── Restart OTel pods to clear in-memory state (missingEmitted, seenCounts) ───
-# This ensures MISSING_SERVICE detection fires fresh on the next demo kill,
-# not suppressed by missingEmitted flags from a previous demo run.
-echo "[5] Restarting OTel pods to clear in-memory state..."
-$K "kubectl rollout restart daemonset/otelcol-fingerprint 2>/dev/null && echo '  OTel pods restarting...'" 2>/dev/null | grep -v '▀\|█\|▄' || true
-$K "kubectl rollout status daemonset/otelcol-fingerprint --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+# ── Delete OTel pods to clear in-memory state (missingEmitted, seenCounts) ────
+# DaemonSet respawns pods immediately — much faster than rollout restart.
+# warmup_duration: 30s in ConfigMap, so pods are ready to detect in ~30s.
+echo "[5] Cycling OTel pods to clear in-memory state..."
+$K "kubectl delete pods -l app=otelcol-fingerprint --grace-period=0 2>/dev/null && echo '  OTel pods deleted — DaemonSet respawning...'" 2>/dev/null | grep -v '▀\|█\|▄' || true
 
-# ── Wait for warmup window + baseline reload ───────────────────────────────────
-echo "[6] Waiting for OTel processor warmup + steady state (~35s)..."
+# ── Wait for warmup (30s) + baseline reload (10s) — total ~35s ────────────────
+echo "[6] Waiting 35s for OTel warmup + baseline reload..."
 sleep 35
 DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=10s 2>/dev/null; done" 2>/dev/null \
     | grep -cE 'trace drift detected|new trace fingerprint|new error signature|missing service' || echo "0")
 DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
 if [ "${DRIFT_COUNT:-0}" -eq 0 ] 2>/dev/null; then
-    echo "  OTel processor: 0 drift events — steady state"
+    echo "  OTel processor: 0 drift events — ready"
 else
-    echo "  WARNING: ${DRIFT_COUNT} drift event(s) still firing — wait another 30s before starting next demo"
+    echo "  WARNING: ${DRIFT_COUNT} drift event(s) still firing — wait another 15s before starting next demo"
 fi
 
 echo ""
-echo "=== Reset complete. ==="
-echo "    Wait ~90s for OTel warmup to expire before starting the next demo kill."
+echo "=== Ready for next demo. ==="
