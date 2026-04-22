@@ -257,26 +257,31 @@ func (p *fingerprintProcessor) checkMissingServices() {
 	for _, rootOp := range rootOps {
 		lastSeen, ok := p.lastSeenRootOp[rootOp]
 		if !ok {
-			// Never seen since startup — wait for at least one full warmup
-			// duration after warmup ends before alerting. This ensures traffic
-			// has had time to flow through all root_ops before we declare them
-			// absent. Uses WarmupDuration as the reference (not threshold*2)
-			// so the guard stays in sync with inWarmup().
-			warmup := p.cfg.WarmupDuration
-			if warmup <= 0 {
-				warmup = threshold * 2
-			}
-			if time.Since(p.startTime) < warmup+threshold {
-				continue
-			}
-			lastSeen = p.startTime
+			// Never seen on this pod since startup. In a DaemonSet, each pod only
+			// handles a fraction of traffic — low-frequency root_ops may never reach
+			// certain nodes within a single check interval. Skip root_ops this pod
+			// hasn't processed to avoid false MISSING_SERVICE alerts from uneven
+			// trace routing. The Python correlate.py layer covers cluster-wide absence.
+			continue
 		}
-		if now.Sub(lastSeen) < threshold {
+		// Require 4× the check interval before alerting. In a DaemonSet where
+		// traffic routes unevenly (e.g. all api-gateway traffic to one node),
+		// quiet pods can go 30-45s between seeing a given root_op. Four intervals
+		// (60s with 15s check interval) is long enough that only genuinely absent
+		// services exceed it, while normal routing gaps do not.
+		if now.Sub(lastSeen) < threshold*4 {
 			continue
 		}
 
 		// Only emit once per absence period — reset when root_op is seen again
 		if p.missingEmitted[rootOp] {
+			continue
+		}
+
+		// Skip infra-only root ops (Eureka/Spring heartbeats) — they fire on a
+		// 30s cadence and are not user-facing. Suppress to avoid false alerts.
+		if p.baseline.isInfraOnlyRootOp(rootOp, p.cfg.MinBaselineOccurrences) {
+			p.missingEmitted[rootOp] = true // silence permanently until seen again
 			continue
 		}
 
