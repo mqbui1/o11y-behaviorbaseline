@@ -555,7 +555,7 @@ APM still has no alert at this point.
 
 ## Demo 3: Correlated Anomaly — Two Tiers Fire Simultaneously
 
-**Story:** *"Both vets-service AND the database go down at the same time. The trace tier detects MISSING_SERVICE across multiple paths. The error tier detects new CannotCreateTransactionException signatures. `correlate.py` joins trace + error signals on the same service and emits a `[Major] TIER2_TIER3` correlated event — the framework immediately maps the blast radius across all affected services from a single command."*
+**Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new CannotCreateTransactionException signatures. Within 30 seconds, the OTel processor's background checker notices vets-service has gone silent and emits MISSING_SERVICE as a tier2 event. `correlate.py` joins both signals on the same service and emits a `[Major] TIER2_TIER3` correlated event — the framework maps the full blast radius from a single command."*
 
 ### Prerequisites
 ```bash
@@ -567,29 +567,32 @@ APM still has no alert at this point.
 k "kubectl scale deployment vets-service --replicas=0 && kubectl scale deployment petclinic-db --replicas=0"
 ```
 
-### Step 1b — Watch OTel real-time detection (while the countdown runs)
-In a third terminal tab, stream drift events directly from the OTel edge processor:
+### Step 2 — Watch OTel real-time detection
+In a second terminal tab, stream drift events directly from the OTel edge processor:
 ```bash
 python3 -u demo/poll_drift_events.py
 ```
 
-Within **10–15 seconds** you'll see both `trace.path.drift` (vets-service gone) and `error.signature.drift` (DB errors) fire simultaneously.
+**What you'll see:**
+- **~10–15 seconds:** `error.signature.drift` fires — DB errors hitting customers-service and api-gateway
+- **~30 seconds:** `trace.path.drift` (MISSING_SERVICE) fires — OTel background checker notices vets-service has gone completely silent
 
-### Step 3 — Run triage directly from OTel logs (no Splunk wait)
+> *"Two detection mechanisms, two different latencies. The error tier fires on the first affected span — ~10 seconds. The structural absence checker fires when a baseline root_op has been silent for 30 seconds. Together they cover the full failure signature."*
+
+### Step 3 — Run triage
 ```bash
 python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
-**Expected terminal output:**
+**Expected output:**
 ```
-[agent] env=<env> | 7 anomaly(s) from watch
+[agent] env=<env> | 4+ anomaly(s) from watch
   Reasoning with Claude...
 
-[!!] INCIDENT — The database backing customers-service is unreachable, causing transaction
-    failures, 500 errors at the api-gateway, and complete silence on several trace paths.
-    Root cause: Shared database dependency is down — customers-service throws
-    CannotCreateTransactionException, cascading into 500s at api-gateway.
-    vets-service is also absent from all traces.
+[!!] INCIDENT — customers-service is failing on all database operations and vets-service
+    is completely absent from traces, indicating two simultaneous failures.
+    Root cause: mysql:petclinic database is down, cascading to customers-service and
+    api-gateway; vets-service is also down or unreachable.
     Confidence: HIGH | Affected: api-gateway, customers-service, vets-service
     Recommended action: PAGE_ONCALL
 
@@ -597,15 +600,10 @@ python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py
     [PAGE_ONCALL] event emitted to Splunk
 ```
 
-The 7 anomalies:
-- `NEW_FINGERPRINT` ×2 on `GET customers-service` — truncated traces (DB call started but never completed)
-- `MISSING_SERVICE` — `api-gateway:GET vets-service` — vets-service pod down
-- `MISSING_SERVICE` — `api-gateway:GET /api/gateway/owners/{ownerId}` — owner detail path silent
-- `MISSING_SERVICE` — `api-gateway:PUT customers-service` — write path silent (can't open DB transaction)
-- `NEW_ERROR_SIGNATURE` — `CannotCreateTransactionException` in customers-service
-- `NEW_ERROR_SIGNATURE` — `500 on GET customers-service` in api-gateway
-
 ### Step 3b — Run correlate.py to see TIER2_TIER3 cross-tier correlation
+
+Wait ~60 seconds after the kill for Splunk to index the events, then:
+
 ```bash
 python3 core/correlate.py --environment $ENV --window-minutes 20
 ```
@@ -613,16 +611,16 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 **Expected output:**
 ```
 [correlate] Fetching anomaly + deployment events in parallel (environment '<env>')...
-  Found 18 anomaly events across 2 tier(s)
-    tier2: 10 event(s)
-    tier3: 8 event(s)
+  Found 10+ anomaly events across 2 tier(s)
+    tier2: 4+ event(s)   ← MISSING_SERVICE from OTel background checker
+    tier3: 6+ event(s)   ← error signatures from customers-service, api-gateway
 
   Found 2 correlated anomaly group(s):
 
   [Major] TIER2_TIER3 — api-gateway
     Tiers:         tier2, tier3
-    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE, NEW_FINGERPRINT
-    Events:        14 over 92s
+    Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
+    Events:        8+ over 60s
     - New error signature in api-gateway: 500 on GET customers-service
     - No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent
     - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent
@@ -630,19 +628,19 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
   [Major] TIER2_TIER3 — customers-service
     Tiers:         tier2, tier3
     Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
-    Events:        4 over 88s
-    - New error signature in customers-service: org.springframework.transaction.CannotCreateTransactionException on GET /owners
+    Events:        4+ over 60s
+    - New error signature in customers-service: CannotCreateTransactionException on GET /owners
 
   Event sent for api-gateway (behavioral_baseline.correlated_anomaly)
   Event sent for customers-service (behavioral_baseline.correlated_anomaly)
 ```
 
-> **Note:** Exact event counts vary. Key indicator: `TIER2_TIER3` on both api-gateway and customers-service, showing trace structural silence AND new error signatures on the same services simultaneously.
+> **Note:** Exact event counts vary. Key indicator: `TIER2_TIER3` on both api-gateway and customers-service.
 
 **Key talking points:**
-- *"Tier 2 alone: could be a canary deploy. Tier 3 alone: could be noise. Both firing on the same service at the same time? That's high-confidence — TIER2_TIER3 escalates to Major immediately."*
-- *"correlate.py is the join layer. It groups trace drift + error signals by service and surface blast radius in one pass."*
-- *"Without correlation: you'd get separate alerts from separate detectors with no common thread. With it: one correlated event per affected service, full context attached."*
+- *"Tier 2 (structural absence) alone: could be a canary deploy. Tier 3 (new errors) alone: could be noise. Both firing on the same service simultaneously? That's high-confidence — TIER2_TIER3 escalates to Major immediately."*
+- *"The MISSING_SERVICE signal comes entirely from the OTel edge processor — no Python polling, no APM API call. The background checker fires at the edge in ~30 seconds."*
+- *"correlate.py is the join layer. It groups trace drift + error signals by service and surfaces blast radius in one pass."*
 - *"If AutoDetect also fires later, it upgrades automatically to `[Critical] MULTI_TIER`. The framework gets sharper as more evidence accumulates."*
 
 ### Step 4 — Restore
