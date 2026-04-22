@@ -31,10 +31,11 @@ type fingerprintEntry struct {
 	Services     []string `json:"services"`
 	SpanCount    int      `json:"span_count"`
 	EdgeCount    int      `json:"edge_count"`
-	Occurrences  int      `json:"occurrences"`
-	AutoPromoted bool     `json:"auto_promoted"`
-	FirstSeen    string   `json:"first_seen,omitempty"`
-	UpdatedAt    string   `json:"updated_at,omitempty"`
+	Occurrences      int    `json:"occurrences"`
+	AutoPromoted     bool   `json:"auto_promoted"`
+	NoMissingService bool   `json:"no_missing_service,omitempty"`
+	FirstSeen        string `json:"first_seen,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
 }
 
 // errorSigEntry mirrors the Python error_baseline signature dict.
@@ -373,15 +374,23 @@ func (bs *baselineStore) recordErrorAndCheckSpike(hash string, window time.Durat
 func (bs *baselineStore) establishedRootOps(minOccurrences int) []string {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
-	seen := make(map[string]struct{})
+	// Track which root_ops are established, and whether any entry opts out of
+	// MISSING_SERVICE checks via the no_missing_service flag.
+	established := make(map[string]struct{})
+	noMissing := make(map[string]struct{})
 	for _, e := range bs.traceFingerprints {
 		if e.Occurrences >= minOccurrences || e.AutoPromoted {
-			seen[e.RootOp] = struct{}{}
+			established[e.RootOp] = struct{}{}
+		}
+		if e.NoMissingService {
+			noMissing[e.RootOp] = struct{}{}
 		}
 	}
-	result := make([]string, 0, len(seen))
-	for rootOp := range seen {
-		result = append(result, rootOp)
+	result := make([]string, 0, len(established))
+	for rootOp := range established {
+		if _, skip := noMissing[rootOp]; !skip {
+			result = append(result, rootOp)
+		}
 	}
 	return result
 }
