@@ -77,15 +77,16 @@ def _load_dedup(env: str) -> dict:
 def _save_dedup(env: str, state: dict) -> None:
     _dedup_path(env).write_text(json.dumps(state))
 
-drift_re = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected)')
-hash_re  = re.compile(r'"hash": "([^"]+)"')
-op_re    = re.compile(r'"root_op": "([^"]+)"')
-svc_re   = re.compile(r'"service": "([^"]+)"')
-path_re  = re.compile(r'"path": "([^"]+)"')
-tid_re   = re.compile(r'"trace_id": "([^"]+)"')
-env_re   = re.compile(r'"environment": "([^"]+)"')
-etype_re = re.compile(r'"error_type": "([^"]+)"')
-op2_re   = re.compile(r'"operation": "([^"]+)"')
+drift_re    = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected)')
+hash_re     = re.compile(r'"hash": "([^"]+)"')
+op_re       = re.compile(r'"root_op": "([^"]+)"')
+svc_re      = re.compile(r'"service": "([^"]+)"')
+path_re     = re.compile(r'"path": "([^"]+)"')
+tid_re      = re.compile(r'"trace_id": "([^"]+)"')
+env_re      = re.compile(r'"environment": "([^"]+)"')
+etype_re    = re.compile(r'"error_type": "([^"]+)"')
+op2_re      = re.compile(r'"operation": "([^"]+)"')
+missing_re  = re.compile(r'"missing_services": \[([^\]]*)\]')
 
 DEDUP_TTL = 90
 
@@ -94,7 +95,8 @@ def _parse_event(line: str) -> dict | None:
     """Parse a drift log line into an anomaly dict (agent.py schema)."""
     if not drift_re.search(line):
         return None
-    is_error = "error signature" in line
+    is_error   = "error signature" in line
+    is_missing = "missing service" in line
     h    = hash_re.search(line)
     op   = op_re.search(line)
     svc  = svc_re.search(line)
@@ -102,12 +104,30 @@ def _parse_event(line: str) -> dict | None:
     path = path_re.search(line)
     et   = etype_re.search(line)
     op2  = op2_re.search(line)
+    miss = missing_re.search(line)
 
     h_val   = h.group(1)   if h   else ""
     op_val  = op.group(1)  if op  else ""
     svc_val = svc.group(1) if svc else (op_val.split(":")[0] if ":" in op_val else op_val)
 
-    if is_error:
+    if is_missing:
+        # Parse missing_services list from JSON-ish log field: ["svc1", "svc2"]
+        missing_svcs: list[str] = []
+        if miss:
+            missing_svcs = [s.strip().strip('"') for s in miss.group(1).split(",") if s.strip().strip('"')]
+        # Use the most specific missing service (not the root/gateway, prefer leaf)
+        leaf_svc = missing_svcs[-1] if missing_svcs else svc_val
+        return {
+            "anomaly_type":     "MISSING_SERVICE",
+            "service":          leaf_svc,
+            "root_op":          op_val,
+            "missing_services": missing_svcs,
+            "message":          f"MISSING_SERVICE: {', '.join(missing_svcs)} absent from traces for root_op '{op_val}'",
+            "hash":             h_val or f"missing:{op_val}",
+            "source":           "otel-edge",
+            "timestamp_ms":     int(time.time() * 1000),
+        }
+    elif is_error:
         et_val  = et.group(1)  if et  else ""
         op2_val = op2.group(1) if op2 else ""
         return {
@@ -201,6 +221,7 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
 
     hash_last_seen: dict = {}  # in-memory dedup for live stream mode
     collected: list[dict] = []
+    missing_svc_seen: set[str] = set()  # dedup MISSING_SERVICE by leaf service name
     first_event_time: float | None = None
     last_event_time:  float | None = None
 
@@ -236,10 +257,22 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
                 if _is_noise_fingerprint(event, baseline_roots):
                     continue
 
+                # For MISSING_SERVICE: deduplicate by leaf service name so that multiple
+                # root_ops going silent for the same downed service emit only one event.
+                if event.get("anomaly_type") == "MISSING_SERVICE":
+                    leaf = event.get("service", "")
+                    if leaf in missing_svc_seen:
+                        continue
+                    missing_svc_seen.add(leaf)
+
                 # Use shared dedup state (same file watch_otel_events.py writes)
-                dedup_key = h_val if h_val else (
-                    f"{event.get('anomaly_type')}:{event.get('service')}:{event.get('root_op') or event.get('error_type')}"
-                )
+                # For MISSING_SERVICE: key on leaf service (no hash in log); for others: use hash.
+                if event.get("anomaly_type") == "MISSING_SERVICE":
+                    dedup_key = f"MISSING_SERVICE:{event.get('service', event.get('root_op', ''))}"
+                else:
+                    dedup_key = h_val if h_val else (
+                        f"{event.get('anomaly_type')}:{event.get('service')}:{event.get('root_op') or event.get('error_type')}"
+                    )
                 last_seen_ms = dedup_state.get(dedup_key, 0)
                 if now * 1000 - last_seen_ms < dedup_ttl * 1000:
                     continue
@@ -254,16 +287,29 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
                 if now >= deadline:
                     break
             else:
-                # Live stream: in-memory dedup only
-                if h_val:
-                    if now - hash_last_seen.get(h_val, 0) < dedup_ttl:
+                # Live stream: in-memory dedup by hash (errors/fingerprints) or
+                # by leaf service name (MISSING_SERVICE — no stable hash in logs).
+                atype = event.get("anomaly_type", "")
+                if atype == "MISSING_SERVICE":
+                    dedup_key_live = f"MISSING_SERVICE:{event.get('service', '')}"
+                else:
+                    dedup_key_live = h_val
+                if dedup_key_live:
+                    if now - hash_last_seen.get(dedup_key_live, 0) < dedup_ttl:
                         continue
-                    hash_last_seen[h_val] = now
+                    hash_last_seen[dedup_key_live] = now
 
-                ts    = time.strftime("%H:%M:%S")
-                etype = "error.signature.drift" if event["anomaly_type"] == "NEW_ERROR_SIGNATURE" else "trace.path.drift"
+                ts = time.strftime("%H:%M:%S")
+                if atype == "NEW_ERROR_SIGNATURE":
+                    etype = "error.signature.drift"
+                elif atype == "MISSING_SERVICE":
+                    etype = "trace.path.drift (MISSING_SERVICE)"
+                else:
+                    etype = "trace.path.drift"
                 print(f"[{ts}] {etype}")
                 print(f"  root_op={event.get('root_op') or event.get('service')}  hash={h_val or '?'}")
+                if event.get("missing_services"):
+                    print(f"  missing={','.join(event['missing_services'])}")
                 if event.get("trace_id"):
                     print(f"  trace_id={event['trace_id']}")
                 print()
