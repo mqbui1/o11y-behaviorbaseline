@@ -545,7 +545,7 @@ APM still has no alert at this point.
 
 ## Demo 3: Correlated Anomaly — Two Tiers Fire Simultaneously
 
-**Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new CannotCreateTransactionException signatures. Within 15 seconds, the OTel processor's background checker notices vets-service has gone silent and emits MISSING_SERVICE as a tier2 event. `correlate.py` joins both signals on the same service and emits a `[Major] TIER2_TIER3` correlated event — the framework maps the full blast radius from a single command."*
+**Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new DB exception signatures from customers-service and api-gateway. Within ~60 seconds, the OTel processor's background checker notices vets-service has gone completely silent and emits MISSING_SERVICE. `correlate.py` joins both signals and emits a `[Major] TIER2_TIER3` correlated event — the framework maps the full blast radius from a single command."*
 
 ### Prerequisites
 ```bash
@@ -564,16 +564,16 @@ python3 -u demo/poll_drift_events.py
 
 **What you'll see:**
 - **~10–15 seconds:** `error.signature.drift` fires — DB errors hitting customers-service and api-gateway
-- **~15 seconds:** `trace.path.drift (MISSING_SERVICE)` fires — OTel background checker notices vets-service has gone completely silent
+- **~60 seconds:** `trace.path.drift (MISSING_SERVICE)` fires — OTel background checker notices vets-service has gone completely silent
 
-> *"Two detection mechanisms, two different latencies. The error tier fires on the first affected span — ~10 seconds. The structural absence checker fires after 15 seconds of silence. Together they cover the full failure signature."*
+> *"Two detection mechanisms, two different latencies. The error tier fires on the first affected span — ~10 seconds. The structural absence checker fires after 60 seconds of silence (4× the 15s check interval, tuned to avoid false positives from uneven DaemonSet routing). Together they cover the full failure signature."*
 
 ### Step 3 — Run triage
 ```bash
-python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV --min-collect-seconds 90 | python3 agent.py --environment $ENV
 ```
 
-The settle window is sliding — collection continues until 5s of silence after the last event. This captures both error signatures (~10s) and MISSING_SERVICE (~15s) before triaging.
+`--min-collect-seconds 90` keeps the collection window open for at least 90s after the first event, ensuring both the error signatures (~10s) and MISSING_SERVICE (~60s) are captured in the same triage batch before Claude reasons over them.
 
 **Expected output:**
 ```
