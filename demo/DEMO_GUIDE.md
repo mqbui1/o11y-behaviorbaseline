@@ -581,19 +581,21 @@ python3 -u demo/poll_drift_events.py
 
 ### Step 3 — Run triage
 ```bash
-python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV --settle-seconds 40 | python3 agent.py --environment $ENV
 ```
+
+The `--settle-seconds 40` gives the OTel background checker time to emit MISSING_SERVICE for vets-service (~30s) before triage runs, so Claude sees the full picture.
 
 **Expected output:**
 ```
-[agent] env=<env> | 4+ anomaly(s) from watch
+[agent] env=<env> | 5+ anomaly(s) from watch
   Reasoning with Claude...
 
 [!!] INCIDENT — customers-service is failing on all database operations and vets-service
     is completely absent from traces, indicating two simultaneous failures.
     Root cause: mysql:petclinic database is down, cascading to customers-service and
     api-gateway; vets-service is also down or unreachable.
-    Confidence: HIGH | Affected: api-gateway, customers-service, vets-service
+    Confidence: HIGH | Affected: api-gateway, customers-service, vets-service, mysql:petclinic
     Recommended action: PAGE_ONCALL
 
     [TRIAGE SUMMARY] written to alerts.log
