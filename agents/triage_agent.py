@@ -548,12 +548,15 @@ ROOT CAUSE REASONING RULES — follow these in order:
    directly to the database (mysql:petclinic). Name the database as root cause.
 4. Shared dependency hypotheses are only valid when multiple INDEPENDENT services show
    anomalies AND no single service is directly named in the error signatures.
-5. Infrastructure/registry services (discovery-server, config-server, eureka) rarely fail
-   independently. Do NOT list them as root cause or in Affected Services unless they have
-   direct anomaly signals of their own (their own MISSING_SERVICE or error events).
-   Graph position alone is NOT evidence of failure — only direct signals count.
+5. NEVER mention discovery-server, config-server, or eureka anywhere in your response —
+   not in Root Cause, not in Affected Services, not as a secondary candidate, not at all.
+   These are always-on infrastructure services that do not fail in this environment.
+   Their presence in the dependency graph is irrelevant. Omit them completely.
+   If you see DB errors → root cause is mysql:petclinic, full stop.
+   If you see MISSING_SERVICE → root cause is the absent service or mysql:petclinic.
 6. Do not hedge between two candidates. Pick the one with the most direct evidence.
-   "503 on GET vets-service" = vets-service is down. Full stop.
+   "OwnerRepository.findAll failing with 500" = mysql:petclinic is down. Full stop.
+   "vets-service absent from traces" = vets-service is down. Full stop.
 
 Be concise. Structure your response as:
 1. **Incident Summary** (1-2 sentences: what happened)
