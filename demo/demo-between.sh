@@ -32,12 +32,13 @@ done
 echo "=== demo-between.sh: env=$ENV ==="
 
 # ── Always: clear local state ─────────────────────────────────────────────────
-echo "[1] Clearing local state (alerts.log, error baseline, dedup)..."
+echo "[1] Clearing local state (alerts.log, dedup)..."
 cat /dev/null > "$_REPO/data/alerts.log"
 python3 -c "
 import json, pathlib, datetime, os, sys
 repo = sys.argv[1]
 e = os.environ['ENV']
+# Wipe error baseline — fresh start for each demo so demo-scenario errors fire
 pathlib.Path(f'{repo}/data/error_baseline.{e}.json').write_text(
     json.dumps({'signatures':{},'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'environment':e}))
 cleared = []
@@ -121,11 +122,18 @@ for f in pathlib.Path(f'{repo}/data').glob(f'*dedup*{e}*'):
     f.write_text('{}')
 " "$_REPO"
 
-# ── Wait for OTel processor to reload baseline (60s interval) ─────────────────
-echo "[5] Waiting for OTel processor to reload clean baseline (~15s)..."
-sleep 15
+# ── Restart OTel pods to clear in-memory state (missingEmitted, seenCounts) ───
+# This ensures MISSING_SERVICE detection fires fresh on the next demo kill,
+# not suppressed by missingEmitted flags from a previous demo run.
+echo "[5] Restarting OTel pods to clear in-memory state..."
+$K "kubectl rollout restart daemonset/otelcol-fingerprint 2>/dev/null && echo '  OTel pods restarting...'" 2>/dev/null | grep -v '▀\|█\|▄' || true
+$K "kubectl rollout status daemonset/otelcol-fingerprint --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+
+# ── Wait for warmup window + baseline reload ───────────────────────────────────
+echo "[6] Waiting for OTel processor warmup + steady state (~35s)..."
+sleep 35
 DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=10s 2>/dev/null; done" 2>/dev/null \
-    | grep -cE 'trace drift detected|new trace fingerprint|new error signature' || echo "0")
+    | grep -cE 'trace drift detected|new trace fingerprint|new error signature|missing service' || echo "0")
 DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
 if [ "${DRIFT_COUNT:-0}" -eq 0 ] 2>/dev/null; then
     echo "  OTel processor: 0 drift events — steady state"
@@ -134,4 +142,5 @@ else
 fi
 
 echo ""
-echo "=== Ready for next demo. ==="
+echo "=== Reset complete. ==="
+echo "    Wait ~90s for OTel warmup to expire before starting the next demo kill."
