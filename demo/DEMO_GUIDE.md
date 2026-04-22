@@ -581,10 +581,10 @@ python3 -u demo/poll_drift_events.py
 
 ### Step 3 — Run triage
 ```bash
-python3 demo/poll_drift_events.py --triage --environment $ENV --settle-seconds 40 | python3 agent.py --environment $ENV
+python3 demo/poll_drift_events.py --triage --environment $ENV | python3 agent.py --environment $ENV
 ```
 
-The `--settle-seconds 40` gives the OTel background checker time to emit MISSING_SERVICE for vets-service (~30s) before triage runs, so Claude sees the full picture.
+The settle window is sliding — collection continues until 5s of silence after the last event. This captures both error signatures (~10s) and MISSING_SERVICE (~15s) before triaging.
 
 **Expected output:**
 ```
