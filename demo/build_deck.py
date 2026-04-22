@@ -261,14 +261,15 @@ def slide_solution_overview(prs):
     add_rect(s, Inches(4.95), Inches(1.55), Inches(4.7), Inches(3.55), DKGRAY)
     add_rect(s, Inches(4.95), Inches(1.55), Inches(4.7), Inches(0.06), CYAN)
     add_textbox(s, Inches(5.07), Inches(1.65), Inches(4.45), Inches(0.4),
-                "What it detects (every 5 minutes, autonomously)",
+                "What it detects (continuously, at the edge)",
                 font_size=13, bold=True, color=CYAN)
     detect_bullets = [
         "  \u2022  Service missing from traces (MISSING_SERVICE)",
         "  \u2022  Unknown call path appeared (NEW_FINGERPRINT)",
         "  \u2022  Brand new error type, first occurrence fires",
-        "  \u2022  2+ tiers on same service \u2192 correlated alert (up to [Critical] MULTI_TIER)",
-        "  \u2022  Anomaly correlated to a recent deploy",
+        "  \u2022  Fires in ~10s — no poll interval, no Splunk wait",
+        "  \u2022  2+ tiers on same service \u2192 correlated alert ([Critical] MULTI_TIER)",
+        "  \u2022  Anomaly correlated to a recent deploy \u2192 severity downgrade",
         "  \u2022  Baseline self-heals after an incident resolves",
     ]
     add_bullet_box(s, Inches(5.07), Inches(2.12), Inches(4.45), Inches(2.8),
@@ -293,8 +294,8 @@ def slide_architecture(prs):
     stages = [
         ("1. Learn",
          "Samples live traces\nBuilds structural\nfingerprints and\nerror signature\nbaselines from\nreal traffic"),
-        ("2. Watch\n(every 5 min)",
-         "Compares new traces\nagainst baseline\nEmits custom events\nto Splunk on any\ndeviation"),
+        ("2. Detect\n(~10s, at the edge)",
+         "OTel Collector\nprocessor fingerprints\nevery trace inline\nas it flows through\n\nFires in ~10s —\nno poll interval,\nno Splunk wait"),
         ("3. Correlate\n(every 5 min)",
          "Joins Tier 1 + 2 + 3\nevents by service\nMULTI_TIER = Critical\nAnnotates with\ndeployment context\nDowngrades severity\nif deploy-correlated"),
         ("4. Agent\n(on demand)",
@@ -444,8 +445,8 @@ def slide_tiers(prs):
     # Bottom callout
     add_rect(s, Inches(0.45), Inches(4.88), Inches(9.2), Inches(0.38), RGBColor(0x1A, 0x3A, 0x5C))
     add_textbox(s, Inches(0.57), Inches(4.9), Inches(9.0), Inches(0.34),
-                "Demo 4:  vets-service + DB down  \u2192  Tier 1 (AutoDetect error rate)  +  Tier 2 (MISSING_SERVICE)  +  Tier 3 (NEW_ERROR_SIGNATURE)  "
-                "\u2192  correlate.py emits  [Critical] MULTI_TIER",
+                "Demo 3:  vets-service + DB down  \u2192  Tier 3 fires in ~10s (error signatures)  +  Tier 2 fires at ~60s (MISSING_SERVICE)  "
+                "\u2192  correlate.py emits  [Major] TIER2_TIER3",
                 font_size=10, bold=False, color=RGBColor(0xFF, 0xCC, 0x44))
 
     footer(s)
@@ -540,27 +541,25 @@ def slide_demo_overview(prs):
 
     demos = [
         ("Demo 0", "Steady State",
-         "Framework in normal operation — baselines learned, cron running, zero anomalies"),
+         "Framework in normal operation — baselines learned, 0 drift events. 8-check pre-flight confirms every layer is ready."),
         ("Demo 1", "DB Outage \u2192 New Error Signatures",
-         "Database goes down. New CannotCreateTransactionException fires on first occurrence. Claude: INCIDENT, PAGE_ONCALL"),
-        ("Demo 2", "Bad Deploy \u2192 First-Occurrence Error",
-         "visits-service crashes on startup. First request to the dead service triggers detection. No threshold exceeded"),
-        ("Demo 3", "Missing Service \u2192 AI Triage",
-         "vets-service killed. Framework detects structural absence from traces. Claude produces root cause + action in 3 min"),
-        ("Demo 4", "All-Tier Correlation",
-         "Both vets-service and DB down simultaneously. AutoDetect + trace drift + error signatures \u2192 [Critical] MULTI_TIER"),
-        ("Demo 5", "Deploy-Correlated Severity Downgrade",
-         "Bad deploy announced via CI/CD hook. correlate.py finds the deployment event and downgrades Major \u2192 Minor"),
-        ("Demo 6", "Self-Healing",
-         "New call path auto-promoted after 2 clean watch runs. Baseline healer scores windows and re-learns autonomously"),
-        ("Demo 7", "Auto-Onboarding",
-         "New environment discovered. Baselines built, dashboard created, cron scheduled, runbook generated \u2014 in 60 seconds"),
+         "DB goes down. CannotCreateTransactionException fires on first affected trace (~10s via OTel edge). Claude: INCIDENT, PAGE_ONCALL."),
+        ("Demo 2", "The Gap Demo \u2192 APM Still Green",
+         "vets-service killed. APM Service Map shows green. OTel edge fires trace.path.drift in ~10s. Claude pages on-call before APM knows."),
+        ("Demo 3", "Correlated Anomaly \u2192 Two Tiers",
+         "vets-service + DB killed. Error tier fires in ~10s, MISSING_SERVICE fires at ~60s. Claude: mysql:petclinic root cause. TIER2_TIER3."),
+        ("Demo 4", "Deploy-Correlated Severity Downgrade",
+         "Bad deploy announced via notify_deployment.py. correlate.py finds the deployment event and downgrades Major \u2192 Minor [deployment-correlated]."),
+        ("Demo 5", "Self-Healing \u2192 Auto-Promotion",
+         "New call path fires NEW_FINGERPRINT on watch runs 1 and 2, auto-promotes on run 2. Run 3: silence. No human intervention."),
+        ("Demo 6", "Auto-Onboarding",
+         "New environment discovered. Baselines built, dashboard created, cron scheduled, Claude runbook generated \u2014 in ~60 seconds."),
     ]
 
     col1_x = Inches(0.45)
     col2_x = Inches(1.6)
     col3_x = Inches(3.2)
-    row_h  = Inches(0.535)
+    row_h  = Inches(0.56)
     start_y = Inches(1.06)
 
     for i, (num, title, desc) in enumerate(demos):
@@ -611,7 +610,7 @@ def slide_key_capabilities(prs):
         ("Deployment-Aware",
          "Integrates with CI/CD via a one-line hook.\nAnomalies within 60 min of a deploy are\nauto-annotated and severity-downgraded."),
         ("Auto-Onboarding",
-         "Runs every 30 min via cron. New environments\nare discovered, baselined, and fully operational\nwith no human intervention."),
+         "Runs every 6h via cron. New environments\nare discovered, baselined, and fully operational\nwith no human intervention."),
         ("Self-Healing",
          "New patterns after deploys auto-promote after\n2 clean runs. Baselines re-learn autonomously\nafter an incident resolves."),
     ]
