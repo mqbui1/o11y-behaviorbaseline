@@ -203,7 +203,7 @@ def _is_noise_fingerprint(event: dict, baseline_root_services: set[str]) -> bool
 
 
 def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
-               dedup_ttl: int = DEDUP_TTL) -> None:
+               min_collect: int = 0, dedup_ttl: int = DEDUP_TTL) -> None:
     """Live stream mode (triage=False) or triage mode (triage=True).
 
     Triage mode shares the same dedup state file as watch_otel_events.py so that
@@ -233,11 +233,13 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
             line = raw.decode("utf-8", errors="replace").rstrip()
 
             # In triage mode: exit once we've had `settle` seconds of silence
-            # after the last event. This is a sliding window — new events extend
-            # the collection period, so MISSING_SERVICE (~15s) is captured even
-            # when error signatures fired earlier (~10s).
+            # after the last event AND min_collect seconds have elapsed since
+            # the first event. min_collect ensures MISSING_SERVICE events (~60s
+            # after error signatures) are captured in the same triage window.
             if triage and last_event_time is not None:
-                if time.time() - last_event_time >= settle:
+                elapsed_since_first = time.time() - first_event_time if first_event_time else 0
+                if (time.time() - last_event_time >= settle
+                        and elapsed_since_first >= min_collect):
                     break
 
             if not triage and not drift_re.search(line):
@@ -346,7 +348,9 @@ def main():
     parser.add_argument("--environment", default=os.environ.get("ENV", ""),
                         help="Environment name (for JSON output)")
     parser.add_argument("--settle-seconds", type=int, default=5,
-                        help="Seconds to keep collecting after first event (default: 5)")
+                        help="Seconds of silence after last event before triaging (default: 5)")
+    parser.add_argument("--min-collect-seconds", type=int, default=0,
+                        help="Minimum seconds to collect after first event before triaging (default: 0)")
     parser.add_argument("--timeout-seconds", type=int, default=120,
                         help="Give up if no events arrive within this many seconds (default: 120)")
     args = parser.parse_args()
@@ -360,6 +364,7 @@ def main():
         environment=args.environment,
         settle=args.settle_seconds,
         timeout=args.timeout_seconds,
+        min_collect=args.min_collect_seconds,
     )
 
 
