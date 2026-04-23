@@ -2,6 +2,40 @@
 
 ---
 
+## Signal Types — What You're Looking At
+
+The framework emits four distinct anomaly signals. Each demo triggers one or more of these.
+
+| Signal | What it means | Demo |
+|--------|--------------|------|
+| `NEW_FINGERPRINT` | A trace took a call path that has never been seen before — a new service was called, or an existing one was skipped. Fires on the **first occurrence**. | Demo 5 |
+| `MISSING_SERVICE` | A root operation that normally involves a specific service produced **zero traces** in the detection window — the service is structurally absent, not just erroring. | Demo 2, 3, 4 |
+| `NEW_ERROR_SIGNATURE` | A span produced an exception or error type that has never appeared in this service before. Fires on **first occurrence**, no threshold required. | Demo 1, 3, 4 |
+| `AUTODETECT_TIER1` | Splunk APM's built-in AutoDetect fired a metric-based alert (error rate spike, latency spike, request drop). This is the **native APM signal** — the framework correlates it with its own structural signals. | Demo 3 (when AutoDetect catches up) |
+
+### Correlation types
+
+When multiple signals fire on the same service within a window, `correlate.py` groups them:
+
+| Correlation | Tiers present | Severity |
+|-------------|--------------|---------|
+| `TIER2_TIER3` | structural absence + new errors | Major |
+| `TIER1_TIER2` | AutoDetect + structural absence | Major |
+| `TIER1_TIER3` | AutoDetect + new errors | Major |
+| `MULTI_TIER` | all three tiers | Critical |
+
+A `[deployment-correlated]` annotation is added when a `deployment.started` event was emitted within 60 minutes, and severity is downgraded one level (Critical→Major, Major→Minor).
+
+### Detection latency
+
+| Layer | Latency | How |
+|-------|---------|-----|
+| OTel edge processor | ~10s | Fingerprints every trace inline as it flows through the collector |
+| MISSING_SERVICE background checker | ~60s | Periodic check inside the OTel processor for root ops gone silent |
+| Python APM polling | 1–5 min | Samples traces from Splunk APM API (used in Demo 5 only) |
+
+---
+
 ## New Cluster Setup (run once per workshop instance)
 
 Use this section when deploying to a brand-new EC2/k3d cluster. Skip to **Prerequisites** if the cluster is already set up.
@@ -699,9 +733,9 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 **Expected output:**
 ```
 [correlate] Fetching anomaly + deployment events in parallel (environment '<env>')...
-  Found 9 anomaly events across 2 tiers
-    tier2: 7 event(s)
-    tier3: 2 event(s)
+  Found 20+ anomaly events across 2 tier(s)
+    tier2: 1 event(s)
+    tier3: 19+ event(s)
   Found 1 deployment event(s) in last 60m:
     vets-service  version=v2.1.0  deployer=n/a
 
@@ -710,15 +744,14 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
   [Minor] TIER2_TIER3 — api-gateway  [deployment-correlated]
     Tiers:         tier2, tier3
     Anomaly types: MISSING_SERVICE, NEW_ERROR_SIGNATURE
-    Events:        9 over 901s
+    Events:        20+ over 355s
     Deployment:    version=v2.1.0  commit=n/a  deployer=n/a
                    "Update vet specialties endpoint"
-    - No traces for 'api-gateway:GET /api/gateway/owners/{ownerId}' in window — expected service(s) absent
-    - No traces for 'api-gateway:GET vets-service' in window — expected service(s) absent
-    - No traces for 'api-gateway:PUT customers-service' in window — expected service(s) absent
 
   Event sent for api-gateway (behavioral_baseline.correlated_anomaly)
 ```
+
+> **Note:** The deployment match works because `correlate.py` scans the `missing_services` property of MISSING_SERVICE events to find that `vets-service` is affected, then matches it against the deployment for `vets-service`.
 
 **Key talking points:**
 - *"agent.py fires INCIDENT + PAGE_ONCALL because it only sees signals — it doesn't know about the deployment."*
@@ -742,15 +775,18 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 ./demo/demo-between.sh
 # Simulate a deploy: remove vets-service fingerprints from baseline
 # (represents a deployment that changed the call path)
-python3 -c "
+export $(grep -v '^#' .env | xargs) && python3 -c "
 import json, pathlib, os
 e = os.environ['ENV']
 p = pathlib.Path(f'data/baseline.{e}.json')
 b = json.loads(p.read_text())
 fps = b['fingerprints']
+# Remove api-gateway-rooted vets paths only — these represent the changed call graph.
+# Keep vets-service:GET (config-server startup fetch) — it's a transient that fires
+# regardless of the deploy and would confuse the demo story.
 removed = [h for h, info in fps.items()
-           if info.get('root_op','').startswith('vets-service:')
-           or 'vets' in info.get('root_op','').lower()]
+           if 'vets' in info.get('root_op','').lower()
+           and not info.get('root_op','').startswith('vets-service:')]
 for h in removed: del fps[h]
 p.write_text(json.dumps(b, indent=2))
 print(f'Removed {len(removed)} vets fingerprint(s) — simulating new deploy')
@@ -768,18 +804,28 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
     Type:    NEW_FINGERPRINT
     Message: Unknown execution path for 'api-gateway:GET vets-service'
     Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> vets-service:GET /vets -> ...
-    TraceID: 480b3c097b6f49d9d2d0cacbc3452f6d
+    TraceID: ...
     Event sent (trace.path.drift)
 
-  Checked 27 traces, 173 skipped, 1 anomalies detected
+  ANOMALY DETECTED
+    Type:    NEW_FINGERPRINT
+    Message: Unknown execution path for 'api-gateway:GET vets-service'
+    Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> api-gateway:GET -> vets-service:GET /vets -> ...
+    TraceID: ...
+    Event sent (trace.path.drift)
+
+  Checked 148+ traces, 52 skipped, 2 anomalies detected
   Per-service breakdown:
-    api-gateway                          27 traces checked  [1 anomaly]
+    api-gateway                         148 traces checked  [2 anomalys]
   Downstream services seen: customers-service, vets-service, visits-service
 ```
 
-*Talking point: "The framework sees a path it doesn't know. It alerts — but doesn't immediately accept it. It needs to see this consistently before trusting it."*
+> Two variants of the vets path fire — petclinic traces have slight structural variation (retry spans).
+> Both are unknown; each needs 2 consistent hits before promoting.
 
-### Watch run 2 — auto-promotes (watch_hits=2 ≥ threshold)
+*Talking point: "The framework sees paths it doesn't know. It alerts — but doesn't immediately accept them. It needs to see them consistently before trusting them."*
+
+### Watch run 2 — fires again + auto-promotes one variant (watch_hits=2)
 ```bash
 AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
@@ -789,14 +835,14 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
   ANOMALY DETECTED
     Type:    NEW_FINGERPRINT
     Message: Unknown execution path for 'api-gateway:GET vets-service'
-    Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> ...
-    TraceID: 2e27c87771595231cc4ed1a000d314de
+    Detail:  Path: api-gateway:GET vets-service -> api-gateway:GET -> vets-service:GET /vets -> ...
+    TraceID: ...
     Event sent (trace.path.drift)
 
   AUTO-PROMOTED: 31ddc9717bc4e16a... (seen 2 watch runs) root_op=api-gateway:GET vets-service
-  Baseline saved -> data/baseline.<env>.json  (19 fingerprints)
+  Baseline saved -> data/baseline.<env>.json  (21 fingerprints)
 
-  Checked 18 traces, 182 skipped, 1 anomalies detected, 1 auto-promoted
+  Checked 163+ traces, 37 skipped, 1 anomalies detected, 1 auto-promoted
 ```
 
 *Talking point: "Seen twice consistently — promoted. The new path is now baseline. No human involved."*
@@ -811,6 +857,8 @@ AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV wa
   Checked 24 traces, 176 skipped, 0 anomalies detected
   All trace paths match baseline
 ```
+
+> The second variant may also auto-promote silently on run 3 if it reached threshold.
 
 *Talking point: "Zero anomalies. The framework adapted. No alert fatigue from a known-good deploy."*
 
@@ -887,8 +935,9 @@ python3 onboard.py --auto
 
 **Expected output:**
 ```
+[onboard] Starting at <timestamp>
 [onboard] Discovering all active environments...
-  <env>: 7 services — ['api-gateway', 'config-server', 'customers-service', 'discovery-server', 'vets-service', 'visits-service']
+  <env>: 7 services — ['admin-server', 'api-gateway', 'config-server', 'customers-service', 'discovery-server', 'vets-service', 'visits-service']
   unknown: 1 services — ['admin-server']
 
 [onboard] Diff results:
@@ -899,17 +948,34 @@ python3 onboard.py --auto
 
   [new] <env>
     $ python3 core/trace_fingerprint.py --environment <env> learn --window-minutes=120
+    Provisioning dashboard for environment '<env>'...
     $ python3 core/error_fingerprint.py --environment <env> learn --window-minutes=120
-    Dashboard created: HEwtJd2A0As (group: HD0uRkOA0AE)
-    Added 8 cron job(s) for '<env>'
-    Added 2 global cron job(s)
-    /Users/mbui/Documents/o11y-behaviorbaseline/agents/RUNBOOK.<env>.md already exists. Use --force to regenerate.
-    State saved -> data/onboarding_state.json
+[learn] Discovering services for environment '<env>'...
+[learn] Discovering services for environment '<env>'...
+  Found 7 services
+  Sampling last 120m of error traces...
+  Found 7 services + 2 inferred nodes
+  Sampling last 120m of traces...
+  Searching 7 services in parallel...
+    Dashboard created: <dashboard-id> (group: <group-id>)
+    ...
+  Found 1059+ candidate traces (deduplicated)
+  Fetching 1059+ traces (20 parallel)...
+  ...
+  Baseline saved -> data/baseline.<env>.json  (22 fingerprints)
+    Cron jobs for '<env>' already present — skipping
+[runbook-generator] Generating runbook for '<env>'...
+  9 services: admin-server, api-gateway, config-server, customers-service, discovery-server, localhost:8888, mysql:petclinic, vets-service, visits-service
+  Calling Claude (Bedrock) to write runbook...
+  ✅ Runbook written to agents/RUNBOOK.<env>.md (14000+ chars)
+  State saved -> data/onboarding_state.json
 
 [onboard] Done.
 ```
 
-> The runbook line shows "already exists" because it was generated in a prior session. In a truly fresh environment it generates automatically. Use `--force` on `runbook_generator.py` to regenerate.
+> **Timing:** the full run takes **2–3 minutes** — trace learn fetches 1000+ traces in parallel, and the Claude runbook generation adds ~30–60s. Plan accordingly when demoing.
+
+> **Cron jobs line:** shows "already present — skipping" because onboarding ran before. In a truly fresh environment it adds 8 cron jobs for the new env + 2 global jobs.
 
 ### Step 3 — Restore
 ```bash
@@ -918,7 +984,7 @@ cp data/onboarding_state.json.bak data/onboarding_state.json
 echo "Onboarding state restored."
 ```
 
-**What was created in ~60 seconds:**
+**What was created in ~2-3 minutes:**
 - Trace fingerprint baseline: structural call path patterns learned from live traffic
 - Error signature baseline: known-good error patterns from live traffic
 - Dashboard: linked to the Behavioral Baseline dashboard group
