@@ -551,6 +551,12 @@ def correlate(events: list[dict],
             for e in svc_events:
                 if deployed_svc in e.get("message", ""):
                     candidate_services.add(deployed_svc)
+                # Also check raw.properties.missing_services (set by MISSING_SERVICE events)
+                props = e.get("raw", {}).get("properties", {})
+                for raw_key in ("missing_services", "services"):
+                    raw_svcs = props.get(raw_key, "")
+                    if deployed_svc in [s.strip() for s in raw_svcs.split(",") if s.strip()]:
+                        candidate_services.add(deployed_svc)
         for candidate in candidate_services:
             for d in deploy_by_service.get(candidate, []):
                 delta_ms = abs(d["timestamp"] - earliest_ms)
