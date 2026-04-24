@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -155,17 +156,22 @@ func (bs *baselineStore) promoteTrace(fp *traceFingerprint, writeback bool) bool
 		return false
 	}
 	now := timeNow().UTC().Format(time.RFC3339)
+	// Direct-service root ops (not rooted at api-gateway) are service-to-service
+	// calls that don't represent user-facing traffic. Suppress MISSING_SERVICE
+	// checks for them — they fire on uneven DaemonSet routing, not real outages.
+	noMissing := !strings.HasPrefix(fp.rootOp, "api-gateway:")
 	bs.traceFingerprints[fp.hash] = &fingerprintEntry{
-		Hash:         fp.hash,
-		Path:         fp.path,
-		RootOp:       fp.rootOp,
-		Services:     fp.services,
-		SpanCount:    fp.spanCount,
-		EdgeCount:    fp.edgeCount,
-		Occurrences:  1,
-		AutoPromoted: true,
-		FirstSeen:    now,
-		UpdatedAt:    now,
+		Hash:             fp.hash,
+		Path:             fp.path,
+		RootOp:           fp.rootOp,
+		Services:         fp.services,
+		SpanCount:        fp.spanCount,
+		EdgeCount:        fp.edgeCount,
+		Occurrences:      1,
+		AutoPromoted:     true,
+		NoMissingService: noMissing,
+		FirstSeen:        now,
+		UpdatedAt:        now,
 	}
 	if writeback && bs.tracePath != "" {
 		_ = bs.writeTraceBaseline()
