@@ -32,7 +32,6 @@ A `[deployment-correlated]` annotation is added when a `deployment.started` even
 |-------|---------|-----|
 | OTel edge processor | ~10s | Fingerprints every trace inline as it flows through the collector |
 | MISSING_SERVICE background checker | ~60s | Periodic check inside the OTel processor for root ops gone silent |
-| Python APM polling | 1–5 min | Samples traces from Splunk APM API (used in Demo 5 only) |
 
 ---
 
@@ -282,11 +281,13 @@ source .env
 3. Clear `data/alerts.log`
 4. Wipe error baseline → push wiped version to ConfigMap + inject into OTel pods
 5. Clear dedup state
-6. Strip watch-contaminated trace fingerprints
+6. Strip watch-contaminated trace fingerprints → push OTel baseline from `/tmp/otel_baseline.json` (preferred) or `/tmp/python_baseline.json` to ConfigMap + inject into pods
 7. Verify 0 Python trace anomalies
 8. Verify 0 OTel events in Splunk (last 3m)
 
 > **If step 8 shows OTel events still present:** the previous demo's events haven't aged out of the 3m window yet. Wait 3 minutes and re-run `./demo/demo-reset.sh` — it is idempotent.
+
+> **After every `demo-reset.sh` or `demo-between.sh`:** restart `poll_drift_events.py` — the DaemonSet pods are cycled and the script captures pod names at startup. Stale pod streams produce no output.
 
 **Between-demo reset** (after a demo that killed a service — ~30 seconds with DB, ~5 seconds without):
 
@@ -297,6 +298,8 @@ source .env
 ```
 
 `demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state, restores all services to replicas=1, **cycles OTel pods** (clears in-memory `missingEmitted`/`seenCounts` state), waits 35s for warmup + baseline reload, then verifies steady state. Script completes in ~90s with `--db`, ~60s without.
+
+> **After `demo-between.sh`:** pod names change — restart `poll_drift_events.py` before the next demo.
 
 **Quick reset** (between demos, no cluster ops — ~5 seconds):
 
@@ -1014,33 +1017,30 @@ LEARN  →  Search each service independently (up to 200 traces each, parallel)
 
 WATCH  →  Two paths:
 
-  Fast path (OTel edge, ~10s latency):
+  Detection (OTel edge, ~10s latency):
           OTel Collector processor fingerprints every trace as it flows through
           DRIFT → emits trace.path.drift / error.signature.drift to its own logs
           demo/poll_drift_events.py --triage tails logs directly → JSON (no Splunk wait)
 
-  Slow path (Python APM polling, ~1-5 min):
+  Lifecycle (Python, learn/promote/heal — not a detection path):
           Sample traces from the last N minutes via Splunk APM API
-          Trace tier:  known root_op has zero traces → MISSING_SERVICE anomaly
-          Error tier:  new error type seen → NEW_ERROR_SIGNATURE anomaly
-          Output as JSON
+          Builds and maintains the fingerprint baseline that the OTel processor uses
+          Used in Demo 5 (Python watch) and Demo 6 (auto-onboarding) only
 
 TRIAGE →  Claude reads the JSON anomaly list
           Reasons about severity, root cause, action
           Writes DETECTION + TRIAGE to alerts.log
 ```
 
-Fast path — triage directly from OTel logs (used in all demos, no Splunk indexing wait):
+Detection path — triage directly from OTel logs (used in Demos 1–4, no Splunk indexing wait):
 ```bash
 python3 demo/poll_drift_events.py --triage --environment $ENV \
   | python3 agent.py --environment $ENV
 ```
 
-Slow path — Python APM polling (used in Demo 5 auto-promotion only):
+Python watch — baseline lifecycle only (used in Demo 5 auto-promotion):
 ```bash
-(python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5 --json && \
- python3 core/error_fingerprint.py --environment $ENV watch --window-minutes 5 --json) \
-  | python3 agent.py --environment $ENV
+AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```
 
 ---
@@ -1065,15 +1065,18 @@ python3 core/trace_fingerprint.py --environment $ENV learn --reset --window-minu
 python3 core/trace_fingerprint.py --environment $ENV promote
 
 # Push updated baseline to cluster
-sshpass -p "$EC2_PASSWORD" scp -P 2222 data/baseline.$ENV.json splunk@$EC2_IP:/tmp/baseline.json
-k "kubectl delete configmap behavioral-baseline --ignore-not-found && \
-   kubectl create configmap behavioral-baseline \
-     --from-file=baseline.json=/tmp/baseline.json \
-     --from-file=error_baseline.json=/tmp/error_baseline.json && \
-   B64=\$(base64 -w 0 /tmp/baseline.json); \
-   for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
-     kubectl exec \$pod -c otelcol -- sh -c \"echo '\$B64' | base64 -d > /baseline/baseline.json\"; \
-   done && echo 'Baseline pushed to all pods'"
+# Use /tmp/otel_baseline.json — distinct from /tmp/python_baseline.json (demo-reset.sh uses both)
+sshpass -p "$EC2_PASSWORD" scp -P 2222 data/baseline.$ENV.json splunk@$EC2_IP:/tmp/otel_baseline.json
+sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no splunk@$EC2_IP 'bash -s' <<'REMOTE'
+kubectl delete configmap behavioral-baseline --ignore-not-found
+kubectl create configmap behavioral-baseline \
+  --from-file=baseline.json=/tmp/otel_baseline.json \
+  --from-file=error_baseline.json=/tmp/error_baseline.json
+B64=$(base64 -w 0 /tmp/otel_baseline.json)
+for pod in $(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl exec "$pod" -c otelcol -- sh -c "echo '$B64' | base64 -d > /baseline/baseline.json"
+done && echo 'Baseline pushed to all pods'
+REMOTE
 ```
 
 For cold-start re-learn on a fresh cluster:
