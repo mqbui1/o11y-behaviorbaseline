@@ -318,7 +318,7 @@ def _build_hypothesis_context(anomalies: list[dict], env: str) -> str:
             "messages":      [a.get("message", "") for a in anomalies],
             "deployment":    None,
         }
-        result = hyp.analyze(primary_service, corr, env, window_minutes=5)
+        result = hyp.analyze(primary_service, corr, env, window_minutes=2)
         return hyp.format_for_prompt(result)
     except Exception:
         return ""
