@@ -226,6 +226,95 @@ def slide_problem(prs):
     return s
 
 
+def slide_competitor_comparison(prs):
+    """Slide — Competitive landscape: how others fill the behavioral detection gap."""
+    s = blank_slide(prs)
+    fill_bg(s, NAVY)
+    add_rect(s, Inches(0), Inches(0), Inches(0.18), H, CYAN)
+
+    add_textbox(s, Inches(0.45), Inches(0.25), Inches(9.2), Inches(0.55),
+                "Competitors Are Already Filling This Gap",
+                font_size=26, bold=True, color=CYAN)
+    add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
+
+    add_textbox(s, Inches(0.45), Inches(1.0), Inches(9.2), Inches(0.35),
+                "Behavioral anomaly detection is a table-stakes capability in competitive APM platforms. "
+                "Splunk O11y covers the metric layer — the structural layer is the gap.",
+                font_size=11, color=RGBColor(0xCC, 0xDD, 0xEE))
+
+    # ── Table layout ──────────────────────────────────────────────────────────
+    # Columns: Capability | Dynatrace | Datadog | New Relic | Splunk (native) | This Framework
+    col_labels  = ["", "Dynatrace\nSmartscape", "Datadog\nWatchdog", "New Relic\nApplied Intel.", "Splunk O11y\n(native)", "This\nFramework"]
+    col_widths  = [Inches(2.52), Inches(1.2), Inches(1.2), Inches(1.2), Inches(1.2), Inches(1.2)]
+    col_x = [Inches(0.45)]
+    for w in col_widths[:-1]:
+        col_x.append(col_x[-1] + w)
+
+    # ✅ = native  ⚠ = partial  ❌ = not available
+    CHECK  = "\u2705"   # ✅
+    WARN   = "\u26a0\ufe0f"  # ⚠️  — use plain ⚠ for pptx compat
+    CROSS  = "\u274c"   # ❌
+    WARN   = "\u26a0"
+
+    rows = [
+        # (capability label, dynatrace, datadog, new relic, splunk native, this framework)
+        ("Automatic topology\nmapping",              CHECK, CHECK, CHECK, CHECK, CHECK),
+        ("Structural trace path\ndrift detection",   CHECK, WARN,  WARN,  CROSS, CHECK),
+        ("Missing service\ndetection (~10s)",        CHECK, CROSS, CROSS, CROSS, CHECK),
+        ("First-occurrence error\n(no threshold)",   WARN,  WARN,  WARN,  CROSS, CHECK),
+        ("Cross-signal correlation\n(trace+err+metric)", CHECK, CHECK, WARN, CROSS, CHECK),
+        ("Deploy-correlated\nseverity downgrade",    WARN,  WARN,  CROSS, CROSS, CHECK),
+        ("AI root cause triage\n(LLM-generated)",    CHECK, CHECK, CHECK, CROSS, CHECK),
+        ("Self-healing baseline\n(zero config)",     CHECK, WARN,  CROSS, CROSS, CHECK),
+    ]
+
+    ROW_H   = Inches(0.41)
+    HDR_H   = Inches(0.38)
+    tbl_top = Inches(1.42)
+
+    # Header row
+    for j, (label, w, x) in enumerate(zip(col_labels, col_widths, col_x)):
+        bg = RGBColor(0x1A, 0x3A, 0x5C) if j == 0 else (DKGRAY if j < 5 else RGBColor(0x00, 0x6B, 0x85))
+        add_rect(s, x, tbl_top, w, HDR_H, bg)
+        txt_color = CYAN if j == len(col_labels) - 1 else RGBColor(0xCC, 0xDD, 0xEE)
+        add_textbox(s, x + Inches(0.06), tbl_top + Inches(0.03),
+                    w - Inches(0.1), HDR_H,
+                    label, font_size=9, bold=True, color=txt_color,
+                    align=PP_ALIGN.CENTER)
+
+    # Data rows
+    for i, row in enumerate(rows):
+        y = tbl_top + HDR_H + i * ROW_H
+        row_bg = RGBColor(0x12, 0x22, 0x3C) if i % 2 == 0 else RGBColor(0x0D, 0x1C, 0x32)
+        for j, (cell, w, x) in enumerate(zip(row, col_widths, col_x)):
+            if j == 0:
+                # Capability label — left-aligned text
+                add_rect(s, x, y, w, ROW_H, row_bg)
+                add_textbox(s, x + Inches(0.1), y + Inches(0.05),
+                            w - Inches(0.15), ROW_H,
+                            cell, font_size=9.5, color=WHITE)
+            else:
+                # Vendor cell — icon centered, highlight last column (this framework)
+                cell_bg = RGBColor(0x00, 0x4A, 0x5E) if j == len(row) - 1 else row_bg
+                add_rect(s, x, y, w, ROW_H, cell_bg)
+                icon_color = (CYAN if cell == CHECK else
+                              RGBColor(0xFF, 0xCC, 0x44) if cell == WARN else
+                              RGBColor(0xFF, 0x55, 0x55))
+                add_textbox(s, x, y + Inches(0.05), w, ROW_H - Inches(0.05),
+                            cell, font_size=13, bold=True, color=icon_color,
+                            align=PP_ALIGN.CENTER)
+
+    # Legend
+    legend_y = tbl_top + HDR_H + len(rows) * ROW_H + Inches(0.06)
+    add_textbox(s, Inches(0.45), legend_y, Inches(9.2), Inches(0.22),
+                "\u2705 native capability    \u26a0 partial / requires config    \u274c not available",
+                font_size=9, color=RGBColor(0x99, 0xBB, 0xCC),
+                align=PP_ALIGN.LEFT)
+
+    footer(s)
+    return s
+
+
 def slide_solution_overview(prs):
     """Slide 3 — What the framework is."""
     s = blank_slide(prs)
@@ -743,6 +832,7 @@ def build():
 
     slide_title(prs)
     slide_problem(prs)
+    slide_competitor_comparison(prs)
     slide_tiers(prs)
     slide_solution_overview(prs)
     slide_architecture(prs)
