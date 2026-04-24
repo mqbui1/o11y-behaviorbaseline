@@ -53,6 +53,8 @@ print(f'  Error baseline wiped (data/error_baseline.{e}.json)')
 # Stage error baseline on cluster (ConfigMap+inject happens after step 6)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "$_REPO/data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
+# NOTE: /tmp/otel_baseline.json on EC2 is the OTel-format baseline (22 fingerprints, no_missing_service flags).
+# It is managed separately and must NOT be overwritten by this script.
 # Also wipe OTel in-memory error baseline on each pod so demo error signatures fire fresh
 $K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
       kubectl exec \$pod -c otelcol -- sh -c 'echo \"{\\\"signatures\\\":{}}\" > /baseline/error_baseline.json' 2>/dev/null && echo \"  OTel error baseline wiped: \$pod\"; \
@@ -94,14 +96,17 @@ p.write_text(json.dumps(d, indent=2))
 print(f'  Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 " "$_REPO"
 # Push both baselines to cluster (single ConfigMap update after all local cleanup)
+# Python trace baseline → /tmp/python_baseline.json (avoids clobbering OTel baseline)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
-  "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
+  "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/python_baseline.json" 2>/dev/null
+# OTel baseline lives at /tmp/otel_baseline.json — use it if present, else fall back to python baseline
 $K "kubectl delete configmap behavioral-baseline --ignore-not-found && \
     kubectl create configmap behavioral-baseline \
-      --from-file=baseline.json=/tmp/baseline.json \
+      --from-file=baseline.json=\$([ -f /tmp/otel_baseline.json ] && echo /tmp/otel_baseline.json || echo /tmp/python_baseline.json) \
       --from-file=error_baseline.json=/tmp/error_baseline.json" 2>/dev/null
-# Inject both into pods immediately (don't wait for 60s reload)
-$K "BB64=\$(base64 -w 0 /tmp/baseline.json); \
+# Inject both into pods immediately (don't wait for reload interval)
+$K "OTL=\$([ -f /tmp/otel_baseline.json ] && echo /tmp/otel_baseline.json || echo /tmp/python_baseline.json); \
+    BB64=\$(base64 -w 0 \$OTL); \
     EB64=\$(base64 -w 0 /tmp/error_baseline.json); \
     for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
       kubectl exec \$pod -c otelcol -- sh -c \"echo '\$BB64' | base64 -d > /baseline/baseline.json && echo '\$EB64' | base64 -d > /baseline/error_baseline.json\" 2>/dev/null && echo \"  baselines injected: \$pod\"; \
