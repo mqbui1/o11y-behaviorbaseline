@@ -443,11 +443,13 @@ async function loadTopology() {
 }
 
 function nodeState(id) {
+  // Root cause check first — synthetic nodes (mysql:petclinic) have no own anomalies
+  // but must still render as root cause when identified by causality traversal.
+  if (id === rootCause) return "rootcause";
   const anoms = active[id] || [];
   if (!anoms.length) return "healthy";
   const types = new Set(anoms.map(a => a.anomaly_type));
-  if (id === rootCause) return "rootcause";
-  if (types.has("MISSING_SERVICE"))    return "missing";
+  if (types.has("MISSING_SERVICE"))     return "missing";
   if (types.has("NEW_ERROR_SIGNATURE")) return "error";
   return "drift";
 }
@@ -456,7 +458,9 @@ function edgeState(src, dst) {
   // In causality chain path?
   const idx = causalityChain.indexOf(src);
   if (idx >= 0 && causalityChain[idx + 1] === dst) return "chain";
-  // Either endpoint affected?
+  // Either endpoint is root cause (synthetic node like mysql:petclinic)?
+  if (src === rootCause || dst === rootCause) return "affected";
+  // Either endpoint has active anomalies?
   if ((active[src] || []).length || (active[dst] || []).length) return "affected";
   return "normal";
 }
@@ -625,9 +629,15 @@ function updatePanel() {
     }).join("");
   }
 
-  // Affected services list
+  // Affected services list — include synthetic root cause node (e.g. mysql:petclinic)
+  // even if it has no own anomaly events (it's inferred from causality traversal).
   const listEl = document.getElementById("affected-list");
-  const affected = Object.entries(active).filter(([, v]) => v.length > 0);
+  const affectedEntries = Object.entries(active).filter(([, v]) => v.length > 0);
+  // Prepend root cause if it's synthetic (not in active map)
+  if (rootCause && !active[rootCause]?.length) {
+    affectedEntries.unshift([rootCause, []]);
+  }
+  const affected = affectedEntries;
   if (!affected.length) { listEl.innerHTML = ""; return; }
 
   listEl.innerHTML = affected.map(([svc, anoms]) => {
