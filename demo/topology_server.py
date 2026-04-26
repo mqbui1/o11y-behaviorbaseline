@@ -48,7 +48,10 @@ etype_re   = re.compile(r'"error_type": "([^"]+)"')
 op2_re     = re.compile(r'"operation": "([^"]+)"')
 missing_re = re.compile(r'"missing_services": \[([^\]]*)\]')
 
-_INFRA = {"discovery-server", "config-server", "eureka-server", "eureka"}
+_INFRA = {"discovery-server", "config-server", "eureka-server", "eureka", "admin-server"}
+# DB_SPAN_PATTERNS: span operation prefixes that indicate a DB call.
+# Used to inject a synthetic mysql:petclinic node into the topology.
+_DB_SPAN_PATTERNS = ("SELECT", "INSERT", "UPDATE", "DELETE", "Transaction.commit")
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 # Active anomalies: service -> list of anomaly dicts (cleared after ANOMALY_TTL)
@@ -96,10 +99,20 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
         occ   = fp.get("occurrences", 1)
         parts = [p.strip() for p in path.split("->")]
         svcs  = []
+        last_app_svc = None  # track last non-DB service to wire DB edge
         for p in parts:
+            op  = p.split(":", 1)[1].strip() if ":" in p else p
             svc = p.split(":")[0] if ":" in p else p
+            # If this span is a DB operation, inject mysql:petclinic as a synthetic node
+            if any(op.startswith(pat) for pat in _DB_SPAN_PATTERNS):
+                db_node = "mysql:petclinic"
+                if last_app_svc and last_app_svc != db_node:
+                    edge_weights[(last_app_svc, db_node)] += occ
+                    node_traffic[db_node] += occ
+                continue
             if not svcs or svcs[-1] != svc:
                 svcs.append(svc)
+            last_app_svc = svc
         for svc in svcs:
             node_traffic[svc] += occ
         for i in range(len(svcs) - 1):
@@ -126,38 +139,69 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
     }
 
 
-def _find_root_cause(affected_service: str, topology: dict,
+def _find_root_cause(topology: dict,
                      active: dict[str, list[dict]]) -> list[str]:
     """
-    Traverse the dependency graph upstream from affected_service.
-    Returns the causality chain as an ordered list: [root_cause, ..., affected_service]
+    Traverse the dependency graph to find root cause across all affected services.
+    Returns causality chain: [root_cause, intermediate..., most_upstream_affected]
 
     Algorithm:
-      1. Walk downstream dependencies of affected_service
-      2. If any dependency also has active anomalies, recurse into it
-      3. The deepest node with anomalies and no anomalous dependencies is root cause
+      - Start from all services with active anomalies
+      - Walk their downstream dependencies
+      - A node with anomalies and no anomalous deps is a root cause candidate
+      - If multiple candidates, prefer the one with most callers affected (shared dep)
+      - Build chain from root cause up to the most upstream affected service
     """
     downstream = topology.get("downstream", {})
+    upstream   = topology.get("upstream", {})
+    affected   = {s for s, v in active.items() if v}
 
-    def _find(svc: str, visited: set) -> list[str]:
+    if not affected:
+        return []
+
+    def _find_deepest(svc: str, visited: set) -> str:
+        """Recursively find the deepest downstream node that also has anomalies."""
         if svc in visited:
-            return [svc]
+            return svc
         visited.add(svc)
-        # Check if any callees also have anomalies
         for dep in downstream.get(svc, []):
             if dep in _INFRA:
                 continue
-            if active.get(dep):
-                chain = _find(dep, visited)
-                return chain + [svc] if chain[-1] != svc else chain
-        return [svc]  # this node is the root cause
+            if dep in affected or dep == "mysql:petclinic":
+                deeper = _find_deepest(dep, visited)
+                return deeper
+        return svc
 
-    chain = _find(affected_service, set())
-    # Prepend any services that call into affected_service and are also affected
-    upstream = topology.get("upstream", {})
-    callers_affected = [c for c in upstream.get(affected_service, [])
-                        if active.get(c) and c not in _INFRA and c not in chain]
-    return chain + callers_affected
+    # Find root cause: deepest affected node reachable from any affected service
+    candidates: dict[str, int] = {}
+    for svc in affected:
+        root = _find_deepest(svc, set())
+        callers_hit = sum(1 for c in upstream.get(root, []) if c in affected)
+        candidates[root] = max(candidates.get(root, 0), callers_hit)
+
+    # Also consider mysql:petclinic as root cause if any affected service calls it
+    for svc in affected:
+        if "mysql:petclinic" in downstream.get(svc, []):
+            candidates["mysql:petclinic"] = candidates.get("mysql:petclinic", 0) + 1
+
+    # Pick candidate with most affected callers (shared dep = highest confidence)
+    root_cause = max(candidates, key=lambda k: candidates[k])
+
+    # Build chain: root_cause → services that call it (affected) → their callers
+    chain = [root_cause]
+    visited_chain: set[str] = {root_cause}
+    frontier = [c for c in upstream.get(root_cause, []) if c in affected and c not in visited_chain]
+    while frontier:
+        next_layer = []
+        for svc in frontier:
+            if svc not in visited_chain:
+                chain.append(svc)
+                visited_chain.add(svc)
+                next_layer += [c for c in upstream.get(svc, [])
+                               if c in affected and c not in visited_chain]
+        frontier = next_layer
+
+    return chain
 
 
 # ── Event parsing (mirrors poll_drift_events.py) ──────────────────────────────
@@ -274,7 +318,7 @@ async def _tail_otel_logs(environment: str) -> None:
         _active_anomalies[svc].append(event)
 
         # Build causality chain
-        chain = _find_root_cause(svc, _topology_cache, _active_anomalies)
+        chain = _find_root_cause(_topology_cache, _active_anomalies)
 
         # Build broadcast payload
         payload = {
