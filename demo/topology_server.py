@@ -56,10 +56,14 @@ _DB_SPAN_PATTERNS = ("SELECT", "INSERT", "UPDATE", "DELETE", "Transaction.commit
 # ── In-memory state ───────────────────────────────────────────────────────────
 # Active anomalies: service -> list of anomaly dicts (cleared after ANOMALY_TTL)
 _active_anomalies: dict[str, list[dict]] = defaultdict(list)
-ANOMALY_TTL = 300  # seconds — anomalies auto-clear after 5 minutes
+ANOMALY_TTL     = 300  # seconds — hard expiry
+RECOVERY_QUIET  = 45   # seconds of no new drift events before declaring recovery
 
 # SSE subscriber queues
 _subscribers: list[asyncio.Queue] = []
+
+# Tracks the last time any drift event arrived — used by recovery detector
+_last_drift_time: float = 0.0
 
 # Topology + baseline cache
 _topology_cache: dict = {}
@@ -317,7 +321,9 @@ async def _tail_otel_logs(environment: str) -> None:
 
         print(f"[topology] event: {atype} on {svc}", flush=True)
 
-        # Update active anomalies
+        # Update active anomalies and last-drift timestamp
+        global _last_drift_time
+        _last_drift_time = now
         _active_anomalies[svc].append(event)
 
         # Build causality chain
@@ -347,10 +353,44 @@ async def _tail_otel_logs(environment: str) -> None:
 
 
 async def _expire_anomalies() -> None:
-    """Background task: expire old anomalies and broadcast cleared state."""
+    """Background task: recovery detection + hard TTL expiry.
+
+    Recovery: if no new drift events have arrived for RECOVERY_QUIET seconds
+    AND there are active anomalies, broadcast a 'recovered' event and clear state.
+
+    Hard expiry: individual anomalies older than ANOMALY_TTL are pruned regardless.
+    """
+    _recovered_announced = False
+
     while True:
-        await asyncio.sleep(10)
-        now_ms = time.time() * 1000
+        await asyncio.sleep(5)
+        now = time.time()
+        now_ms = now * 1000
+        any_active = any(v for v in _active_anomalies.values())
+
+        # ── Recovery detection ────────────────────────────────────────────────
+        quiet_secs = now - _last_drift_time if _last_drift_time else 0
+        if any_active and _last_drift_time and quiet_secs >= RECOVERY_QUIET and not _recovered_announced:
+            print(f"[topology] recovery detected — {quiet_secs:.0f}s quiet", flush=True)
+            _active_anomalies.clear()
+            _recovered_announced = True
+            payload = {
+                "type":   "recovered",
+                "active": {},
+                "message": f"Services recovered — no drift events for {quiet_secs:.0f}s",
+            }
+            for q in _subscribers:
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    pass
+            continue
+
+        # Reset recovered flag when new events arrive
+        if _last_drift_time and quiet_secs < RECOVERY_QUIET:
+            _recovered_announced = False
+
+        # ── Hard TTL expiry ───────────────────────────────────────────────────
         changed = False
         for svc in list(_active_anomalies.keys()):
             before = len(_active_anomalies[svc])
