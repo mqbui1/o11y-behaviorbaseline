@@ -56,14 +56,17 @@ _DB_SPAN_PATTERNS = ("SELECT", "INSERT", "UPDATE", "DELETE", "Transaction.commit
 # ── In-memory state ───────────────────────────────────────────────────────────
 # Active anomalies: service -> list of anomaly dicts (cleared after ANOMALY_TTL)
 _active_anomalies: dict[str, list[dict]] = defaultdict(list)
-ANOMALY_TTL     = 300  # seconds — hard expiry
-RECOVERY_QUIET  = 45   # seconds of no new drift events before declaring recovery
+ANOMALY_TTL       = 300  # seconds — hard expiry
+RECOVERY_QUIET    = 45   # seconds of no new drift events before declaring recovery
+RECOVERY_LOCKOUT  = 60   # seconds after recovery to ignore new events (absorb pod log replay)
 
 # SSE subscriber queues
 _subscribers: list[asyncio.Queue] = []
 
 # Tracks the last time any drift event arrived — used by recovery detector
 _last_drift_time: float = 0.0
+# Tracks when recovery was last declared — events during lockout window are ignored
+_recovery_time: float = 0.0
 
 # Topology + baseline cache
 _topology_cache: dict = {}
@@ -319,6 +322,11 @@ async def _tail_otel_logs(environment: str) -> None:
             if root_svc not in {"api-gateway"}:
                 continue
 
+        # Ignore events during post-recovery lockout (absorbs pod log replay after pod cycling)
+        if _recovery_time and now - _recovery_time < RECOVERY_LOCKOUT:
+            print(f"[topology] suppressed (lockout {RECOVERY_LOCKOUT - (now - _recovery_time):.0f}s remaining): {atype} on {svc}", flush=True)
+            continue
+
         print(f"[topology] event: {atype} on {svc}", flush=True)
 
         # Update active anomalies and last-drift timestamp
@@ -374,6 +382,8 @@ async def _expire_anomalies() -> None:
             print(f"[topology] recovery detected — {quiet_secs:.0f}s quiet", flush=True)
             _active_anomalies.clear()
             _recovered_announced = True
+            global _recovery_time
+            _recovery_time = now
             payload = {
                 "type":   "recovered",
                 "active": {},
