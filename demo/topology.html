@@ -697,6 +697,9 @@ function connectSSE() {
       applyState(msg.active, msg.causality_chain);
     } else if (msg.type === "state") {
       applyState(msg.active, causalityChain);
+    } else if (msg.type === "recovered") {
+      applyState({}, []);
+      flashRecovery(msg.message);
     }
   };
   es.onerror = () => {
@@ -706,6 +709,26 @@ function connectSSE() {
 }
 
 // ── Clear ─────────────────────────────────────────────────────────────────
+function flashRecovery(message) {
+  // Brief green flash on all nodes + log entry to signal recovery
+  nodesG.selectAll(".node circle:first-of-type")
+    .style("filter", "drop-shadow(0 0 10px #3FB950)")
+    .transition().duration(2000)
+    .style("filter", null);
+
+  const logEl = document.getElementById("log-entries");
+  const entry = document.createElement("div");
+  entry.className = "log-entry";
+  entry.style.color = "#3FB950";
+  entry.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString()}</span> `
+    + `<span style="color:#3FB950">● RECOVERED</span> — ${message || "all services healthy"}`;
+  logEl.prepend(entry);
+
+  const badge = document.getElementById("status-badge");
+  badge.className = "status-badge status-ok";
+  badge.textContent = "● STEADY STATE";
+}
+
 async function clearAnomalies() {
   await fetch("/api/clear");
   active = {};
