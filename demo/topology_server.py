@@ -124,12 +124,15 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
         downstream[src].append(dst)
         upstream[dst].append(src)
 
+    def _valid(svc: str) -> bool:
+        return svc not in _INFRA and bool(svc) and not svc.strip(".").strip() == ""
+
     nodes = [{"id": svc, "traffic": traffic}
              for svc, traffic in sorted(node_traffic.items(), key=lambda x: -x[1])
-             if svc not in _INFRA]
+             if _valid(svc)]
     edges = [{"source": src, "target": dst, "weight": w}
              for (src, dst), w in sorted(edge_weights.items(), key=lambda x: -x[1])
-             if src not in _INFRA and dst not in _INFRA]
+             if _valid(src) and _valid(dst)]
 
     return {
         "nodes":      nodes,
