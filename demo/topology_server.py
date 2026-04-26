@@ -58,7 +58,7 @@ _DB_SPAN_PATTERNS = ("SELECT", "INSERT", "UPDATE", "DELETE", "Transaction.commit
 _active_anomalies: dict[str, list[dict]] = defaultdict(list)
 ANOMALY_TTL       = 300  # seconds — hard expiry
 RECOVERY_QUIET    = 45   # seconds of no new drift events before declaring recovery
-RECOVERY_LOCKOUT  = 60   # seconds after recovery to ignore new events (absorb pod log replay)
+RECOVERY_LOCKOUT  = 30   # seconds after recovery to ignore new events (absorb pod log replay)
 
 # SSE subscriber queues
 _subscribers: list[asyncio.Queue] = []
@@ -272,92 +272,113 @@ def _parse_event(line: str) -> dict | None:
 # ── SSH log tail (background task) ───────────────────────────────────────────
 
 async def _tail_otel_logs(environment: str) -> None:
-    """Background task: tail OTel collector pod logs and broadcast drift events."""
-    global _active_anomalies
+    """Background task: tail OTel collector pod logs and broadcast drift events.
 
-    ssh_cmd = (
-        "exec bash -c '"
-        f"for p in $(kubectl get pods -l {DAEMONSET_LABEL} -o jsonpath=\"{{.items[*].metadata.name}}\");"
-        f" do kubectl logs -f --since=5s $p -c {OTEL_CONTAINER} 2>/dev/null & done;"
-        " tail -f /dev/null'"
-    )
-    proc = await asyncio.create_subprocess_exec(
-        "sshpass", f"-p{EC2_PASS}",
-        "ssh", "-T", "-p", EC2_PORT,
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "RequestTTY=no",
-        f"splunk@{EC2_IP}",
-        ssh_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-
+    Auto-reconnects when the SSH stream dies (e.g. after pods are cycled by
+    demo-between.sh). Each reconnect refreshes pod names so new pods are picked up.
+    """
     seen_hashes: dict[str, float] = {}
     DEDUP_TTL = 90
+    RECONNECT_DELAY = 5  # seconds between reconnect attempts
 
-    print(f"[topology] tailing OTel logs for env={environment}", flush=True)
-    async for raw in proc.stdout:
-        line = raw.decode("utf-8", errors="replace").rstrip()
-        event = _parse_event(line)
-        if event is None:
+    while True:
+        ssh_cmd = (
+            "exec bash -c '"
+            f"for p in $(kubectl get pods -l {DAEMONSET_LABEL} -o jsonpath=\"{{.items[*].metadata.name}}\");"
+            f" do kubectl logs -f --since=5s $p -c {OTEL_CONTAINER} 2>/dev/null & done;"
+            " wait'"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sshpass", f"-p{EC2_PASS}",
+                "ssh", "-T", "-p", EC2_PORT,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "RequestTTY=no",
+                "-o", "ServerAliveInterval=10",
+                "-o", "ServerAliveCountMax=3",
+                f"splunk@{EC2_IP}",
+                ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception as exc:
+            print(f"[topology] SSH connect failed: {exc} — retrying in {RECONNECT_DELAY}s", flush=True)
+            await asyncio.sleep(RECONNECT_DELAY)
             continue
 
-        h = event.get("hash", "")
-        svc = event.get("service", "")
-        atype = event.get("anomaly_type", "")
-        now = time.time()
-
-        # Deduplicate
-        dedup_key = h if h else f"{atype}:{svc}"
-        if now - seen_hashes.get(dedup_key, 0) < DEDUP_TTL:
-            continue
-        seen_hashes[dedup_key] = now
-
-        # Skip infra noise
-        if svc in _INFRA:
-            continue
-        # Skip direct-service NEW_FINGERPRINT (OTel auto-promotion noise)
-        if atype == "NEW_FINGERPRINT":
-            root_svc = event.get("root_op", "").split(":")[0]
-            if root_svc not in {"api-gateway"}:
+        print(f"[topology] tailing OTel logs for env={environment}", flush=True)
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            event = _parse_event(line)
+            if event is None:
                 continue
 
-        # Ignore events during post-recovery lockout (absorbs pod log replay after pod cycling)
-        if _recovery_time and now - _recovery_time < RECOVERY_LOCKOUT:
-            print(f"[topology] suppressed (lockout {RECOVERY_LOCKOUT - (now - _recovery_time):.0f}s remaining): {atype} on {svc}", flush=True)
-            continue
+            h = event.get("hash", "")
+            svc = event.get("service", "")
+            atype = event.get("anomaly_type", "")
+            now = time.time()
 
-        print(f"[topology] event: {atype} on {svc}", flush=True)
+            # Deduplicate
+            dedup_key = h if h else f"{atype}:{svc}"
+            if now - seen_hashes.get(dedup_key, 0) < DEDUP_TTL:
+                continue
+            seen_hashes[dedup_key] = now
 
-        # Update active anomalies and last-drift timestamp
-        global _last_drift_time
-        _last_drift_time = now
-        _active_anomalies[svc].append(event)
+            # Skip infra noise
+            if svc in _INFRA:
+                continue
+            # Skip direct-service NEW_FINGERPRINT (OTel auto-promotion noise)
+            if atype == "NEW_FINGERPRINT":
+                root_svc = event.get("root_op", "").split(":")[0]
+                if root_svc not in {"api-gateway"}:
+                    continue
 
-        # Build causality chain
-        chain = _find_root_cause(_topology_cache, _active_anomalies)
+            # Ignore events during post-recovery lockout (absorbs pod log replay after pod cycling)
+            if _recovery_time and now - _recovery_time < RECOVERY_LOCKOUT:
+                print(f"[topology] suppressed (lockout {RECOVERY_LOCKOUT - (now - _recovery_time):.0f}s remaining): {atype} on {svc}", flush=True)
+                continue
 
-        # Build broadcast payload
-        payload = {
-            "type":           "drift",
-            "event":          event,
-            "active":         {k: v for k, v in _active_anomalies.items() if v},
-            "causality_chain": chain,
-            "root_cause":     chain[0] if chain else svc,
-            "timestamp_ms":   int(now * 1000),
-        }
+            print(f"[topology] event: {atype} on {svc}", flush=True)
 
-        # Broadcast to all SSE subscribers
-        dead = []
-        for q in _subscribers:
-            try:
-                q.put_nowait(payload)
-            except asyncio.QueueFull:
-                dead.append(q)
-        for q in dead:
-            _subscribers.remove(q)
+            # Update active anomalies and last-drift timestamp
+            global _last_drift_time
+            _last_drift_time = now
+            _active_anomalies[svc].append(event)
+            # For MISSING_SERVICE, also mark the caller (root_op service) as affected
+            # so both the missing service AND its caller appear in the panel.
+            if atype == "MISSING_SERVICE":
+                caller = event.get("root_op", "").split(":")[0]
+                if caller and caller != svc and caller not in _INFRA:
+                    caller_event = dict(event)
+                    caller_event["service"] = caller
+                    _active_anomalies[caller].append(caller_event)
 
-    print("[topology] SSH process ended — log tail stopped", flush=True)
+            # Build causality chain
+            chain = _find_root_cause(_topology_cache, _active_anomalies)
+
+            # Build broadcast payload
+            payload = {
+                "type":           "drift",
+                "event":          event,
+                "active":         {k: v for k, v in _active_anomalies.items() if v},
+                "causality_chain": chain,
+                "root_cause":     chain[0] if chain else svc,
+                "timestamp_ms":   int(now * 1000),
+            }
+
+            # Broadcast to all SSE subscribers
+            dead = []
+            for q in _subscribers:
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    dead.append(q)
+            for q in dead:
+                _subscribers.remove(q)
+
+        await proc.wait()
+        print(f"[topology] SSH stream ended — reconnecting in {RECONNECT_DELAY}s", flush=True)
+        await asyncio.sleep(RECONNECT_DELAY)
 
 
 async def _expire_anomalies() -> None:
