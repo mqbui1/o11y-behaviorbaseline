@@ -482,6 +482,7 @@
   <button class="btn-scenario" onclick="runScenario('new-error')"      title="pets-service throws a new error signature">3 New error sig</button>
   <button class="btn-scenario" onclick="runScenario('db-dropped')"     title="visits-service stops calling mysql:petclinic — DB gone silent">4 DB gone silent</button>
   <button class="btn-scenario" onclick="runScenario('db-incident')"    title="DB down — multiple services get JDBC errors simultaneously">5 DB incident (multi)</button>
+  <button class="btn-scenario" onclick="runScenario('cascading')"      title="vets-service killed → api-gateway errors → customers-service times out (2s apart)">6 Cascading failure</button>
 </div>
 
 <script>
