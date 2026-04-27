@@ -522,19 +522,22 @@ async function loadTopology() {
 }
 
 function nodeState(id) {
-  // Root cause check first — synthetic nodes (mysql:petclinic) have no own anomalies
-  // but must still render as root cause when identified by causality traversal.
-  if (id === rootCause) return "rootcause";
   const anoms = active[id] || [];
   if (!anoms.length) {
-    // Node appeared via a drift event but isn't in the baseline topology
     if (newNodes.some(n => n.id === id)) return "new";
     return "healthy";
   }
   const types = new Set(anoms.map(a => a.anomaly_type));
-  if (types.has("MISSING_SERVICE"))     return "missing";
-  if (types.has("NEW_ERROR_SIGNATURE")) return "error";
-  return "drift";
+  // Determine base state from anomaly type
+  let base = "drift";
+  if (types.has("MISSING_SERVICE"))     base = "missing";
+  if (types.has("NEW_ERROR_SIGNATURE")) base = "error";
+  // Only show rootcause style when there are multiple affected services —
+  // a single isolated anomaly doesn't need the root cause callout.
+  const multiService = causalityChain.length > 1
+    || Object.values(active).filter(v => v.length > 0).length > 1;
+  if (id === rootCause && multiService) return "rootcause";
+  return base;
 }
 
 function edgeState(src, dst) {
