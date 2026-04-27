@@ -564,7 +564,21 @@ function renderGraph() {
     ...topology.nodes,
     ...newNodes
       .filter(n => !topology.nodes.some(e => e.id === n.id))
-      .map(n => ({ id: n.id, traffic: undefined, _isNew: true })),
+      .map(n => {
+        // Seed position near the source node of the first new edge that targets this node,
+        // so the link force can pull them together instead of starting from (0,0).
+        const srcEdge = newEdges.find(e => e.target === n.id);
+        const srcNode = srcEdge ? nodeMap[srcEdge.source] || nodeMap[
+          (typeof srcEdge.source === "object" ? srcEdge.source.id : srcEdge.source)
+        ] : null;
+        return {
+          id: n.id,
+          traffic: undefined,
+          _isNew: true,
+          x: srcNode?.x != null ? srcNode.x + (Math.random() - 0.5) * 80 : undefined,
+          y: srcNode?.y != null ? srcNode.y + (Math.random() - 0.5) * 80 : undefined,
+        };
+      }),
   ];
   const allEdges = [
     ...topology.edges,
@@ -653,9 +667,10 @@ function renderGraph() {
       .on("tick", ticked);
   }
 
+  const hasNewThisRender = newNodes.length > 0;
   simulation.nodes(allNodes);
   simulation.force("link").links(allEdges);
-  simulation.alpha(0.3).restart();
+  simulation.alpha(hasNewThisRender ? 0.8 : 0.3).restart();
 }
 
 function ticked() {
