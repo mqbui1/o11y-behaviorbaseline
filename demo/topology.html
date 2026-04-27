@@ -808,6 +808,10 @@ function updatePanel() {
   if (!affected.length) { listEl.innerHTML = ""; return; }
 
   listEl.innerHTML = affected.map(([svc, anoms]) => {
+    // If this service has stronger signals (ERROR/MISSING), drop pure DRIFT entries
+    const hasStrong = anoms.some(a =>
+      a.anomaly_type === "NEW_ERROR_SIGNATURE" || a.anomaly_type === "MISSING_SERVICE");
+    if (hasStrong) anoms = anoms.filter(a => a.anomaly_type !== "NEW_FINGERPRINT");
     const state  = nodeState(svc);
     const badgeClass = {
       rootcause: "badge-rootcause", error: "badge-error",
