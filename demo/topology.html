@@ -166,6 +166,36 @@
     marker-end: url(#arrow-chain);
   }
 
+  /* ── Problem banner (inside panel header) ── */
+  #problem-banner {
+    display: none;
+    background: #1C1040;
+    border: 1px solid #7F3FBF;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 8px 12px 4px;
+    font-size: 11px;
+  }
+  #problem-banner .prob-id {
+    color: #BF5AF2;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+  }
+  #problem-banner .prob-meta {
+    color: #8B949E;
+    margin-top: 3px;
+  }
+  #problem-banner .prob-duration {
+    color: #E6EDF3;
+    font-weight: 600;
+  }
+  #problem-banner.prob-closed {
+    background: #1C3A2A;
+    border-color: #238636;
+  }
+  #problem-banner.prob-closed .prob-id { color: #3FB950; }
+
   /* ── Side panel ── */
   #panel {
     width: 320px;
@@ -443,6 +473,10 @@
     <div id="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
       <span>Incident Details</span>
     </div>
+    <div id="problem-banner">
+      <div class="prob-id" id="prob-id-label"></div>
+      <div class="prob-meta" id="prob-meta-label"></div>
+    </div>
     <div id="panel-content">
       <div class="empty-state" id="panel-empty">
         No anomalies detected.<br>Kill a service to see live highlighting.
@@ -497,6 +531,8 @@ let linkMap    = {};          // "src->dst" -> d3 link datum
 let rScale     = () => 18;   // node radius fn — updated in renderGraph()
 let newNodes   = [];          // [{id, label}] — nodes seen in drift events, not in baseline
 let newEdges   = [];          // [{source, target, label}] — edges seen in drift events
+let currentProblem = null;    // open/closed problem record from server
+let _probTimerInterval = null; // interval for live duration counter
 
 // ── D3 Setup ──────────────────────────────────────────────────────────────
 const svg    = d3.select("#graph");
@@ -520,6 +556,7 @@ async function loadTopology() {
     `env: ${data.environment}  |  ${data.nodes.length} services  |  ${data.edges.length} edges`;
   renderGraph();
   updatePanel();
+  if (data.problem !== undefined) applyProblem(data.problem);
 }
 
 function nodeState(id) {
@@ -835,6 +872,48 @@ function updatePanel() {
   }).join("");
 }
 
+// ── Problem banner ────────────────────────────────────────────────────────
+function _fmtDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), rem = s % 60;
+  if (m < 60) return `${m}m ${rem}s`;
+  const h = Math.floor(m / 60), remM = m % 60;
+  return `${h}h ${remM}m`;
+}
+
+function applyProblem(p) {
+  currentProblem = p || null;
+  const banner = document.getElementById("problem-banner");
+  if (_probTimerInterval) { clearInterval(_probTimerInterval); _probTimerInterval = null; }
+
+  if (!p) {
+    banner.style.display = "none";
+    return;
+  }
+
+  banner.style.display = "block";
+  document.getElementById("prob-id-label").textContent = p.id;
+
+  function _renderMeta() {
+    const now = Date.now();
+    const closed = p.closed_ms;
+    const duration = closed ? (closed - p.opened_ms) : (now - p.opened_ms);
+    const status = closed ? "closed" : "open";
+    const root = p.root_cause || "unknown";
+    const svcs = (p.services || []).length;
+    document.getElementById("prob-meta-label").innerHTML =
+      `<span class="prob-duration">${status} ${_fmtDuration(duration)}</span>`
+      + ` · root: <b>${root}</b> · ${svcs} svc${svcs !== 1 ? "s" : ""}`;
+    banner.className = closed ? "prob-closed" : "";
+  }
+
+  _renderMeta();
+  if (!p.closed_ms) {
+    _probTimerInterval = setInterval(_renderMeta, 1000);
+  }
+}
+
 // ── Event log ─────────────────────────────────────────────────────────────
 function addLogEntry(event) {
   const logEl = document.getElementById("log-entries");
@@ -854,9 +933,13 @@ function addLogEntry(event) {
     svcDisplay = caller ? `${caller} → ${event.missing_services.join(", ")}` : event.missing_services.join(", ");
   }
 
+  const probTag = event.problem_id
+    ? `<span style="color:#BF5AF2;font-size:10px;margin-right:4px">[${event.problem_id}]</span>`
+    : "";
   const entry = document.createElement("div");
   entry.className = "log-entry";
   entry.innerHTML = `<span class="log-ts">${ts}</span> `
+    + probTag
     + `<span class="${cls}">${label}</span> `
     + `<span class="log-svc">${svcDisplay}</span>`;
   logEl.prepend(entry);
@@ -873,11 +956,20 @@ function connectSSE() {
     if (msg.type === "drift") {
       addLogEntry(msg.event);
       applyState(msg.active, msg.causality_chain, msg.new_nodes, msg.new_edges);
+      if (msg.problem !== undefined) applyProblem(msg.problem);
     } else if (msg.type === "state") {
       applyState(msg.active, causalityChain, msg.new_nodes, msg.new_edges);
+      if (msg.problem !== undefined) applyProblem(msg.problem);
     } else if (msg.type === "recovered") {
       applyState({}, [], [], []);
       flashRecovery(msg.message);
+      // Let the closed problem linger briefly so the user can see it resolved,
+      // then clear the banner after 8s
+      if (currentProblem) {
+        const closed = Object.assign({}, currentProblem, { closed_ms: Date.now() });
+        applyProblem(closed);
+        setTimeout(() => applyProblem(null), 8000);
+      }
     }
   };
   es.onerror = () => {
@@ -914,6 +1006,7 @@ async function clearAnomalies() {
   rootCause = null;
   newNodes = [];
   newEdges = [];
+  applyProblem(null);
   renderGraph();
   updatePanel();
   document.getElementById("log-entries").innerHTML = "";
