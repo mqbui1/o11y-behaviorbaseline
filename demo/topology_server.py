@@ -344,13 +344,16 @@ async def _tail_otel_logs(environment: str) -> None:
             global _last_drift_time
             _last_drift_time = now
             _active_anomalies[svc].append(event)
-            # For MISSING_SERVICE, also mark the caller (root_op service) as affected
-            # so both the missing service AND its caller appear in the panel.
+            # For MISSING_SERVICE, also mark the caller (root_op service) as DRIFT
+            # (not MISSING) — it's still running but its dependency is gone.
             if atype == "MISSING_SERVICE":
                 caller = event.get("root_op", "").split(":")[0]
                 if caller and caller != svc and caller not in _INFRA:
-                    caller_event = dict(event)
-                    caller_event["service"] = caller
+                    caller_event = dict(event,
+                        service=caller,
+                        anomaly_type="NEW_FINGERPRINT",
+                        message=f"Trace path changed — {svc} no longer reachable from {caller}",
+                    )
                     _active_anomalies[caller].append(caller_event)
 
             # Build causality chain
@@ -500,7 +503,13 @@ def _make_app(environment: str):
         if atype == "MISSING_SERVICE":
             caller = event.get("root_op", "").split(":")[0]
             if caller and caller != svc and caller not in _INFRA:
-                caller_event = dict(event, service=caller)
+                # Caller gets TRACE DRIFT (not MISSING) — it's still running but
+                # its dependency is gone, so its trace path changed.
+                caller_event = dict(event,
+                    service=caller,
+                    anomaly_type="NEW_FINGERPRINT",
+                    message=f"Trace path changed — {svc} no longer reachable from {caller}",
+                )
                 _active_anomalies[caller].append(caller_event)
         chain = _find_root_cause(_topology_cache, _active_anomalies)
         payload = {
