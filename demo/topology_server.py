@@ -71,6 +71,9 @@ _recovery_time: float = 0.0
 # Topology + baseline cache
 _topology_cache: dict = {}
 _baseline_cache: dict = {}
+# New nodes/edges discovered via drift events (not in baseline)
+_new_nodes: dict[str, dict] = {}   # id -> {id, label}
+_new_edges: list[dict] = []        # [{source, target, label}]
 
 
 # ── Baseline / topology helpers ───────────────────────────────────────────────
@@ -268,6 +271,7 @@ def _parse_event(line: str) -> dict | None:
             "root_op":      op_val,
             "message":      f"Trace path drift on '{op_val}'",
             "hash":         h_val,
+            "new_edges":    [],   # populated by caller if new node/edge is known
             "timestamp_ms": int(time.time() * 1000),
         }
 
@@ -485,12 +489,17 @@ def _make_app(environment: str):
             "nodes":       _topology_cache.get("nodes", []),
             "edges":       _topology_cache.get("edges", []),
             "active":      {k: v for k, v in _active_anomalies.items() if v},
+            "new_nodes":   list(_new_nodes.values()),
+            "new_edges":   list(_new_edges),
         })
 
     @app.get("/api/clear")
     async def _clear():
+        global _new_nodes, _new_edges
         _active_anomalies.clear()
-        payload = {"type": "state", "active": {}}
+        _new_nodes.clear()
+        _new_edges.clear()
+        payload = {"type": "state", "active": {}, "new_nodes": [], "new_edges": []}
         for q in _subscribers:
             try:
                 q.put_nowait(payload)
@@ -500,6 +509,7 @@ def _make_app(environment: str):
 
     def _broadcast_event(event: dict) -> None:
         """Insert a synthetic event into the active state and broadcast to SSE subscribers."""
+        global _new_nodes, _new_edges
         svc   = event.get("service", "")
         atype = event.get("anomaly_type", "")
         _active_anomalies[svc].append(event)
@@ -514,6 +524,16 @@ def _make_app(environment: str):
                     message=f"Trace path changed — {svc} no longer reachable from {caller}",
                 )
                 _active_anomalies[caller].append(caller_event)
+        # Accumulate new nodes/edges from NEW_FINGERPRINT events
+        for edge in event.get("new_edges", []):
+            src, dst = edge.get("source", ""), edge.get("target", "")
+            if src and dst:
+                if dst not in _new_nodes:
+                    _new_nodes[dst] = {"id": dst, "label": edge.get("label", dst)}
+                key = f"{src}->{dst}"
+                if not any(f"{e['source']}->{e['target']}" == key for e in _new_edges):
+                    _new_edges.append({"source": src, "target": dst,
+                                       "label": edge.get("label", "")})
         chain = _find_root_cause(_topology_cache, _active_anomalies)
         payload = {
             "type":            "drift",
@@ -522,6 +542,8 @@ def _make_app(environment: str):
             "causality_chain": chain,
             "root_cause":      chain[0] if chain else svc,
             "timestamp_ms":    event["timestamp_ms"],
+            "new_nodes":       list(_new_nodes.values()),
+            "new_edges":       list(_new_edges),
         }
         dead = []
         for q in _subscribers:
@@ -579,7 +601,7 @@ def _make_app(environment: str):
                 "hash":             "synthetic:missing:vets-service",
             },
         ],
-        # 2. Trace path change: visits-service now calls a new downstream it never called before
+        # 2. Trace path change: visits-service now calls notification-service (new node/edge)
         "new-call-path": [
             {
                 "anomaly_type": "NEW_FINGERPRINT",
@@ -587,6 +609,10 @@ def _make_app(environment: str):
                 "root_op":      "api-gateway:GET /owners/{ownerId}/pets/{petId}/visits",
                 "message":      "Trace path drift — visits-service calling notification-service (new edge)",
                 "hash":         "synthetic:fp:visits-new-edge",
+                "new_edges": [
+                    {"source": "visits-service", "target": "notification-service",
+                     "label": "new call"},
+                ],
             },
         ],
         # 3. New error signature on pets-service

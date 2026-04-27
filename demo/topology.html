@@ -100,6 +100,24 @@
     stroke-width: 3;
     filter: drop-shadow(0 0 8px #BF5AF2);
   }
+  /* New/unknown node — appeared in a drift event, not in baseline */
+  .node-new circle {
+    fill: #1A1A2E;
+    stroke: #D29922;
+    stroke-width: 2;
+    stroke-dasharray: 4 3;
+    filter: drop-shadow(0 0 6px rgba(210,153,34,0.5));
+  }
+  .node-new .pulse-ring { stroke: #D29922; animation: pulse 2s infinite; }
+  /* New edge — discovered via drift */
+  .link-new {
+    stroke: #D29922;
+    stroke-opacity: 0.85;
+    stroke-width: 1.5;
+    stroke-dasharray: 6 3;
+    fill: none;
+    marker-end: url(#arrow-new);
+  }
 
   /* Pulse ring on anomalous nodes */
   .pulse-ring {
@@ -410,6 +428,10 @@
                 markerWidth="6" markerHeight="6" orient="auto">
           <path d="M0,-4L8,0L0,4" fill="#BF5AF2"/>
         </marker>
+        <marker id="arrow-new" viewBox="0 -4 8 8" refX="8" refY="0"
+                markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,-4L8,0L0,4" fill="#D29922"/>
+        </marker>
       </defs>
       <g id="links-layer"></g>
       <g id="nodes-layer"></g>
@@ -449,6 +471,7 @@
   <div class="legend-item"><div class="legend-dot ld-error"></div> Error signature</div>
   <div class="legend-item"><div class="legend-dot ld-missing" style="border-style:dashed"></div> Missing</div>
   <div class="legend-item"><div class="legend-dot ld-rootcause"></div> Root cause ★</div>
+  <div class="legend-item"><div class="legend-dot ld-drift" style="border-style:dashed"></div> New (unseen)</div>
 </div>
 
 <!-- Demo scenario bar (test-only) -->
@@ -471,6 +494,8 @@ let simulation = null;
 let nodeMap    = {};          // id -> d3 node datum
 let linkMap    = {};          // "src->dst" -> d3 link datum
 let rScale     = () => 18;   // node radius fn — updated in renderGraph()
+let newNodes   = [];          // [{id, label}] — nodes seen in drift events, not in baseline
+let newEdges   = [];          // [{source, target, label}] — edges seen in drift events
 
 // ── D3 Setup ──────────────────────────────────────────────────────────────
 const svg    = d3.select("#graph");
@@ -488,6 +513,8 @@ async function loadTopology() {
   const data = await res.json();
   topology   = data;
   active     = data.active || {};
+  newNodes   = data.new_nodes || [];
+  newEdges   = data.new_edges || [];
   document.getElementById("env-label").textContent =
     `env: ${data.environment}  |  ${data.nodes.length} services  |  ${data.edges.length} edges`;
   renderGraph();
@@ -499,7 +526,11 @@ function nodeState(id) {
   // but must still render as root cause when identified by causality traversal.
   if (id === rootCause) return "rootcause";
   const anoms = active[id] || [];
-  if (!anoms.length) return "healthy";
+  if (!anoms.length) {
+    // Node appeared via a drift event but isn't in the baseline topology
+    if (newNodes.some(n => n.id === id)) return "new";
+    return "healthy";
+  }
   const types = new Set(anoms.map(a => a.anomaly_type));
   if (types.has("MISSING_SERVICE"))     return "missing";
   if (types.has("NEW_ERROR_SIGNATURE")) return "error";
@@ -522,31 +553,49 @@ function renderGraph() {
 
   // Node radius scaled by traffic — log scale + hard cap so high-traffic nodes
   // (e.g. api-gateway, mysql:petclinic) don't dominate the layout.
+  // New (unseen) nodes get a fixed small radius since they have no traffic data.
   const maxTraffic = Math.max(...topology.nodes.map(n => n.traffic), 1);
-  rScale = d => Math.min(30, 14 + Math.log1p(d.traffic) / Math.log1p(maxTraffic) * 16);
+  rScale = d => d.traffic !== undefined
+    ? Math.min(30, 14 + Math.log1p(d.traffic) / Math.log1p(maxTraffic) * 16)
+    : 16; // fixed size for new/unseen nodes
+
+  // Merge new nodes into topology for simulation (tagged with _isNew)
+  const allNodes = [
+    ...topology.nodes,
+    ...newNodes
+      .filter(n => !topology.nodes.some(e => e.id === n.id))
+      .map(n => ({ id: n.id, traffic: undefined, _isNew: true })),
+  ];
+  const allEdges = [
+    ...topology.edges,
+    ...newEdges
+      .filter(e => !topology.edges.some(x =>
+        `${x.source}->${x.target}` === `${e.source}->${e.target}`))
+      .map(e => ({ ...e, _isNew: true, weight: 0 })),
+  ];
 
   // Build maps
   nodeMap = {};
-  topology.nodes.forEach(n => { nodeMap[n.id] = n; });
+  allNodes.forEach(n => { nodeMap[n.id] = n; });
 
   // Links
   const links = linksG.selectAll(".link")
-    .data(topology.edges, d => `${d.source}->${d.target}`);
+    .data(allEdges, d => `${d.source?.id || d.source}->${d.target?.id || d.target}`);
 
   links.enter().append("line")
-    .attr("class", d => `link link-${edgeState(d.source, d.target)}`)
+    .attr("class", d => d._isNew ? "link link-new" : `link link-${edgeState(d.source, d.target)}`)
     .each(function(d) {
-      // Tooltip shows call frequency weight
-      d3.select(this).append("title").text(`${d.source} → ${d.target}\nweight: ${d.weight}`);
+      const label = d._isNew ? `NEW: ${d.source} → ${d.target}` : `${d.source} → ${d.target}\nweight: ${d.weight}`;
+      d3.select(this).append("title").text(label);
     })
     .merge(links)
-    .attr("class", d => `link link-${edgeState(d.source, d.target)}`);
+    .attr("class", d => d._isNew ? "link link-new" : `link link-${edgeState(d.source?.id || d.source, d.target?.id || d.target)}`);
 
   links.exit().remove();
 
   // Nodes
   const nodes = nodesG.selectAll(".node")
-    .data(topology.nodes, d => d.id);
+    .data(allNodes, d => d.id);
 
   const nodeEnter = nodes.enter().append("g")
     .attr("class", d => `node node-${nodeState(d.id)}`)
@@ -600,8 +649,8 @@ function renderGraph() {
       .on("tick", ticked);
   }
 
-  simulation.nodes(topology.nodes);
-  simulation.force("link").links(topology.edges);
+  simulation.nodes(allNodes);
+  simulation.force("link").links(allEdges);
   simulation.alpha(0.3).restart();
 }
 
@@ -638,10 +687,20 @@ function dragEnd(event, d) {
 }
 
 // ── State update ──────────────────────────────────────────────────────────
-function applyState(newActive, chain) {
+function applyState(newActive, chain, incomingNewNodes, incomingNewEdges) {
   active = newActive || {};
   causalityChain = chain || [];
   rootCause = causalityChain.length ? causalityChain[0] : null;
+
+  // If new nodes/edges arrived, re-render the graph to include them
+  const hadNew = newNodes.length > 0 || newEdges.length > 0;
+  if (incomingNewNodes !== undefined) newNodes = incomingNewNodes;
+  if (incomingNewEdges !== undefined) newEdges = incomingNewEdges;
+  const hasNew = newNodes.length > 0 || newEdges.length > 0;
+  if (hasNew !== hadNew || incomingNewNodes?.length || incomingNewEdges?.length) {
+    renderGraph();
+    return; // renderGraph calls updatePanel via simulation tick; also update classes below
+  }
 
   // Update node classes
   nodesG.selectAll(".node")
@@ -769,11 +828,11 @@ function connectSSE() {
     const msg = JSON.parse(e.data);
     if (msg.type === "drift") {
       addLogEntry(msg.event);
-      applyState(msg.active, msg.causality_chain);
+      applyState(msg.active, msg.causality_chain, msg.new_nodes, msg.new_edges);
     } else if (msg.type === "state") {
-      applyState(msg.active, causalityChain);
+      applyState(msg.active, causalityChain, msg.new_nodes, msg.new_edges);
     } else if (msg.type === "recovered") {
-      applyState({}, []);
+      applyState({}, [], [], []);
       flashRecovery(msg.message);
     }
   };
@@ -809,7 +868,10 @@ async function clearAnomalies() {
   active = {};
   causalityChain = [];
   rootCause = null;
-  applyState({}, []);
+  newNodes = [];
+  newEdges = [];
+  renderGraph();
+  updatePanel();
   document.getElementById("log-entries").innerHTML = "";
 }
 
