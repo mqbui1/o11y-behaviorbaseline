@@ -200,8 +200,16 @@ def _find_root_cause(topology: dict,
         if callers_hit > 1:
             candidates["mysql:petclinic"] = callers_hit
 
-    # Pick candidate with most affected callers (shared dep = highest confidence)
-    root_cause = max(candidates, key=lambda k: candidates[k])
+    # MISSING_SERVICE anomalies are stronger root cause signals than ERROR/DRIFT —
+    # a missing service causes downstream errors, not the other way around.
+    # Give MISSING candidates a large bonus so they win ties against erroring callers.
+    def _candidate_score(svc: str) -> tuple:
+        has_missing = any(a.get("anomaly_type") == "MISSING_SERVICE"
+                          for a in active.get(svc, []))
+        return (1 if has_missing else 0, candidates[svc])
+
+    # Pick candidate with highest score (missing > error, then most callers affected)
+    root_cause = max(candidates, key=_candidate_score)
 
     # Build chain: root_cause → services that call it (affected) → their callers
     chain = [root_cause]
@@ -351,17 +359,18 @@ async def _tail_otel_logs(environment: str) -> None:
             global _last_drift_time
             _last_drift_time = now
             _active_anomalies[svc].append(event)
-            # For MISSING_SERVICE, also mark the caller (root_op service) as DRIFT
-            # (not MISSING) — it's still running but its dependency is gone.
+            # For MISSING_SERVICE, also mark the caller as DRIFT — but only if it
+            # has no own anomaly yet (don't overwrite ERROR with a weaker DRIFT signal).
             if atype == "MISSING_SERVICE":
                 caller = event.get("root_op", "").split(":")[0]
                 if caller and caller != svc and caller not in _INFRA:
-                    caller_event = dict(event,
-                        service=caller,
-                        anomaly_type="NEW_FINGERPRINT",
-                        message=f"Trace path changed — {svc} no longer reachable from {caller}",
-                    )
-                    _active_anomalies[caller].append(caller_event)
+                    if not _active_anomalies[caller]:
+                        caller_event = dict(event,
+                            service=caller,
+                            anomaly_type="NEW_FINGERPRINT",
+                            message=f"Trace path changed — {svc} no longer reachable from {caller}",
+                        )
+                        _active_anomalies[caller].append(caller_event)
 
             # Build causality chain
             chain = _find_root_cause(_topology_cache, _active_anomalies)
@@ -516,14 +525,15 @@ def _make_app(environment: str):
         if atype == "MISSING_SERVICE":
             caller = event.get("root_op", "").split(":")[0]
             if caller and caller != svc and caller not in _INFRA:
-                # Caller gets TRACE DRIFT (not MISSING) — it's still running but
-                # its dependency is gone, so its trace path changed.
-                caller_event = dict(event,
-                    service=caller,
-                    anomaly_type="NEW_FINGERPRINT",
-                    message=f"Trace path changed — {svc} no longer reachable from {caller}",
-                )
-                _active_anomalies[caller].append(caller_event)
+                # Only inject a DRIFT marker on the caller if it has no own anomaly yet.
+                # If the caller already has ERROR/MISSING events, those tell the story better.
+                if not _active_anomalies[caller]:
+                    caller_event = dict(event,
+                        service=caller,
+                        anomaly_type="NEW_FINGERPRINT",
+                        message=f"Trace path changed — {svc} no longer reachable from {caller}",
+                    )
+                    _active_anomalies[caller].append(caller_event)
         # If the affected service isn't in the baseline topology, surface it as a new node
         # so it renders on the graph rather than being invisible.
         baseline_svcs = {n["id"] for n in _topology_cache.get("nodes", [])}
