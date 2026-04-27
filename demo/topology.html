@@ -544,10 +544,10 @@ function edgeState(src, dst) {
   // In causality chain path?
   const idx = causalityChain.indexOf(src);
   if (idx >= 0 && causalityChain[idx + 1] === dst) return "chain";
-  // Either endpoint is root cause (synthetic node like mysql:petclinic)?
-  if (src === rootCause || dst === rootCause) return "affected";
-  // Either endpoint has active anomalies?
-  if ((active[src] || []).length || (active[dst] || []).length) return "affected";
+  // Both endpoints affected → propagation path
+  const srcAffected = (active[src] || []).length > 0 || src === rootCause;
+  const dstAffected = (active[dst] || []).length > 0 || dst === rootCause;
+  if (srcAffected && dstAffected) return "affected";
   return "normal";
 }
 
