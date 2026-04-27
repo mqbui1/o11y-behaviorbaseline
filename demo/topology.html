@@ -687,6 +687,26 @@ function dragEnd(event, d) {
 }
 
 // ── State update ──────────────────────────────────────────────────────────
+function updateBadge() {
+  const anyActive = Object.values(active).some(v => v.length > 0);
+  const badge = document.getElementById("status-badge");
+  if (!anyActive) {
+    badge.className = "status-badge status-ok";
+    badge.textContent = "● STEADY STATE";
+  } else {
+    const allAnoms = Object.values(active).flat();
+    const hasError   = allAnoms.some(a => a.anomaly_type === "NEW_ERROR_SIGNATURE");
+    const hasMissing = allAnoms.some(a => a.anomaly_type === "MISSING_SERVICE");
+    if (hasError || hasMissing) {
+      badge.className = "status-badge status-error";
+      badge.textContent = "● INCIDENT DETECTED";
+    } else {
+      badge.className = "status-badge status-warning";
+      badge.textContent = "⚠ DRIFT DETECTED";
+    }
+  }
+}
+
 function applyState(newActive, chain, incomingNewNodes, incomingNewEdges) {
   active = newActive || {};
   causalityChain = chain || [];
@@ -699,7 +719,17 @@ function applyState(newActive, chain, incomingNewNodes, incomingNewEdges) {
   const hasNew = newNodes.length > 0 || newEdges.length > 0;
   if (hasNew !== hadNew || incomingNewNodes?.length || incomingNewEdges?.length) {
     renderGraph();
-    return; // renderGraph calls updatePanel via simulation tick; also update classes below
+    // renderGraph re-binds data but doesn't re-apply anomaly classes to existing nodes
+    nodesG.selectAll(".node").attr("class", d => `node node-${nodeState(d.id)}`);
+    linksG.selectAll(".link").attr("class", d => {
+      if (d._isNew) return "link link-new";
+      const src = typeof d.source === "object" ? d.source.id : d.source;
+      const dst = typeof d.target === "object" ? d.target.id : d.target;
+      return `link link-${edgeState(src, dst)}`;
+    });
+    updatePanel();
+    updateBadge();
+    return;
   }
 
   // Update node classes
@@ -714,23 +744,7 @@ function applyState(newActive, chain, incomingNewNodes, incomingNewEdges) {
       return `link link-${edgeState(src, dst)}`;
     });
 
-  // Header badge
-  const anyActive = Object.values(active).some(v => v.length > 0);
-  const badge = document.getElementById("status-badge");
-  if (!anyActive) {
-    badge.className = "status-badge status-ok";
-    badge.textContent = "● STEADY STATE";
-  } else {
-    const hasError   = Object.values(active).flat().some(a => a.anomaly_type === "NEW_ERROR_SIGNATURE");
-    const hasMissing = Object.values(active).flat().some(a => a.anomaly_type === "MISSING_SERVICE");
-    if (hasError || hasMissing) {
-      badge.className = "status-badge status-error";
-      badge.textContent = "● INCIDENT DETECTED";
-    } else {
-      badge.className = "status-badge status-warning";
-      badge.textContent = "⚠ DRIFT DETECTED";
-    }
-  }
+  updateBadge();
 
   updatePanel();
 }
