@@ -477,11 +477,11 @@
 <!-- Demo scenario bar (test-only) -->
 <div id="demo-bar">
   <span class="demo-label">Simulate →</span>
-  <button class="btn-scenario" onclick="runScenario('kill-service')"   title="vets-service killed — goes missing from traces">1 Kill service</button>
-  <button class="btn-scenario" onclick="runScenario('new-call-path')"  title="visits-service starts calling a new downstream service">2 New call path</button>
-  <button class="btn-scenario" onclick="runScenario('new-error')"      title="pets-service throws a new error signature">3 New error sig</button>
-  <button class="btn-scenario" onclick="runScenario('db-dropped')"     title="visits-service stops calling mysql:petclinic — DB gone silent">4 DB gone silent</button>
-  <button class="btn-scenario" onclick="runScenario('db-incident')"    title="DB down — multiple services get JDBC errors simultaneously">5 DB incident (multi)</button>
+  <button class="btn-scenario" onclick="runScenario('kill-service')"   title="vets-service killed — goes missing from traces">Service killed</button>
+  <button class="btn-scenario" onclick="runScenario('new-call-path')"  title="visits-service starts calling a new downstream service">New call path</button>
+  <button class="btn-scenario" onclick="runScenario('new-error')"      title="visits-service throws a new error signature">New error signature</button>
+  <button class="btn-scenario" onclick="runScenario('db-dropped')"     title="visits-service stops calling mysql:petclinic — DB gone silent">DB gone silent</button>
+  <button class="btn-scenario" onclick="runScenario('db-incident')"    title="DB down — multiple services get JDBC errors simultaneously">DB down (multi-service)</button>
 </div>
 
 <script>
