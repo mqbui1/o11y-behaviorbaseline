@@ -810,6 +810,7 @@ async function clearAnomalies() {
   causalityChain = [];
   rootCause = null;
   applyState({}, []);
+  document.getElementById("log-entries").innerHTML = "";
 }
 
 // ── Demo scenarios ────────────────────────────────────────────────────────
