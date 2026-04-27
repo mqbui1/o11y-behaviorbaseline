@@ -644,7 +644,7 @@ def _make_app(environment: str):
             {
                 "anomaly_type":     "MISSING_SERVICE",
                 "service":          "mysql:petclinic",
-                "root_op":          "api-gateway:POST /owners/{ownerId}/pets/{petId}/visits",
+                "root_op":          "visits-service:POST /owners/{ownerId}/pets/{petId}/visits",
                 "missing_services": ["mysql:petclinic"],
                 "message":          "MISSING_SERVICE: mysql:petclinic absent — visits-service no longer writes to DB",
                 "hash":             "synthetic:missing:mysql-petclinic-visits",
