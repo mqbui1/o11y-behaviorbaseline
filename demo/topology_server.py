@@ -177,7 +177,7 @@ def _find_root_cause(topology: dict,
         for dep in downstream.get(svc, []):
             if dep in _INFRA:
                 continue
-            if dep in affected or dep == "mysql:petclinic":
+            if dep in affected:
                 deeper = _find_deepest(dep, visited)
                 return deeper
         return svc
@@ -189,10 +189,13 @@ def _find_root_cause(topology: dict,
         callers_hit = sum(1 for c in upstream.get(root, []) if c in affected)
         candidates[root] = max(candidates.get(root, 0), callers_hit)
 
-    # Also consider mysql:petclinic as root cause if any affected service calls it
-    for svc in affected:
-        if "mysql:petclinic" in downstream.get(svc, []):
-            candidates["mysql:petclinic"] = candidates.get("mysql:petclinic", 0) + 1
+    # mysql:petclinic as root cause only if it has its OWN anomalies AND multiple
+    # affected services call it (shared dep = high confidence DB is the cause)
+    if "mysql:petclinic" in affected:
+        callers_hit = sum(1 for svc in affected
+                         if "mysql:petclinic" in downstream.get(svc, []))
+        if callers_hit > 1:
+            candidates["mysql:petclinic"] = callers_hit
 
     # Pick candidate with most affected callers (shared dep = highest confidence)
     root_cause = max(candidates, key=lambda k: candidates[k])
@@ -611,6 +614,16 @@ def _make_app(environment: str):
         ],
         # Full incident: DB down → multiple callers affected
         "db-incident": [
+            # First fire mysql:petclinic as MISSING so it enters `affected` and
+            # the causality algorithm can identify it as the shared root cause.
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "mysql:petclinic",
+                "root_op":          "api-gateway:GET /owners",
+                "missing_services": ["mysql:petclinic"],
+                "message":          "MISSING_SERVICE: mysql:petclinic unreachable — DB down",
+                "hash":             "synthetic:missing:mysql-petclinic",
+            },
             {
                 "anomaly_type": "NEW_ERROR_SIGNATURE",
                 "service":      "visits-service",
