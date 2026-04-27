@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -74,6 +75,52 @@ _baseline_cache: dict = {}
 # New nodes/edges discovered via drift events (not in baseline)
 _new_nodes: dict[str, dict] = {}   # id -> {id, label}
 _new_edges: list[dict] = []        # [{source, target, label}]
+
+# ── Problem records ────────────────────────────────────────────────────────────
+# Keyed by problem_id (e.g. "P-1746123456").  Each record:
+#   id, opened_ms, closed_ms|None, root_cause, services, events[]
+_problems: dict[str, dict] = {}
+_current_problem_id: str | None = None  # open problem, if any
+
+
+def _next_problem_id() -> str:
+    """Generate a short, human-readable problem ID."""
+    suffix = "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=4))
+    return f"P-{suffix}"
+
+
+def _open_problem(root_cause: str, services: list[str], event: dict) -> str:
+    """Open a new problem record and return its ID."""
+    global _current_problem_id
+    pid = _next_problem_id()
+    _problems[pid] = {
+        "id":         pid,
+        "opened_ms":  event["timestamp_ms"],
+        "closed_ms":  None,
+        "root_cause": root_cause,
+        "services":   list(services),
+        "events":     [event],
+    }
+    _current_problem_id = pid
+    return pid
+
+
+def _update_problem(pid: str, root_cause: str, services: list[str], event: dict) -> None:
+    """Merge new info into an open problem."""
+    p = _problems[pid]
+    p["root_cause"] = root_cause
+    p["events"].append(event)
+    for svc in services:
+        if svc not in p["services"]:
+            p["services"].append(svc)
+
+
+def _close_problem(pid: str, closed_ms: int) -> None:
+    global _current_problem_id
+    if pid in _problems:
+        _problems[pid]["closed_ms"] = closed_ms
+    if _current_problem_id == pid:
+        _current_problem_id = None
 
 
 # ── Baseline / topology helpers ───────────────────────────────────────────────
@@ -374,6 +421,16 @@ async def _tail_otel_logs(environment: str) -> None:
 
             # Build causality chain
             chain = _find_root_cause(_topology_cache, _active_anomalies)
+            root_cause = chain[0] if chain else svc
+            affected_svcs = [s for s, v in _active_anomalies.items() if v]
+
+            # Problem lifecycle
+            if _current_problem_id is None:
+                pid = _open_problem(root_cause, affected_svcs, event)
+            else:
+                pid = _current_problem_id
+                _update_problem(pid, root_cause, affected_svcs, event)
+            event["problem_id"] = pid
 
             # Build broadcast payload
             payload = {
@@ -381,8 +438,9 @@ async def _tail_otel_logs(environment: str) -> None:
                 "event":          event,
                 "active":         {k: v for k, v in _active_anomalies.items() if v},
                 "causality_chain": chain,
-                "root_cause":     chain[0] if chain else svc,
+                "root_cause":     root_cause,
                 "timestamp_ms":   int(now * 1000),
+                "problem":        _problems[pid],
             }
 
             # Broadcast to all SSE subscribers
@@ -424,6 +482,9 @@ async def _expire_anomalies() -> None:
             _recovered_announced = True
             global _recovery_time
             _recovery_time = now
+            closed_ms = int(now * 1000)
+            if _current_problem_id:
+                _close_problem(_current_problem_id, closed_ms)
             payload = {
                 "type":   "recovered",
                 "active": {},
@@ -493,6 +554,7 @@ def _make_app(environment: str):
 
     @app.get("/api/topology")
     async def _get_topology():
+        cur = _problems.get(_current_problem_id) if _current_problem_id else None
         return JSONResponse({
             "environment": environment,
             "nodes":       _topology_cache.get("nodes", []),
@@ -500,6 +562,7 @@ def _make_app(environment: str):
             "active":      {k: v for k, v in _active_anomalies.items() if v},
             "new_nodes":   list(_new_nodes.values()),
             "new_edges":   list(_new_edges),
+            "problem":     cur,
         })
 
     @app.get("/api/clear")
@@ -508,13 +571,20 @@ def _make_app(environment: str):
         _active_anomalies.clear()
         _new_nodes.clear()
         _new_edges.clear()
-        payload = {"type": "state", "active": {}, "new_nodes": [], "new_edges": []}
+        # Close any open problem
+        if _current_problem_id:
+            _close_problem(_current_problem_id, int(time.time() * 1000))
+        payload = {"type": "state", "active": {}, "new_nodes": [], "new_edges": [], "problem": None}
         for q in _subscribers:
             try:
                 q.put_nowait(payload)
             except asyncio.QueueFull:
                 pass
         return JSONResponse({"ok": True})
+
+    @app.get("/api/problems")
+    async def _get_problems():
+        return JSONResponse({"problems": list(_problems.values())})
 
     def _broadcast_event(event: dict) -> None:
         """Insert a synthetic event into the active state and broadcast to SSE subscribers."""
@@ -557,15 +627,27 @@ def _make_app(environment: str):
                     _new_edges.append({"source": src, "target": dst,
                                        "label": edge.get("label", "")})
         chain = _find_root_cause(_topology_cache, _active_anomalies)
+        root_cause = chain[0] if chain else svc
+        affected_svcs = [s for s, v in _active_anomalies.items() if v]
+
+        # ── Problem lifecycle ──────────────────────────────────────────────────
+        if _current_problem_id is None:
+            pid = _open_problem(root_cause, affected_svcs, event)
+        else:
+            pid = _current_problem_id
+            _update_problem(pid, root_cause, affected_svcs, event)
+        event["problem_id"] = pid
+
         payload = {
             "type":            "drift",
             "event":           event,
             "active":          {k: v for k, v in _active_anomalies.items() if v},
             "causality_chain": chain,
-            "root_cause":      chain[0] if chain else svc,
+            "root_cause":      root_cause,
             "timestamp_ms":    event["timestamp_ms"],
             "new_nodes":       list(_new_nodes.values()),
             "new_edges":       list(_new_edges),
+            "problem":         _problems[pid],
         }
         dead = []
         for q in _subscribers:
@@ -771,9 +853,11 @@ def _make_app(environment: str):
         async def _stream() -> AsyncGenerator[bytes, None]:
             try:
                 # Send current state immediately on connect
+                cur = _problems.get(_current_problem_id) if _current_problem_id else None
                 snapshot = {
-                    "type":   "state",
-                    "active": {k: v for k, v in _active_anomalies.items() if v},
+                    "type":    "state",
+                    "active":  {k: v for k, v in _active_anomalies.items() if v},
+                    "problem": cur,
                 }
                 yield f"data: {json.dumps(snapshot)}\n\n".encode()
                 while True:
