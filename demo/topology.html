@@ -580,7 +580,11 @@ function renderGraph() {
 
   // Links
   const links = linksG.selectAll(".link")
-    .data(allEdges, d => `${d.source?.id || d.source}->${d.target?.id || d.target}`);
+    .data(allEdges, d => {
+      const s = typeof d.source === "object" ? d.source.id : d.source;
+      const t = typeof d.target === "object" ? d.target.id : d.target;
+      return `${s}->${t}`;
+    });
 
   links.enter().append("line")
     .attr("class", d => d._isNew ? "link link-new" : `link link-${edgeState(d.source, d.target)}`)
@@ -656,15 +660,18 @@ function renderGraph() {
 
 function ticked() {
   linksG.selectAll(".link").each(function(d) {
-    const src = nodeMap[d.source] || nodeMap[d.source.id] || {};
-    const tgt = nodeMap[d.target] || nodeMap[d.target.id] || {};
+    // After simulation runs, d.source/d.target are mutated to node objects.
+    // Before that (first render), they may still be string IDs — handle both.
+    const src = (typeof d.source === "object" ? d.source : null)
+             || nodeMap[d.source] || {};
+    const tgt = (typeof d.target === "object" ? d.target : null)
+             || nodeMap[d.target] || {};
     const x1 = src.x || 0, y1 = src.y || 0;
     const x2 = tgt.x || 0, y2 = tgt.y || 0;
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.sqrt(dx * dx + dy * dy) || 1;
-    // Trim endpoints to node radii so arrows sit on node edges, not inside
-    const r1 = src.traffic !== undefined ? rScale(src) : 18;
-    const r2 = (tgt.traffic !== undefined ? rScale(tgt) : 18) + 4; // +4 for arrowhead
+    const r1 = rScale(src);
+    const r2 = rScale(tgt) + 4; // +4 for arrowhead clearance
     d3.select(this)
       .attr("x1", x1 + dx / len * r1)
       .attr("y1", y1 + dy / len * r1)
