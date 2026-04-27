@@ -627,16 +627,16 @@ def _make_app(environment: str):
                 ],
             },
         ],
-        # 3. New error signature on pets-service
+        # 3. New error signature on visits-service
         "new-error": [
             {
                 "anomaly_type": "NEW_ERROR_SIGNATURE",
-                "service":      "pets-service",
-                "root_op":      "api-gateway:POST /owners/{ownerId}/pets",
+                "service":      "visits-service",
+                "root_op":      "api-gateway:POST /owners/{ownerId}/pets/{petId}/visits",
                 "error_type":   "DataAccessException",
-                "operation":    "POST /owners/{ownerId}/pets",
-                "message":      "New error: DataAccessException on POST /owners/{ownerId}/pets",
-                "hash":         "synthetic:err:pets-DataAccessException",
+                "operation":    "POST /owners/{ownerId}/pets/{petId}/visits",
+                "message":      "New error: DataAccessException on POST /owners/{ownerId}/pets/{petId}/visits",
+                "hash":         "synthetic:err:visits-DataAccessException",
             },
         ],
         # 4. DB caller no longer calls the DB (visits-service stops reaching mysql:petclinic)
@@ -673,12 +673,12 @@ def _make_app(environment: str):
             },
             {
                 "anomaly_type": "NEW_ERROR_SIGNATURE",
-                "service":      "pets-service",
-                "root_op":      "api-gateway:GET /owners/{ownerId}/pets",
+                "service":      "vets-service",
+                "root_op":      "api-gateway:GET /vets",
                 "error_type":   "CannotGetJdbcConnectionException",
-                "operation":    "SELECT pets",
-                "message":      "New error: CannotGetJdbcConnectionException on SELECT pets",
-                "hash":         "synthetic:err:pets-jdbc",
+                "operation":    "SELECT vets",
+                "message":      "New error: CannotGetJdbcConnectionException on SELECT vets",
+                "hash":         "synthetic:err:vets-jdbc",
             },
             {
                 "anomaly_type": "NEW_ERROR_SIGNATURE",
