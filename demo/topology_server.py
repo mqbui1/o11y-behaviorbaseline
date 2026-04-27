@@ -524,6 +524,18 @@ def _make_app(environment: str):
                     message=f"Trace path changed — {svc} no longer reachable from {caller}",
                 )
                 _active_anomalies[caller].append(caller_event)
+        # If the affected service isn't in the baseline topology, surface it as a new node
+        # so it renders on the graph rather than being invisible.
+        baseline_svcs = {n["id"] for n in _topology_cache.get("nodes", [])}
+        if svc and svc not in baseline_svcs and svc not in _new_nodes:
+            _new_nodes[svc] = {"id": svc, "label": svc}
+            # Wire a new edge from its likely caller (root_op service) if known
+            caller = event.get("root_op", "").split(":")[0]
+            if caller and caller in baseline_svcs:
+                key = f"{caller}->{svc}"
+                if not any(f"{e['source']}->{e['target']}" == key for e in _new_edges):
+                    _new_edges.append({"source": caller, "target": svc, "label": ""})
+
         # Accumulate new nodes/edges from NEW_FINGERPRINT events
         for edge in event.get("new_edges", []):
             src, dst = edge.get("source", ""), edge.get("target", "")
