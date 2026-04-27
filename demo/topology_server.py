@@ -690,6 +690,40 @@ def _make_app(environment: str):
                 "hash":         "synthetic:err:customers-jdbc",
             },
         ],
+        # Cascading failure: vets-service killed → its caller (api-gateway) starts
+        # erroring → customers-service also errors (shared upstream dependency).
+        # Events fire with increasing delay to show propagation unfolding over time.
+        "cascading": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "vets-service",
+                "root_op":          "api-gateway:GET /vets",
+                "missing_services": ["vets-service"],
+                "message":          "MISSING_SERVICE: vets-service absent from traces",
+                "hash":             "synthetic:missing:vets-cascade",
+                "_delay_ms":        0,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "api-gateway",
+                "root_op":      "api-gateway:GET /vets",
+                "error_type":   "ServiceUnavailableException",
+                "operation":    "GET /vets",
+                "message":      "New error: ServiceUnavailableException on GET /vets",
+                "hash":         "synthetic:err:api-gateway-vets",
+                "_delay_ms":    2000,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "error_type":   "TimeoutException",
+                "operation":    "GET /owners",
+                "message":      "New error: TimeoutException on GET /owners — upstream pressure",
+                "hash":         "synthetic:err:customers-timeout",
+                "_delay_ms":    2000,
+            },
+        ],
     }
 
     @app.get("/api/demo/{scenario}")
@@ -705,10 +739,12 @@ def _make_app(environment: str):
 
         async def _fire():
             for ev in events:
-                full = {**ev, "timestamp_ms": int(time.time() * 1000)}
+                wait = ev.get("_delay_ms", delay_ms if len(events) > 1 else 0)
+                if wait:
+                    await asyncio.sleep(wait / 1000)
+                full = {k: v for k, v in ev.items() if not k.startswith("_")}
+                full["timestamp_ms"] = int(time.time() * 1000)
                 _broadcast_event(full)
-                if len(events) > 1:
-                    await asyncio.sleep(delay_ms / 1000)
 
         asyncio.create_task(_fire())
         return JSONResponse({"ok": True, "scenario": scenario, "events": len(events)})
