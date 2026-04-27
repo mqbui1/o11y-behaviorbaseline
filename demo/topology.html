@@ -295,7 +295,7 @@
   .log-entry .log-svc  { color: #E6EDF3; }
 
   /* Buttons */
-  #btn-clear {
+  .btn {
     background: none;
     border: 1px solid #30363D;
     color: #8B949E;
@@ -306,7 +306,40 @@
     font-family: inherit;
     transition: all 0.2s;
   }
-  #btn-clear:hover { border-color: #58A6FF; color: #58A6FF; }
+  .btn:hover { border-color: #58A6FF; color: #58A6FF; }
+  #btn-clear { }
+
+  /* Demo scenario bar */
+  #demo-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 20px;
+    background: #0D1117;
+    border-top: 1px solid #21262D;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  #demo-bar .demo-label {
+    font-size: 10px;
+    color: #484F58;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-right: 4px;
+  }
+  .btn-scenario {
+    background: #161B22;
+    border: 1px solid #30363D;
+    color: #8B949E;
+    padding: 3px 9px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+    font-family: inherit;
+    transition: all 0.2s;
+  }
+  .btn-scenario:hover  { border-color: #D29922; color: #D29922; }
+  .btn-scenario:active { background: #3A2E1C; }
 
   /* Legend */
   #legend {
@@ -353,7 +386,7 @@
     <div class="meta" id="env-label">connecting...</div>
   </div>
   <div style="display:flex;align-items:center;gap:10px;">
-    <button id="btn-clear" onclick="clearAnomalies()" title="Clear alerts (keyboard: C)">Clear alerts [C]</button>
+    <button id="btn-clear" class="btn" onclick="clearAnomalies()" title="Clear alerts (keyboard: C)">Clear alerts [C]</button>
     <div id="status-badge" class="status-ok">● STEADY STATE</div>
   </div>
 </div>
@@ -416,6 +449,16 @@
   <div class="legend-item"><div class="legend-dot ld-error"></div> Error signature</div>
   <div class="legend-item"><div class="legend-dot ld-missing" style="border-style:dashed"></div> Missing</div>
   <div class="legend-item"><div class="legend-dot ld-rootcause"></div> Root cause ★</div>
+</div>
+
+<!-- Demo scenario bar (test-only) -->
+<div id="demo-bar">
+  <span class="demo-label">Simulate →</span>
+  <button class="btn-scenario" onclick="runScenario('kill-service')"   title="vets-service killed — goes missing from traces">1 Kill service</button>
+  <button class="btn-scenario" onclick="runScenario('new-call-path')"  title="visits-service starts calling a new downstream service">2 New call path</button>
+  <button class="btn-scenario" onclick="runScenario('new-error')"      title="pets-service throws a new error signature">3 New error sig</button>
+  <button class="btn-scenario" onclick="runScenario('db-dropped')"     title="visits-service stops calling mysql:petclinic">4 DB caller drops DB</button>
+  <button class="btn-scenario" onclick="runScenario('db-incident')"    title="DB down — multiple services get JDBC errors simultaneously">5 DB incident (multi)</button>
 </div>
 
 <script>
@@ -767,6 +810,15 @@ async function clearAnomalies() {
   causalityChain = [];
   rootCause = null;
   applyState({}, []);
+}
+
+// ── Demo scenarios ────────────────────────────────────────────────────────
+async function runScenario(name) {
+  const res = await fetch(`/api/demo/${name}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    console.error("Demo scenario failed:", err);
+  }
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────
