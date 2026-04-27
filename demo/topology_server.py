@@ -492,6 +492,171 @@ def _make_app(environment: str):
                 pass
         return JSONResponse({"ok": True})
 
+    def _broadcast_event(event: dict) -> None:
+        """Insert a synthetic event into the active state and broadcast to SSE subscribers."""
+        svc   = event.get("service", "")
+        atype = event.get("anomaly_type", "")
+        _active_anomalies[svc].append(event)
+        if atype == "MISSING_SERVICE":
+            caller = event.get("root_op", "").split(":")[0]
+            if caller and caller != svc and caller not in _INFRA:
+                caller_event = dict(event, service=caller)
+                _active_anomalies[caller].append(caller_event)
+        chain = _find_root_cause(_topology_cache, _active_anomalies)
+        payload = {
+            "type":            "drift",
+            "event":           event,
+            "active":          {k: v for k, v in _active_anomalies.items() if v},
+            "causality_chain": chain,
+            "root_cause":      chain[0] if chain else svc,
+            "timestamp_ms":    event["timestamp_ms"],
+        }
+        dead = []
+        for q in _subscribers:
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            _subscribers.remove(q)
+
+    @app.post("/api/inject")
+    async def _inject(body: dict):
+        """Inject a synthetic anomaly event for testing.
+
+        Body fields:
+          anomaly_type  — MISSING_SERVICE | NEW_ERROR_SIGNATURE | NEW_FINGERPRINT
+          service       — affected service name
+          root_op       — root operation (e.g. "api-gateway:GET /owners")
+          message       — human-readable description (optional)
+          error_type    — for NEW_ERROR_SIGNATURE (optional)
+          operation     — for NEW_ERROR_SIGNATURE (optional)
+          missing_services — list of strings for MISSING_SERVICE (optional)
+        """
+        from fastapi import HTTPException
+        valid_types = {"MISSING_SERVICE", "NEW_ERROR_SIGNATURE", "NEW_FINGERPRINT"}
+        atype = body.get("anomaly_type", "")
+        if atype not in valid_types:
+            raise HTTPException(400, f"anomaly_type must be one of {valid_types}")
+        event = {
+            "anomaly_type": atype,
+            "service":      body.get("service", "unknown"),
+            "root_op":      body.get("root_op", ""),
+            "message":      body.get("message", atype),
+            "hash":         body.get("hash", f"synthetic:{atype}:{body.get('service','')}:{int(time.time())}"),
+            "timestamp_ms": int(time.time() * 1000),
+        }
+        if atype == "NEW_ERROR_SIGNATURE":
+            event["error_type"] = body.get("error_type", "Exception")
+            event["operation"]  = body.get("operation", "")
+        if atype == "MISSING_SERVICE":
+            event["missing_services"] = body.get("missing_services", [body.get("service", "")])
+        _broadcast_event(event)
+        return JSONResponse({"ok": True, "event": event})
+
+    # ── Named demo scenarios ───────────────────────────────────────────────────
+    _DEMO_SCENARIOS: dict[str, list[dict]] = {
+        # 1. Service killed: vets-service disappears from traces
+        "kill-service": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "vets-service",
+                "root_op":          "api-gateway:GET /vets",
+                "missing_services": ["vets-service"],
+                "message":          "MISSING_SERVICE: vets-service absent from traces",
+                "hash":             "synthetic:missing:vets-service",
+            },
+        ],
+        # 2. Trace path change: visits-service now calls a new downstream it never called before
+        "new-call-path": [
+            {
+                "anomaly_type": "NEW_FINGERPRINT",
+                "service":      "visits-service",
+                "root_op":      "api-gateway:GET /owners/{ownerId}/pets/{petId}/visits",
+                "message":      "Trace path drift — visits-service calling notification-service (new edge)",
+                "hash":         "synthetic:fp:visits-new-edge",
+            },
+        ],
+        # 3. New error signature on pets-service
+        "new-error": [
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "pets-service",
+                "root_op":      "api-gateway:POST /owners/{ownerId}/pets",
+                "error_type":   "DataAccessException",
+                "operation":    "POST /owners/{ownerId}/pets",
+                "message":      "New error: DataAccessException on POST /owners/{ownerId}/pets",
+                "hash":         "synthetic:err:pets-DataAccessException",
+            },
+        ],
+        # 4. DB caller no longer calls the DB (visits-service stops reaching mysql:petclinic)
+        "db-dropped": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "mysql:petclinic",
+                "root_op":          "api-gateway:POST /owners/{ownerId}/pets/{petId}/visits",
+                "missing_services": ["mysql:petclinic"],
+                "message":          "MISSING_SERVICE: mysql:petclinic absent — visits-service no longer writes to DB",
+                "hash":             "synthetic:missing:mysql-petclinic-visits",
+            },
+        ],
+        # Full incident: DB down → multiple callers affected
+        "db-incident": [
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "visits-service",
+                "root_op":      "api-gateway:POST /owners/{ownerId}/pets/{petId}/visits",
+                "error_type":   "CannotGetJdbcConnectionException",
+                "operation":    "Transaction.commit",
+                "message":      "New error: CannotGetJdbcConnectionException on Transaction.commit",
+                "hash":         "synthetic:err:visits-jdbc",
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "pets-service",
+                "root_op":      "api-gateway:GET /owners/{ownerId}/pets",
+                "error_type":   "CannotGetJdbcConnectionException",
+                "operation":    "SELECT pets",
+                "message":      "New error: CannotGetJdbcConnectionException on SELECT pets",
+                "hash":         "synthetic:err:pets-jdbc",
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "error_type":   "CannotGetJdbcConnectionException",
+                "operation":    "SELECT owners",
+                "message":      "New error: CannotGetJdbcConnectionException on SELECT owners",
+                "hash":         "synthetic:err:customers-jdbc",
+            },
+        ],
+    }
+
+    @app.get("/api/demo/{scenario}")
+    async def _demo(scenario: str, delay_ms: int = 800):
+        """Fire a named demo scenario, broadcasting events with delay_ms between them.
+
+        Scenarios: kill-service | new-call-path | new-error | db-dropped | db-incident
+        """
+        from fastapi import HTTPException
+        if scenario not in _DEMO_SCENARIOS:
+            raise HTTPException(400, f"Unknown scenario. Valid: {list(_DEMO_SCENARIOS)}")
+        events = _DEMO_SCENARIOS[scenario]
+
+        async def _fire():
+            for ev in events:
+                full = {**ev, "timestamp_ms": int(time.time() * 1000)}
+                _broadcast_event(full)
+                if len(events) > 1:
+                    await asyncio.sleep(delay_ms / 1000)
+
+        asyncio.create_task(_fire())
+        return JSONResponse({"ok": True, "scenario": scenario, "events": len(events)})
+
+    @app.get("/api/demo")
+    async def _demo_list():
+        return JSONResponse({"scenarios": list(_DEMO_SCENARIOS)})
+
     @app.get("/api/events")
     async def _sse():
         q: asyncio.Queue = asyncio.Queue(maxsize=50)
