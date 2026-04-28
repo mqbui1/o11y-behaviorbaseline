@@ -82,6 +82,12 @@ except ImportError:
     _DRIFT_EXPLAINER_AVAILABLE = False
 
 try:
+    from agents.infra_correlator import correlate_infra as _correlate_infra
+    _INFRA_AVAILABLE = True
+except ImportError:
+    _INFRA_AVAILABLE = False
+
+try:
     from agents.dedup_agent import run as _dedup_run
     _DEDUP_AVAILABLE = True
 except ImportError:
@@ -697,6 +703,15 @@ def triage_anomaly(corr: dict, traces: list[dict], dry_run: bool = False,
         except Exception as e:
             print(f"  [warn] Drift explainer: {e}", file=sys.stderr)
 
+    # ── Infra correlation: host CPU/memory vs service anomaly ─────────────────
+    if _INFRA_AVAILABLE and not dry_run:
+        try:
+            infra = _correlate_infra(corr["service"], environment, window_minutes)
+            if infra.get("prompt_block"):
+                context_parts += ["", infra["prompt_block"]]
+        except Exception as e:
+            print(f"  [warn] Infra correlator: {e}", file=sys.stderr)
+
     user_message = "\n".join(context_parts)
 
     if dry_run:
@@ -745,11 +760,75 @@ def send_to_webhook(webhook_url: str, corr: dict, summary: str) -> None:
 
 # ── Recovery detection ────────────────────────────────────────────────────────
 
+def _clear_open_incidents_for_service(service: str, environment: str | None) -> int:
+    """
+    Find and clear all active Splunk O11y detector incidents for a recovered service.
+
+    Fetches open incidents (active=true) and clears any whose detector tags or
+    incident inputs resolve to this service + environment. Returns count cleared.
+    """
+    try:
+        resp = _request("GET", "/v2/incident?active=true&limit=100")
+    except Exception as e:
+        print(f"  [warn] Could not fetch incidents for auto-close: {e}", file=sys.stderr)
+        return 0
+
+    raw = resp if isinstance(resp, list) else resp.get("results", [])
+    cleared = 0
+
+    for inc in raw:
+        inc_id   = inc.get("incidentId") or inc.get("id", "")
+        det_id   = inc.get("detectorId", "")
+        if not inc_id:
+            continue
+
+        # Resolve service from incident inputs (events[].inputs.<label>.key.sf_service)
+        inc_svc = None
+        inc_env = None
+        for ev in inc.get("events", []):
+            for _label, sig in ev.get("inputs", {}).items():
+                key = sig.get("key", {})
+                if key.get("sf_service"):
+                    inc_svc = key["sf_service"]
+                    inc_env = key.get("sf_environment")
+                    break
+            if inc_svc:
+                break
+
+        # Also check detector tags (managed detectors use svc-<name> / env-<name> tags)
+        if not inc_svc and det_id:
+            try:
+                det = _request("GET", f"/v2/detector/{det_id}")
+                for tag in (det or {}).get("tags", []):
+                    if tag.startswith("svc-"):
+                        inc_svc = tag[4:]
+                    elif tag.startswith("env-"):
+                        inc_env = tag[4:]
+            except Exception:
+                pass
+
+        if inc_svc != service:
+            continue
+        if environment and inc_env and inc_env not in (environment, "all"):
+            continue
+
+        # Clear the incident
+        try:
+            _request("POST", f"/v2/incident/{inc_id}/clear")
+            print(f"  [recovery] cleared incident {inc_id} for {service} (detector {det_id})")
+            cleared += 1
+        except Exception as e:
+            print(f"  [warn] Could not clear incident {inc_id}: {e}", file=sys.stderr)
+
+    return cleared
+
+
 def run_recovery_check(window_minutes: int, environment: str | None,
                        webhook_url: str | None) -> int:
     """
     Check for trace.path.restored events and clear suppression state for
-    any service that has recovered. Sends a recovery notification to the
+    any service that has recovered. Also auto-closes open Splunk detector
+    incidents for recovered services. Sends a recovery notification to the
     webhook if configured. Returns number of recoveries detected.
     """
     now_ms   = int(time.time() * 1000)
@@ -779,6 +858,11 @@ def run_recovery_check(window_minutes: int, environment: str | None,
         fp_hash  = dims.get("fp_hash", props.get("hash", ""))
         print(f"[recovery] {service} — trace path restored "
               f"(root_op={root_op}, hash={fp_hash[:8]})")
+
+        # Auto-close any open Splunk O11y detector incidents for this service
+        n_closed = _clear_open_incidents_for_service(service, environment)
+        if n_closed:
+            print(f"  [recovery] auto-closed {n_closed} open incident(s) for {service}")
 
         if webhook_url:
             text = (
