@@ -109,6 +109,25 @@
     filter: drop-shadow(0 0 6px rgba(210,153,34,0.5));
   }
   .node-new .pulse-ring { stroke: #D29922; animation: pulse 2s infinite; }
+
+  /* Discovered node — found via live APM topology polling */
+  .node-discovered circle {
+    fill: #0D2233;
+    stroke: #00BCEB;
+    stroke-width: 2;
+    stroke-dasharray: 4 3;
+    filter: drop-shadow(0 0 6px rgba(0,188,235,0.4));
+  }
+  .node-discovered .pulse-ring { stroke: #00BCEB; animation: pulse 2.5s infinite; }
+  /* New discovered edge */
+  .link-discovered {
+    stroke: #00BCEB;
+    stroke-opacity: 0.7;
+    stroke-width: 1.5;
+    stroke-dasharray: 6 3;
+    fill: none;
+    marker-end: url(#arrow-discovered);
+  }
   /* New edge — discovered via drift */
   .link-new {
     stroke: #D29922;
@@ -462,6 +481,10 @@
                 markerWidth="6" markerHeight="6" orient="auto">
           <path d="M0,-4L8,0L0,4" fill="#D29922"/>
         </marker>
+        <marker id="arrow-discovered" viewBox="0 -4 8 8" refX="8" refY="0"
+                markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,-4L8,0L0,4" fill="#00BCEB"/>
+        </marker>
       </defs>
       <g id="links-layer"></g>
       <g id="nodes-layer"></g>
@@ -506,6 +529,7 @@
   <div class="legend-item"><div class="legend-dot ld-missing" style="border-style:dashed"></div> Missing</div>
   <div class="legend-item"><div class="legend-dot ld-rootcause"></div> Root cause ★</div>
   <div class="legend-item"><div class="legend-dot ld-drift" style="border-style:dashed"></div> New (unseen)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#0D2233;border-color:#00BCEB;border-style:dashed"></div> Discovered (live)</div>
 </div>
 
 <!-- Demo scenario bar (test-only) -->
@@ -533,6 +557,7 @@ let newNodes   = [];          // [{id, label}] — nodes seen in drift events, n
 let newEdges   = [];          // [{source, target, label}] — edges seen in drift events
 let currentProblem = null;    // open/closed problem record from server
 let _probTimerInterval = null; // interval for live duration counter
+let _discoveredNodeIds = new Set(); // IDs added via live topology discovery (for badge)
 
 // ── D3 Setup ──────────────────────────────────────────────────────────────
 const svg    = d3.select("#graph");
@@ -563,6 +588,7 @@ function nodeState(id) {
   const anoms = active[id] || [];
   if (!anoms.length) {
     if (newNodes.some(n => n.id === id)) return "new";
+    if (_discoveredNodeIds.has(id)) return "discovered";
     return "healthy";
   }
   const types = new Set(anoms.map(a => a.anomaly_type));
@@ -586,6 +612,8 @@ function edgeState(src, dst) {
   const srcAffected = (active[src] || []).length > 0 || src === rootCause;
   const dstAffected = (active[dst] || []).length > 0 || dst === rootCause;
   if (srcAffected && dstAffected) return "affected";
+  // Discovered edge (live APM, not in baseline)
+  if (_discoveredNodeIds.has(src) || _discoveredNodeIds.has(dst)) return "discovered";
   return "normal";
 }
 
@@ -948,6 +976,47 @@ function addLogEntry(event) {
   while (logEl.children.length > 50) logEl.removeChild(logEl.lastChild);
 }
 
+// ── Live topology discovery ───────────────────────────────────────────────
+function applyTopologyUpdate(msg) {
+  const addedNodes = msg.added_nodes || [];
+  const addedEdges = msg.added_edges || [];
+  if (!addedNodes.length && !addedEdges.length) return;
+
+  // Mark newly discovered nodes for styling
+  addedNodes.forEach(n => _discoveredNodeIds.add(n.id));
+
+  // Merge into topology
+  topology.nodes = msg.nodes;
+  topology.edges = msg.edges;
+
+  // Update env label count
+  const envLabel = document.getElementById("env-label");
+  const envText  = envLabel.textContent.split("|")[0].trim();
+  envLabel.textContent = `${envText}  |  ${topology.nodes.length} services  |  ${topology.edges.length} edges`;
+
+  renderGraph();
+
+  // Log entry for each new node
+  const logEl = document.getElementById("log-entries");
+  addedNodes.forEach(n => {
+    const entry = document.createElement("div");
+    entry.className = "log-entry";
+    entry.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString()}</span> `
+      + `<span style="color:#00BCEB">● DISCOVERED</span> `
+      + `<span class="log-svc">${n.id}</span> — new service detected in live traffic`;
+    logEl.prepend(entry);
+  });
+  addedEdges.filter(e => !addedNodes.some(n => n.id === e.source || n.id === e.target))
+    .forEach(e => {
+      const entry = document.createElement("div");
+      entry.className = "log-entry";
+      entry.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString()}</span> `
+        + `<span style="color:#00BCEB">● DISCOVERED</span> `
+        + `<span class="log-svc">${e.source} → ${e.target}</span> — new call path detected`;
+      logEl.prepend(entry);
+    });
+}
+
 // ── SSE ───────────────────────────────────────────────────────────────────
 function connectSSE() {
   const es = new EventSource("/api/events");
@@ -960,6 +1029,8 @@ function connectSSE() {
     } else if (msg.type === "state") {
       applyState(msg.active, causalityChain, msg.new_nodes, msg.new_edges);
       if (msg.problem !== undefined) applyProblem(msg.problem);
+    } else if (msg.type === "topology_update") {
+      applyTopologyUpdate(msg);
     } else if (msg.type === "recovered") {
       applyState({}, [], [], []);
       flashRecovery(msg.message);

@@ -199,6 +199,54 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
     }
 
 
+def _load_topology_json(environment: str) -> dict:
+    """
+    Load topology.json written by the OTel fingerprintprocessor.
+    Returns edges as {caller->callee: {caller, callee, first_seen, count}}.
+    Falls back to {} if file doesn't exist.
+    """
+    path = _DATA_DIR / f"topology.{environment}.json"
+    if not path.exists():
+        # Also check the generic topology.json (written by the processor to /baseline/)
+        path = _DATA_DIR / "topology.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return data.get("edges", {})
+    except Exception:
+        return {}
+
+
+def _topology_edges_to_graph(edges: dict, baseline_topo: dict) -> dict:
+    """
+    Merge OTel-discovered edges into a topology dict.
+    Returns {added_nodes, added_edges} relative to baseline_topo.
+    """
+    existing_ids  = {n["id"] for n in baseline_topo.get("nodes", [])}
+    existing_keys = {f"{e['source']}->{e['target']}" for e in baseline_topo.get("edges", [])}
+
+    added_nodes: list[dict] = []
+    added_edges: list[dict] = []
+    seen_new_ids: set[str]  = set()
+
+    for key, edge in edges.items():
+        caller = edge.get("caller", "")
+        callee = edge.get("callee", "")
+        if not caller or not callee:
+            continue
+        if caller in _INFRA or callee in _INFRA:
+            continue
+        if key not in existing_keys:
+            added_edges.append({"source": caller, "target": callee, "weight": edge.get("count", 1)})
+        for svc in (caller, callee):
+            if svc not in existing_ids and svc not in seen_new_ids:
+                added_nodes.append({"id": svc, "traffic": 0})
+                seen_new_ids.add(svc)
+
+    return {"added_nodes": added_nodes, "added_edges": added_edges}
+
+
 def _find_root_cause(topology: dict,
                      active: dict[str, list[dict]]) -> list[str]:
     """
@@ -458,6 +506,144 @@ async def _tail_otel_logs(environment: str) -> None:
         await asyncio.sleep(RECONNECT_DELAY)
 
 
+def _merge_topology_edges(added_nodes: list[dict], added_edges: list[dict]) -> None:
+    """Merge newly discovered nodes/edges into _topology_cache in-place."""
+    global _topology_cache
+    existing_ids  = {n["id"] for n in _topology_cache.get("nodes", [])}
+    existing_keys = {f"{e['source']}->{e['target']}" for e in _topology_cache.get("edges", [])}
+    for n in added_nodes:
+        if n["id"] not in existing_ids:
+            _topology_cache["nodes"].append(n)
+            existing_ids.add(n["id"])
+    for e in added_edges:
+        key = f"{e['source']}->{e['target']}"
+        if key not in existing_keys:
+            _topology_cache["edges"].append(e)
+    # Rebuild upstream/downstream
+    up: dict[str, list] = {}
+    dn: dict[str, list] = {}
+    for e in _topology_cache.get("edges", []):
+        s, d = e["source"], e["target"]
+        dn.setdefault(s, [])
+        up.setdefault(d, [])
+        if d not in dn[s]:
+            dn[s].append(d)
+        if s not in up[d]:
+            up[d].append(s)
+    _topology_cache["upstream"]   = up
+    _topology_cache["downstream"] = dn
+
+
+def _broadcast_topology_update(added_nodes: list[dict], added_edges: list[dict]) -> None:
+    payload = {
+        "type":        "topology_update",
+        "nodes":       _topology_cache.get("nodes", []),
+        "edges":       _topology_cache.get("edges", []),
+        "added_nodes": added_nodes,
+        "added_edges": added_edges,
+    }
+    dead = []
+    for q in _subscribers:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        _subscribers.remove(q)
+
+
+async def _tail_topology_events(environment: str) -> None:
+    """Background task: poll topology.json from all OTel collector pods via SSH.
+
+    The OTel fingerprintprocessor writes topology.json to /baseline/ on each pod.
+    This coroutine polls all pods every 15s, merges any new edges into the live
+    topology cache, and broadcasts topology_update to connected browser clients.
+    """
+    POLL_INTERVAL = 15  # seconds between polls
+
+    while True:
+        await asyncio.sleep(POLL_INTERVAL)
+        try:
+            # Fetch topology.json from all pods in parallel via a single SSH command
+            ssh_cmd = (
+                "exec bash -c '"
+                f"for p in $(kubectl get pods -l {DAEMONSET_LABEL}"
+                " -o jsonpath=\"{.items[*].metadata.name}\");"
+                " do kubectl exec $p -c otelcol -- cat /baseline/topology.json 2>/dev/null"
+                " && echo \"---EOF---\"; done'"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                "sshpass", f"-p{EC2_PASS}",
+                "ssh", "-T", "-p", EC2_PORT,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "RequestTTY=no",
+                f"splunk@{EC2_IP}",
+                ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+            output = stdout.decode("utf-8", errors="replace")
+
+            # Split by pod delimiter and parse each topology.json
+            all_edges: dict[str, dict] = {}
+            for chunk in output.split("---EOF---"):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                try:
+                    data = json.loads(chunk)
+                    for key, edge in data.get("edges", {}).items():
+                        if key not in all_edges:
+                            all_edges[key] = edge
+                        else:
+                            # Merge: take higher count
+                            if edge.get("count", 0) > all_edges[key].get("count", 0):
+                                all_edges[key] = edge
+                except Exception:
+                    continue
+
+            if not all_edges:
+                continue
+
+            # Find edges not yet in the topology cache
+            existing_keys = {
+                f"{e['source']}->{e['target']}"
+                for e in _topology_cache.get("edges", [])
+            }
+            existing_ids = {n["id"] for n in _topology_cache.get("nodes", [])}
+
+            added_nodes: list[dict] = []
+            added_edges: list[dict] = []
+            seen_new_ids: set[str] = set()
+
+            for key, edge in all_edges.items():
+                caller = edge.get("caller", "")
+                callee = edge.get("callee", "")
+                if not caller or not callee:
+                    continue
+                if caller in _INFRA or callee in _INFRA:
+                    continue
+                edge_key = f"{caller}->{callee}"
+                if edge_key not in existing_keys:
+                    added_edges.append({"source": caller, "target": callee,
+                                        "weight": edge.get("count", 1)})
+                    print(f"[topology] discovered edge: {caller} → {callee}", flush=True)
+                for svc in (caller, callee):
+                    if svc not in existing_ids and svc not in seen_new_ids:
+                        added_nodes.append({"id": svc, "traffic": 0})
+                        seen_new_ids.add(svc)
+
+            if added_nodes or added_edges:
+                _merge_topology_edges(added_nodes, added_edges)
+                _broadcast_topology_update(added_nodes, added_edges)
+
+        except asyncio.TimeoutError:
+            print("[topology] SSH poll timed out", flush=True)
+        except Exception as e:
+            print(f"[topology] poll error: {e}", flush=True)
+
+
 async def _expire_anomalies() -> None:
     """Background task: recovery detection + hard TTL expiry.
 
@@ -545,8 +731,19 @@ def _make_app(environment: str):
         print(f"[topology] baseline: {len(fps)} fingerprints, "
               f"{len(_topology_cache['nodes'])} nodes, "
               f"{len(_topology_cache['edges'])} edges")
+        # Merge any OTel-discovered topology edges from topology.json on disk
+        topo_edges = _load_topology_json(environment)
+        if topo_edges:
+            result = _topology_edges_to_graph(topo_edges, _topology_cache)
+            if result["added_nodes"] or result["added_edges"]:
+                _merge_topology_edges(result["added_nodes"], result["added_edges"])
+                print(f"[topology] loaded topology.json: "
+                      f"+{len(result['added_nodes'])} nodes, "
+                      f"+{len(result['added_edges'])} edges from OTel processor", flush=True)
+
         asyncio.create_task(_tail_otel_logs(environment))
         asyncio.create_task(_expire_anomalies())
+        asyncio.create_task(_tail_topology_events(environment))
 
     @app.get("/", response_class=HTMLResponse)
     async def _index():
