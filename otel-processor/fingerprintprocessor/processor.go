@@ -24,6 +24,7 @@ type fingerprintProcessor struct {
 	next        consumer.Traces
 	baseline    *baselineStore
 	emitter     *emitter
+	topology    *topologyTracker
 
 	mu      sync.Mutex
 	buffers map[string]*traceBuffer // traceId -> buffer
@@ -56,12 +57,14 @@ type fingerprintProcessor struct {
 }
 
 func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Traces) (*fingerprintProcessor, error) {
+	emit := newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken)
 	p := &fingerprintProcessor{
 		logger:         logger,
 		cfg:            cfg,
 		next:           next,
 		baseline:       newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
-		emitter:        newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken),
+		emitter:        emit,
+		topology:       newTopologyTracker(cfg.BaselinePath, cfg.Environment, emit),
 		buffers:        make(map[string]*traceBuffer),
 		seenCounts:     make(map[string]int),
 		activeDrifts:   make(map[string]string),
@@ -81,6 +84,10 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 			zap.Duration("warmup_duration", cfg.WarmupDuration),
 		)
 	}
+	p.logger.Info("topology tracker initialized",
+		zap.String("path", p.topology.path),
+		zap.Int("loaded_edges", p.topology.edgeCount()),
+	)
 	return p, nil
 }
 
@@ -312,6 +319,7 @@ func (p *fingerprintProcessor) checkMissingServices() {
 // correctly. The Python correlate.py layer sees the full trace from the APM
 // backend and performs MISSING_SERVICE detection reliably (~1-5 min latency).
 func (p *fingerprintProcessor) analyzeTrace(buf *traceBuffer) {
+	p.topology.observe(buf.spans)
 	p.analyzeTraceStructure(buf)
 	p.analyzeErrorSignatures(buf)
 }

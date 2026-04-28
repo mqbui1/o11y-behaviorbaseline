@@ -161,6 +161,26 @@ func (e *emitter) emitErrorRateSpike(env string, sig errorSignature, ratePerMin,
 	})
 }
 
+func (e *emitter) emitTopologyEdge(env string, edge topologyEdge) error {
+	return e.send(splunkEvent{
+		EventType: "service.topology.edge",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"caller":         edge.Caller,
+			"callee":         edge.Callee,
+		},
+		Properties: map[string]string{
+			"caller":      edge.Caller,
+			"callee":      edge.Callee,
+			"first_seen":  fmt.Sprintf("%d", edge.FirstSeen.UnixMilli()),
+			"detector":    "otel-collector-edge",
+			"environment": env,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func (e *emitter) emitPromotion(env, hash, rootOp, kind string, detections int) error {
 	return e.send(splunkEvent{
 		EventType: "trace.fingerprint.promoted",
