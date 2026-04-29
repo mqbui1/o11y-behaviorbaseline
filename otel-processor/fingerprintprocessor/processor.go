@@ -25,6 +25,7 @@ type fingerprintProcessor struct {
 	baseline    *baselineStore
 	emitter     *emitter
 	topology    *topologyTracker
+	metrics     *metricsTracker
 
 	mu      sync.Mutex
 	buffers map[string]*traceBuffer // traceId -> buffer
@@ -65,6 +66,7 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		baseline:       newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
 		emitter:        emit,
 		topology:       newTopologyTracker(cfg.BaselinePath, cfg.Environment, emit),
+		metrics:        newMetricsTracker(cfg, emit),
 		buffers:        make(map[string]*traceBuffer),
 		seenCounts:     make(map[string]int),
 		activeDrifts:   make(map[string]string),
@@ -320,6 +322,7 @@ func (p *fingerprintProcessor) checkMissingServices() {
 // backend and performs MISSING_SERVICE detection reliably (~1-5 min latency).
 func (p *fingerprintProcessor) analyzeTrace(buf *traceBuffer) {
 	p.topology.observe(buf.spans)
+	p.metrics.observe(buf.spans, p.cfg.Environment)
 	p.analyzeTraceStructure(buf)
 	p.analyzeErrorSignatures(buf)
 }

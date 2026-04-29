@@ -225,6 +225,54 @@ func (e *emitter) send(evt splunkEvent) error {
 	return nil
 }
 
+func (e *emitter) emitLatencyAnomaly(env, service, operation string, currentMeanNs, baselineMeanNs, stddevNs, zScore float64) error {
+	return e.send(splunkEvent{
+		EventType: "service.latency.anomaly",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"sf_service":     service,
+			"sf_operation":   operation,
+			"anomaly_type":   "LATENCY_ANOMALY",
+		},
+		Properties: map[string]string{
+			"service":          service,
+			"operation":        operation,
+			"environment":      env,
+			"current_mean_ms":  fmt.Sprintf("%.1f", currentMeanNs/1e6),
+			"baseline_mean_ms": fmt.Sprintf("%.1f", baselineMeanNs/1e6),
+			"stddev_ms":        fmt.Sprintf("%.1f", stddevNs/1e6),
+			"z_score":          fmt.Sprintf("%.2f", zScore),
+			"detector":         "otel-latency-anomaly",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (e *emitter) emitErrorRateAnomaly(env, service, operation string, errorRate float64, errorCount, totalCount int) error {
+	return e.send(splunkEvent{
+		EventType: "service.error.rate.anomaly",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"sf_service":     service,
+			"sf_operation":   operation,
+			"anomaly_type":   "ERROR_RATE_ANOMALY",
+		},
+		Properties: map[string]string{
+			"service":     service,
+			"operation":   operation,
+			"environment": env,
+			"error_rate":  fmt.Sprintf("%.3f", errorRate),
+			"error_pct":   fmt.Sprintf("%.1f%%", errorRate*100),
+			"error_count": fmt.Sprintf("%d", errorCount),
+			"total_count": fmt.Sprintf("%d", totalCount),
+			"detector":    "otel-error-rate-anomaly",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func rootService(rootOp string) string {
 	if idx := strings.Index(rootOp, ":"); idx >= 0 {
 		return rootOp[:idx]
