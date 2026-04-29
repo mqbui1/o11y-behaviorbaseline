@@ -94,6 +94,36 @@ type Config struct {
 	// interval, a trace.path.drift event with anomaly_type=MISSING_SERVICE is
 	// emitted. Default: 30s. Set to 0 to disable.
 	MissingServiceCheckInterval time.Duration `mapstructure:"missing_service_check_interval"`
+
+	// ── Metric anomaly detection ───────────────────────────────────────────
+
+	// LatencyAnomalyWindow is the rolling window over which current mean latency
+	// is computed and compared against the learned baseline. Default: 2m.
+	// Set to 0 to disable latency anomaly detection.
+	LatencyAnomalyWindow time.Duration `mapstructure:"latency_anomaly_window"`
+
+	// LatencyLearnMinSamples is how many trace samples must be collected before
+	// latency anomaly detection activates. During this period the processor
+	// builds a baseline mean/stddev using Welford's online algorithm.
+	// Default: 30.
+	LatencyLearnMinSamples int `mapstructure:"latency_learn_min_samples"`
+
+	// LatencyAnomalyZScore is the number of standard deviations above the
+	// baseline mean that triggers a service.latency.anomaly event. Higher = fewer
+	// false positives. Default: 3.0 (3-sigma rule).
+	LatencyAnomalyZScore float64 `mapstructure:"latency_anomaly_z_score"`
+
+	// ErrorRateAnomalyWindow is the rolling window for error rate calculation.
+	// Default: 2m. Set to 0 to disable error rate anomaly detection.
+	ErrorRateAnomalyWindow time.Duration `mapstructure:"error_rate_anomaly_window"`
+
+	// ErrorRateAnomalyThreshold is the fraction of spans that must be errors
+	// to trigger a service.error.rate.anomaly event. Default: 0.05 (5%).
+	ErrorRateAnomalyThreshold float64 `mapstructure:"error_rate_anomaly_threshold"`
+
+	// MinErrorRateSamples is the minimum number of trace observations required
+	// before error rate anomaly detection activates. Default: 10.
+	MinErrorRateSamples int `mapstructure:"min_error_rate_samples"`
 }
 
 func createDefaultConfig() component.Config {
@@ -111,5 +141,11 @@ func createDefaultConfig() component.Config {
 		ErrorRateWindow:             5 * time.Minute,
 		ErrorRateSpikeMultiplier:    5.0,
 		MissingServiceCheckInterval: 30 * time.Second,
+		LatencyAnomalyWindow:        2 * time.Minute,
+		LatencyLearnMinSamples:      30,
+		LatencyAnomalyZScore:        3.0,
+		ErrorRateAnomalyWindow:      2 * time.Minute,
+		ErrorRateAnomalyThreshold:   0.05,
+		MinErrorRateSamples:         10,
 	}
 }
