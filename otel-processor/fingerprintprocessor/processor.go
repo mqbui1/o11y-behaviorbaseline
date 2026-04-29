@@ -66,7 +66,7 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		baseline:       newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
 		emitter:        emit,
 		topology:       newTopologyTracker(cfg.BaselinePath, cfg.Environment, emit),
-		metrics:        newMetricsTracker(cfg, emit),
+		metrics:        newMetricsTracker(cfg, emit).withLogger(logger),
 		buffers:        make(map[string]*traceBuffer),
 		seenCounts:     make(map[string]int),
 		activeDrifts:   make(map[string]string),

@@ -110,12 +110,20 @@ Anomaly type meanings:
   SIGNATURE_VANISHED     — a previously dominant error signature disappeared entirely.
                            Could mean the underlying issue resolved, or something worse replaced it.
   SIGNATURE_SPIKE        — a known error signature is occurring at much higher rate than baseline.
+  LATENCY_ANOMALY        — mean latency for a service/operation has spiked above 3 standard deviations
+                           of the learned baseline. Fields: current_mean_ms, baseline_mean_ms, z_score.
+                           Indicates slowdown — could be resource exhaustion, slow dependency, or GC pause.
+  ERROR_RATE_ANOMALY     — the fraction of spans returning errors exceeded the threshold (default 5%).
+                           Fields: error_pct, error_count, total_count. Indicates active failure mode
+                           on that service/operation.
 
 Severity guidelines:
   INCIDENT  — a service is completely missing (MISSING_SERVICE) with HIGH confidence,
               or multiple NEW_ERROR_SIGNATUREs across several services simultaneously
-              (indicates a shared dependency like a database is down)
-  DEGRADED  — one or two NEW_ERROR_SIGNATUREs on a single service, or SIGNATURE_SPIKE
+              (indicates a shared dependency like a database is down),
+              or ERROR_RATE_ANOMALY combined with MISSING_SERVICE or NEW_ERROR_SIGNATURE
+  DEGRADED  — one or two NEW_ERROR_SIGNATUREs on a single service, SIGNATURE_SPIKE,
+              LATENCY_ANOMALY, or ERROR_RATE_ANOMALY alone
   OK        — no anomalies or low-confidence noise
 
 Only recommend PAGE_ONCALL for INCIDENT severity with HIGH confidence.
