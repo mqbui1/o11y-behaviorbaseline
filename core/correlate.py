@@ -100,9 +100,11 @@ DEPLOYMENT_CORRELATION_WINDOW_MINUTES = int(
 
 # Custom event types emitted by the fingerprint scripts — queried via SignalFlow
 TIER_EVENT_MAP = {
-    "trace.path.drift":       "tier2",
-    "error.signature.drift":  "tier3",
-    "error.signature.spike":  "tier3",  # known sig firing at spike rate
+    "trace.path.drift":           "tier2",
+    "error.signature.drift":      "tier3",
+    "error.signature.spike":      "tier3",  # known sig firing at spike rate
+    "service.latency.anomaly":    "tier2",  # latency spike above learned baseline
+    "service.error.rate.anomaly": "tier2",  # error rate above threshold
 }
 
 # Event types that cancel out a previous drift — used to suppress stale alerts
