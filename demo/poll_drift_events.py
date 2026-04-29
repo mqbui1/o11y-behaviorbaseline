@@ -77,7 +77,7 @@ def _load_dedup(env: str) -> dict:
 def _save_dedup(env: str, state: dict) -> None:
     _dedup_path(env).write_text(json.dumps(state))
 
-drift_re    = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected)')
+drift_re    = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected|latency anomaly detected|error rate anomaly detected)')
 hash_re     = re.compile(r'"hash": "([^"]+)"')
 op_re       = re.compile(r'"root_op": "([^"]+)"')
 svc_re      = re.compile(r'"service": "([^"]+)"')
@@ -87,6 +87,12 @@ env_re      = re.compile(r'"environment": "([^"]+)"')
 etype_re    = re.compile(r'"error_type": "([^"]+)"')
 op2_re      = re.compile(r'"operation": "([^"]+)"')
 missing_re  = re.compile(r'"missing_services": \[([^\]]*)\]')
+cur_ms_re   = re.compile(r'"current_mean_ms": "([^"]+)"')
+base_ms_re  = re.compile(r'"baseline_mean_ms": "([^"]+)"')
+zscore_re   = re.compile(r'"z_score": "([^"]+)"')
+erate_re    = re.compile(r'"error_pct": "([^"]+)"')
+ecnt_re     = re.compile(r'"error_count": (\d+)')
+tcnt_re     = re.compile(r'"total_count": (\d+)')
 
 DEDUP_TTL = 90
 
@@ -95,8 +101,10 @@ def _parse_event(line: str) -> dict | None:
     """Parse a drift log line into an anomaly dict (agent.py schema)."""
     if not drift_re.search(line):
         return None
-    is_error   = "error signature" in line
-    is_missing = "missing service" in line
+    is_error     = "error signature" in line
+    is_missing   = "missing service" in line
+    is_latency   = "latency anomaly" in line
+    is_error_rate = "error rate anomaly" in line
     h    = hash_re.search(line)
     op   = op_re.search(line)
     svc  = svc_re.search(line)
@@ -110,7 +118,47 @@ def _parse_event(line: str) -> dict | None:
     op_val  = op.group(1)  if op  else ""
     svc_val = svc.group(1) if svc else (op_val.split(":")[0] if ":" in op_val else op_val)
 
-    if is_missing:
+    if is_latency:
+        cur_ms  = cur_ms_re.search(line)
+        base_ms = base_ms_re.search(line)
+        zs      = zscore_re.search(line)
+        op2_val = op2.group(1) if op2 else ""
+        cur_val  = cur_ms.group(1)  if cur_ms  else "?"
+        base_val = base_ms.group(1) if base_ms else "?"
+        zs_val   = zs.group(1)      if zs      else "?"
+        return {
+            "anomaly_type":      "LATENCY_ANOMALY",
+            "service":           svc_val,
+            "operation":         op2_val,
+            "current_mean_ms":   cur_val,
+            "baseline_mean_ms":  base_val,
+            "z_score":           zs_val,
+            "message":           f"Latency spike on {svc_val} {op2_val}: {cur_val}ms (baseline {base_val}ms, z={zs_val})",
+            "hash":              f"latency:{svc_val}:{op2_val}",
+            "source":            "otel-edge",
+            "timestamp_ms":      int(time.time() * 1000),
+        }
+    elif is_error_rate:
+        er      = erate_re.search(line)
+        ec      = ecnt_re.search(line)
+        tc      = tcnt_re.search(line)
+        op2_val  = op2.group(1) if op2 else ""
+        er_val   = er.group(1)  if er  else "?"
+        ec_val   = ec.group(1)  if ec  else "0"
+        tc_val   = tc.group(1)  if tc  else "0"
+        return {
+            "anomaly_type": "ERROR_RATE_ANOMALY",
+            "service":      svc_val,
+            "operation":    op2_val,
+            "error_pct":    er_val,
+            "error_count":  ec_val,
+            "total_count":  tc_val,
+            "message":      f"Error rate spike on {svc_val} {op2_val}: {er_val} ({ec_val}/{tc_val} spans)",
+            "hash":         f"errrate:{svc_val}:{op2_val}",
+            "source":       "otel-edge",
+            "timestamp_ms": int(time.time() * 1000),
+        }
+    elif is_missing:
         # Parse missing_services list from JSON-ish log field: ["svc1", "svc2"]
         missing_svcs: list[str] = []
         if miss:
@@ -306,12 +354,20 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
                     etype = "error.signature.drift"
                 elif atype == "MISSING_SERVICE":
                     etype = "trace.path.drift (MISSING_SERVICE)"
+                elif atype == "LATENCY_ANOMALY":
+                    etype = "service.latency.anomaly"
+                elif atype == "ERROR_RATE_ANOMALY":
+                    etype = "service.error.rate.anomaly"
                 else:
                     etype = "trace.path.drift"
                 print(f"[{ts}] {etype}")
                 print(f"  root_op={event.get('root_op') or event.get('service')}  hash={h_val or '?'}")
                 if event.get("missing_services"):
                     print(f"  missing={','.join(event['missing_services'])}")
+                if atype == "LATENCY_ANOMALY":
+                    print(f"  current={event.get('current_mean_ms')}ms  baseline={event.get('baseline_mean_ms')}ms  z={event.get('z_score')}")
+                if atype == "ERROR_RATE_ANOMALY":
+                    print(f"  error_pct={event.get('error_pct')}  ({event.get('error_count')}/{event.get('total_count')} spans)")
                 if event.get("trace_id"):
                     print(f"  trace_id={event['trace_id']}")
                 print()
