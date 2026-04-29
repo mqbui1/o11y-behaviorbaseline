@@ -5,6 +5,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // metricWindow holds a rolling window of latency samples and error/total counts
@@ -41,6 +43,7 @@ type metricsTracker struct {
 
 	emitter *emitter
 	cfg     *Config
+	logger  *zap.Logger
 }
 
 func newMetricsTracker(cfg *Config, emit *emitter) *metricsTracker {
@@ -48,7 +51,13 @@ func newMetricsTracker(cfg *Config, emit *emitter) *metricsTracker {
 		windows: make(map[string]*metricWindow),
 		emitter: emit,
 		cfg:     cfg,
+		logger:  zap.NewNop(), // replaced by setLogger after construction
 	}
+}
+
+func (m *metricsTracker) withLogger(l *zap.Logger) *metricsTracker {
+	m.logger = l
+	return m
 }
 
 func metricKey(service, operation string) string {
@@ -136,6 +145,15 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 				zScore := (currentMean - w.baselineMean) / stddev
 				if zScore >= m.cfg.LatencyAnomalyZScore && currentMean > w.baselineMean {
 					svc, op := splitKey(key)
+					m.logger.Info("latency anomaly detected",
+						zap.String("service", svc),
+						zap.String("operation", op),
+						zap.String("current_mean_ms", fmt.Sprintf("%.1f", currentMean/1e6)),
+						zap.String("baseline_mean_ms", fmt.Sprintf("%.1f", w.baselineMean/1e6)),
+						zap.String("stddev_ms", fmt.Sprintf("%.1f", stddev/1e6)),
+						zap.String("z_score", fmt.Sprintf("%.2f", zScore)),
+						zap.String("environment", env),
+					)
 					_ = m.emitter.emitLatencyAnomaly(env, svc, op,
 						currentMean, w.baselineMean, stddev, zScore)
 				}
@@ -169,6 +187,15 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 			errorRate := float64(totalErrors) / float64(totalSpans)
 			if errorRate >= m.cfg.ErrorRateAnomalyThreshold {
 				svc, op := splitKey(key)
+				m.logger.Info("error rate anomaly detected",
+					zap.String("service", svc),
+					zap.String("operation", op),
+					zap.String("error_rate", fmt.Sprintf("%.3f", errorRate)),
+					zap.String("error_pct", fmt.Sprintf("%.1f%%", errorRate*100)),
+					zap.Int("error_count", totalErrors),
+					zap.Int("total_count", totalSpans),
+					zap.String("environment", env),
+				)
 				_ = m.emitter.emitErrorRateAnomaly(env, svc, op,
 					errorRate, totalErrors, totalSpans)
 			}

@@ -712,6 +712,22 @@ def triage_anomaly(corr: dict, traces: list[dict], dry_run: bool = False,
         except Exception as e:
             print(f"  [warn] Infra correlator: {e}", file=sys.stderr)
 
+    # ── Metric anomaly context: surface latency/error-rate signals from OTel ──
+    metric_anomalies = [
+        a for a in corr.get("anomaly_types", [])
+        if a in ("LATENCY_ANOMALY", "ERROR_RATE_ANOMALY")
+    ]
+    if metric_anomalies:
+        metric_lines = [
+            "",
+            "## Metric Anomalies (OTel edge detector)",
+        ]
+        for msg in corr.get("messages", []):
+            if "Latency spike" in msg or "Error rate spike" in msg:
+                metric_lines.append(f"- {msg}")
+        if len(metric_lines) > 2:
+            context_parts += metric_lines
+
     user_message = "\n".join(context_parts)
 
     if dry_run:
