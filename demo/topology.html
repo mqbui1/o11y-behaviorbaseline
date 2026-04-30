@@ -110,6 +110,24 @@
   }
   .node-new .pulse-ring { stroke: #D29922; animation: pulse 2s infinite; }
 
+  /* Latency anomaly — amber/orange pulse */
+  .node-latency circle {
+    fill: #2A1C0D;
+    stroke: #E07B39;
+    stroke-width: 2;
+    filter: drop-shadow(0 0 6px rgba(224,123,57,0.5));
+  }
+  .node-latency .pulse-ring { stroke: #E07B39; animation: pulse 1.5s infinite; }
+
+  /* Error rate anomaly — red-orange, distinct from pure error sig */
+  .node-errorrate circle {
+    fill: #2A0D0D;
+    stroke: #FF6B35;
+    stroke-width: 2;
+    filter: drop-shadow(0 0 6px rgba(255,107,53,0.5));
+  }
+  .node-errorrate .pulse-ring { stroke: #FF6B35; animation: pulse 1.2s infinite; }
+
   /* Discovered node — found via live APM topology polling */
   .node-discovered circle {
     fill: #0D2233;
@@ -267,10 +285,12 @@
     font-weight: 600;
     margin-bottom: 6px;
   }
-  .service-card.state-error   .svc-name { color: #F85149; }
-  .service-card.state-drift   .svc-name { color: #D29922; }
-  .service-card.state-missing .svc-name { color: #58A6FF; }
+  .service-card.state-error     .svc-name { color: #F85149; }
+  .service-card.state-drift     .svc-name { color: #D29922; }
+  .service-card.state-missing   .svc-name { color: #58A6FF; }
   .service-card.state-rootcause .svc-name { color: #BF5AF2; }
+  .service-card.state-latency   .svc-name { color: #E07B39; }
+  .service-card.state-errorrate .svc-name { color: #FF6B35; }
 
   .badge {
     display: inline-block;
@@ -282,10 +302,12 @@
     margin-bottom: 4px;
     letter-spacing: 0.04em;
   }
-  .badge-error    { background: #3A1C1C; color: #F85149; border: 1px solid #8B2020; }
-  .badge-drift    { background: #3A2E1C; color: #D29922; border: 1px solid #9E6A03; }
-  .badge-missing  { background: #1C1C2A; color: #58A6FF; border: 1px solid #1F6FEB; }
-  .badge-rootcause{ background: #1C1040; color: #BF5AF2; border: 1px solid #7F3FBF; }
+  .badge-error     { background: #3A1C1C; color: #F85149; border: 1px solid #8B2020; }
+  .badge-drift     { background: #3A2E1C; color: #D29922; border: 1px solid #9E6A03; }
+  .badge-missing   { background: #1C1C2A; color: #58A6FF; border: 1px solid #1F6FEB; }
+  .badge-rootcause { background: #1C1040; color: #BF5AF2; border: 1px solid #7F3FBF; }
+  .badge-latency   { background: #2A1C0D; color: #E07B39; border: 1px solid #9E5A1A; }
+  .badge-errorrate { background: #2A0D0D; color: #FF6B35; border: 1px solid #8B2010; }
 
   .anomaly-item {
     font-size: 11px;
@@ -355,11 +377,13 @@
     border-bottom: 1px solid #161B22;
     padding: 3px 0;
   }
-  .log-entry .log-ts   { color: #484F58; }
-  .log-entry .log-type-error   { color: #F85149; }
-  .log-entry .log-type-drift   { color: #D29922; }
-  .log-entry .log-type-missing { color: #58A6FF; }
-  .log-entry .log-svc  { color: #E6EDF3; }
+  .log-entry .log-ts              { color: #484F58; }
+  .log-entry .log-type-error     { color: #F85149; }
+  .log-entry .log-type-drift     { color: #D29922; }
+  .log-entry .log-type-missing   { color: #58A6FF; }
+  .log-entry .log-type-latency   { color: #E07B39; }
+  .log-entry .log-type-errorrate { color: #FF6B35; }
+  .log-entry .log-svc            { color: #E6EDF3; }
 
   /* Buttons */
   .btn {
@@ -528,6 +552,8 @@
   <div class="legend-item"><div class="legend-dot ld-error"></div> Error signature</div>
   <div class="legend-item"><div class="legend-dot ld-missing" style="border-style:dashed"></div> Missing</div>
   <div class="legend-item"><div class="legend-dot ld-rootcause"></div> Root cause ★</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#2A1C0D;border-color:#E07B39"></div> Latency spike</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#2A0D0D;border-color:#FF6B35"></div> Error rate</div>
   <div class="legend-item"><div class="legend-dot ld-drift" style="border-style:dashed"></div> New (unseen)</div>
   <div class="legend-item"><div class="legend-dot" style="background:#0D2233;border-color:#00BCEB;border-style:dashed"></div> Discovered (live)</div>
 </div>
@@ -541,6 +567,9 @@
   <button class="btn-scenario" onclick="runScenario('db-dropped')"     title="visits-service stops calling mysql:petclinic — DB gone silent">4 DB gone silent</button>
   <button class="btn-scenario" onclick="runScenario('db-incident')"    title="DB down — multiple services get JDBC errors simultaneously">5 DB incident (multi)</button>
   <button class="btn-scenario" onclick="runScenario('cascading')"      title="vets-service killed → api-gateway errors → customers-service times out (2s apart)">6 Cascading failure</button>
+  <button class="btn-scenario" onclick="runScenario('latency-spike')"  title="visits-service latency spikes 250× above baseline (z=8496) — OTel edge detector fires in ~10s" style="border-color:#9E5A1A;color:#E07B39">7 Latency spike</button>
+  <button class="btn-scenario" onclick="runScenario('error-rate-spike')" title="customers-service error rate hits 100% — DB connectivity lost, error signature fired 800ms later" style="border-color:#8B2010;color:#FF6B35">8 Error rate</button>
+  <button class="btn-scenario" onclick="runScenario('combined-metric')" title="vets-service killed (structural) + customers-service error rate spikes (metric) — Claude correlates all three tiers" style="border-color:#7F3FBF;color:#BF5AF2">9 Combined</button>
 </div>
 
 <script>
@@ -592,8 +621,10 @@ function nodeState(id) {
     return "healthy";
   }
   const types = new Set(anoms.map(a => a.anomaly_type));
-  // Determine base state from anomaly type
+  // Determine base state from anomaly type (priority order: missing > error > errorrate > latency > drift)
   let base = "drift";
+  if (types.has("LATENCY_ANOMALY"))     base = "latency";
+  if (types.has("ERROR_RATE_ANOMALY"))  base = "errorrate";
   if (types.has("MISSING_SERVICE"))     base = "missing";
   if (types.has("NEW_ERROR_SIGNATURE")) base = "error";
   // Only show rootcause style when there are multiple affected services —
@@ -786,9 +817,10 @@ function updateBadge() {
     badge.textContent = "● STEADY STATE";
   } else {
     const allAnoms = Object.values(active).flat();
-    const hasError   = allAnoms.some(a => a.anomaly_type === "NEW_ERROR_SIGNATURE");
-    const hasMissing = allAnoms.some(a => a.anomaly_type === "MISSING_SERVICE");
-    if (hasError || hasMissing) {
+    const hasError     = allAnoms.some(a => a.anomaly_type === "NEW_ERROR_SIGNATURE");
+    const hasMissing   = allAnoms.some(a => a.anomaly_type === "MISSING_SERVICE");
+    const hasErrorRate = allAnoms.some(a => a.anomaly_type === "ERROR_RATE_ANOMALY");
+    if (hasError || hasMissing || hasErrorRate) {
       badge.className = "status-badge status-error";
       badge.textContent = "● INCIDENT DETECTED";
     } else {
@@ -873,17 +905,20 @@ function updatePanel() {
   if (!affected.length) { listEl.innerHTML = ""; return; }
 
   listEl.innerHTML = affected.map(([svc, anoms]) => {
-    // If this service has stronger signals (ERROR/MISSING), drop pure DRIFT entries
+    // If this service has stronger signals (ERROR/MISSING/metric), drop pure DRIFT entries
     const hasStrong = anoms.some(a =>
-      a.anomaly_type === "NEW_ERROR_SIGNATURE" || a.anomaly_type === "MISSING_SERVICE");
+      a.anomaly_type === "NEW_ERROR_SIGNATURE" || a.anomaly_type === "MISSING_SERVICE" ||
+      a.anomaly_type === "LATENCY_ANOMALY"     || a.anomaly_type === "ERROR_RATE_ANOMALY");
     if (hasStrong) anoms = anoms.filter(a => a.anomaly_type !== "NEW_FINGERPRINT");
     const state  = nodeState(svc);
     const badgeClass = {
       rootcause: "badge-rootcause", error: "badge-error",
-      missing:   "badge-missing",   drift: "badge-drift"
+      missing:   "badge-missing",   drift: "badge-drift",
+      latency:   "badge-latency",   errorrate: "badge-errorrate",
     }[state] || "badge-drift";
     const label = {
-      rootcause: "ROOT CAUSE ★", error: "ERROR", missing: "MISSING", drift: "DRIFT"
+      rootcause: "ROOT CAUSE ★", error: "ERROR", missing: "MISSING", drift: "DRIFT",
+      latency: "LATENCY SPIKE",  errorrate: "ERROR RATE",
     }[state] || "DRIFT";
 
     const anomItems = anoms.map(a => {
@@ -949,9 +984,13 @@ function addLogEntry(event) {
   const ts    = new Date(event.timestamp_ms || Date.now()).toLocaleTimeString();
   const cls   = atype === "NEW_ERROR_SIGNATURE" ? "log-type-error"
               : atype === "MISSING_SERVICE"     ? "log-type-missing"
+              : atype === "ERROR_RATE_ANOMALY"  ? "log-type-errorrate"
+              : atype === "LATENCY_ANOMALY"     ? "log-type-latency"
               : "log-type-drift";
   const label = atype === "NEW_ERROR_SIGNATURE" ? "error.signature.drift"
               : atype === "MISSING_SERVICE"     ? "trace.path.drift (MISSING)"
+              : atype === "ERROR_RATE_ANOMALY"  ? "service.error.rate.anomaly"
+              : atype === "LATENCY_ANOMALY"     ? "service.latency.anomaly"
               : "trace.path.drift";
 
   // For MISSING_SERVICE show "caller → missing_svc"; for others just service name
@@ -959,6 +998,14 @@ function addLogEntry(event) {
   if (atype === "MISSING_SERVICE" && event.missing_services && event.missing_services.length) {
     const caller = (event.root_op || "").split(":")[0];
     svcDisplay = caller ? `${caller} → ${event.missing_services.join(", ")}` : event.missing_services.join(", ");
+  }
+
+  // Metric detail suffix for latency/error-rate events
+  let metricDetail = "";
+  if (atype === "LATENCY_ANOMALY" && event.current_mean_ms) {
+    metricDetail = ` <span style="color:#8B949E">${event.current_mean_ms}ms vs ${event.baseline_mean_ms}ms baseline (z=${event.z_score})</span>`;
+  } else if (atype === "ERROR_RATE_ANOMALY" && event.error_pct) {
+    metricDetail = ` <span style="color:#8B949E">${event.error_pct} (${event.error_count}/${event.total_count} spans)</span>`;
   }
 
   const probTag = event.problem_id
@@ -969,7 +1016,8 @@ function addLogEntry(event) {
   entry.innerHTML = `<span class="log-ts">${ts}</span> `
     + probTag
     + `<span class="${cls}">${label}</span> `
-    + `<span class="log-svc">${svcDisplay}</span>`;
+    + `<span class="log-svc">${svcDisplay}</span>`
+    + metricDetail;
   logEl.prepend(entry);
 
   // Keep last 50 entries

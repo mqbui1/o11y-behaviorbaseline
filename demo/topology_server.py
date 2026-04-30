@@ -39,7 +39,7 @@ OTEL_CONTAINER  = os.environ.get("OTEL_CONTAINER", "otelcol")
 _DATA_DIR = _REPO / "data"
 
 # ── Regex (shared with poll_drift_events.py) ──────────────────────────────────
-drift_re   = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected)')
+drift_re   = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected|latency anomaly detected|error rate anomaly detected)')
 hash_re    = re.compile(r'"hash": "([^"]+)"')
 op_re      = re.compile(r'"root_op": "([^"]+)"')
 svc_re     = re.compile(r'"service": "([^"]+)"')
@@ -48,6 +48,12 @@ tid_re     = re.compile(r'"trace_id": "([^"]+)"')
 etype_re   = re.compile(r'"error_type": "([^"]+)"')
 op2_re     = re.compile(r'"operation": "([^"]+)"')
 missing_re = re.compile(r'"missing_services": \[([^\]]*)\]')
+cur_ms_re  = re.compile(r'"current_mean_ms": "([^"]+)"')
+base_ms_re = re.compile(r'"baseline_mean_ms": "([^"]+)"')
+zscore_re  = re.compile(r'"z_score": "([^"]+)"')
+erate_re   = re.compile(r'"error_pct": "([^"]+)"')
+ecnt_re    = re.compile(r'"error_count": (\d+)')
+tcnt_re    = re.compile(r'"total_count": (\d+)')
 
 _INFRA = {"discovery-server", "config-server", "eureka-server", "eureka", "admin-server"}
 # DB_SPAN_PATTERNS: span operation prefixes that indicate a DB call.
@@ -341,7 +347,50 @@ def _parse_event(line: str) -> dict | None:
     op_val  = op.group(1)  if op  else ""
     svc_val = svc.group(1) if svc else (op_val.split(":")[0] if ":" in op_val else op_val)
 
-    if is_missing:
+    is_latency    = "latency anomaly detected" in line
+    is_error_rate = "error rate anomaly detected" in line
+
+    if is_latency:
+        op2  = op2_re.search(line)
+        cur  = cur_ms_re.search(line)
+        base = base_ms_re.search(line)
+        zs   = zscore_re.search(line)
+        cur_ms   = cur.group(1)  if cur  else "?"
+        base_ms  = base.group(1) if base else "?"
+        z_score  = zs.group(1)   if zs   else "?"
+        op2_val  = op2.group(1)  if op2  else ""
+        return {
+            "anomaly_type":      "LATENCY_ANOMALY",
+            "service":           svc_val,
+            "operation":         op2_val,
+            "current_mean_ms":   cur_ms,
+            "baseline_mean_ms":  base_ms,
+            "z_score":           z_score,
+            "message":           f"Latency spike: {svc_val} {cur_ms}ms (baseline {base_ms}ms, z={z_score})",
+            "hash":              f"latency:{svc_val}:{op2_val}",
+            "timestamp_ms":      int(time.time() * 1000),
+        }
+    elif is_error_rate:
+        op2  = op2_re.search(line)
+        er   = erate_re.search(line)
+        ec   = ecnt_re.search(line)
+        tc   = tcnt_re.search(line)
+        op2_val  = op2.group(1) if op2 else ""
+        err_pct  = er.group(1)  if er  else "?"
+        err_cnt  = int(ec.group(1)) if ec else 0
+        tot_cnt  = int(tc.group(1)) if tc else 0
+        return {
+            "anomaly_type": "ERROR_RATE_ANOMALY",
+            "service":      svc_val,
+            "operation":    op2_val,
+            "error_pct":    err_pct,
+            "error_count":  err_cnt,
+            "total_count":  tot_cnt,
+            "message":      f"Error rate spike: {svc_val} {err_pct} ({err_cnt}/{tot_cnt} spans)",
+            "hash":         f"errorrate:{svc_val}:{op2_val}",
+            "timestamp_ms": int(time.time() * 1000),
+        }
+    elif is_missing:
         missing_svcs: list[str] = []
         if miss:
             missing_svcs = [s.strip().strip('"') for s in miss.group(1).split(",") if s.strip().strip('"')]
@@ -860,16 +909,19 @@ def _make_app(environment: str):
         """Inject a synthetic anomaly event for testing.
 
         Body fields:
-          anomaly_type  — MISSING_SERVICE | NEW_ERROR_SIGNATURE | NEW_FINGERPRINT
+          anomaly_type  — MISSING_SERVICE | NEW_ERROR_SIGNATURE | NEW_FINGERPRINT | LATENCY_ANOMALY | ERROR_RATE_ANOMALY
           service       — affected service name
           root_op       — root operation (e.g. "api-gateway:GET /owners")
           message       — human-readable description (optional)
           error_type    — for NEW_ERROR_SIGNATURE (optional)
-          operation     — for NEW_ERROR_SIGNATURE (optional)
+          operation     — for NEW_ERROR_SIGNATURE / LATENCY_ANOMALY / ERROR_RATE_ANOMALY (optional)
           missing_services — list of strings for MISSING_SERVICE (optional)
+          current_mean_ms, baseline_mean_ms, z_score — for LATENCY_ANOMALY (optional)
+          error_pct, error_count, total_count — for ERROR_RATE_ANOMALY (optional)
         """
         from fastapi import HTTPException
-        valid_types = {"MISSING_SERVICE", "NEW_ERROR_SIGNATURE", "NEW_FINGERPRINT"}
+        valid_types = {"MISSING_SERVICE", "NEW_ERROR_SIGNATURE", "NEW_FINGERPRINT",
+                       "LATENCY_ANOMALY", "ERROR_RATE_ANOMALY"}
         atype = body.get("anomaly_type", "")
         if atype not in valid_types:
             raise HTTPException(400, f"anomaly_type must be one of {valid_types}")
@@ -886,6 +938,16 @@ def _make_app(environment: str):
             event["operation"]  = body.get("operation", "")
         if atype == "MISSING_SERVICE":
             event["missing_services"] = body.get("missing_services", [body.get("service", "")])
+        if atype == "LATENCY_ANOMALY":
+            event["operation"]         = body.get("operation", "")
+            event["current_mean_ms"]   = body.get("current_mean_ms", "?")
+            event["baseline_mean_ms"]  = body.get("baseline_mean_ms", "?")
+            event["z_score"]           = body.get("z_score", "?")
+        if atype == "ERROR_RATE_ANOMALY":
+            event["operation"]    = body.get("operation", "")
+            event["error_pct"]    = body.get("error_pct", "?")
+            event["error_count"]  = body.get("error_count", 0)
+            event["total_count"]  = body.get("total_count", 0)
         _broadcast_event(event)
         return JSONResponse({"ok": True, "event": event})
 
@@ -979,6 +1041,80 @@ def _make_app(environment: str):
                 "hash":         "synthetic:err:customers-jdbc",
             },
         ],
+        # Demo 7: Latency spike on visits-service (tc-netem 3s delay → z-score >>3σ)
+        "latency-spike": [
+            {
+                "anomaly_type":     "LATENCY_ANOMALY",
+                "service":          "visits-service",
+                "root_op":          "api-gateway:GET /owners/{ownerId}/pets/{petId}/visits",
+                "operation":        "GET /owners/{ownerId}/pets/{petId}/visits",
+                "current_mean_ms":  "753.4",
+                "baseline_mean_ms": "3.1",
+                "z_score":          "8496.2",
+                "message":          "Latency spike: visits-service 753ms (baseline 3ms, z=8496)",
+                "hash":             "synthetic:latency:visits-service",
+            },
+        ],
+        # Demo 8: Error rate spike on customers-service (DB killed → every DB call fails)
+        "error-rate-spike": [
+            {
+                "anomaly_type": "ERROR_RATE_ANOMALY",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "operation":    "SELECT owners",
+                "error_pct":    "100.0%",
+                "error_count":  42,
+                "total_count":  42,
+                "message":      "Error rate spike: customers-service 100.0% (42/42 spans)",
+                "hash":         "synthetic:errorrate:customers-service",
+                "_delay_ms":    0,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "error_type":   "CannotCreateTransactionException",
+                "operation":    "SELECT owners",
+                "message":      "New error: CannotCreateTransactionException on SELECT owners",
+                "hash":         "synthetic:err:customers-cannotcreate",
+                "_delay_ms":    800,
+            },
+        ],
+        # Demo 9: Combined structural + metric anomaly
+        # vets-service killed (MISSING_SERVICE) + DB killed (ERROR_RATE_ANOMALY + NEW_ERROR_SIGNATURE)
+        "combined-metric": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "vets-service",
+                "root_op":          "api-gateway:GET /vets",
+                "missing_services": ["vets-service"],
+                "message":          "MISSING_SERVICE: vets-service absent from traces",
+                "hash":             "synthetic:missing:vets-combined",
+                "_delay_ms":        0,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "error_type":   "CannotCreateTransactionException",
+                "operation":    "SELECT owners",
+                "message":      "New error: CannotCreateTransactionException on SELECT owners",
+                "hash":         "synthetic:err:customers-combined",
+                "_delay_ms":    800,
+            },
+            {
+                "anomaly_type": "ERROR_RATE_ANOMALY",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "operation":    "SELECT owners",
+                "error_pct":    "97.6%",
+                "error_count":  41,
+                "total_count":  42,
+                "message":      "Error rate spike: customers-service 97.6% (41/42 spans)",
+                "hash":         "synthetic:errorrate:customers-combined",
+                "_delay_ms":    2000,
+            },
+        ],
         # Cascading failure: vets-service killed → its caller (api-gateway) starts
         # erroring → customers-service also errors (shared upstream dependency).
         # Events fire with increasing delay to show propagation unfolding over time.
@@ -1019,7 +1155,8 @@ def _make_app(environment: str):
     async def _demo(scenario: str, delay_ms: int = 800):
         """Fire a named demo scenario, broadcasting events with delay_ms between them.
 
-        Scenarios: kill-service | new-call-path | new-error | db-dropped | db-incident
+        Scenarios: kill-service | new-call-path | new-error | db-dropped | db-incident |
+                   cascading | latency-spike | error-rate-spike | combined-metric
         """
         from fastapi import HTTPException
         if scenario not in _DEMO_SCENARIOS:
