@@ -12,8 +12,9 @@ The framework emits four distinct anomaly signals. Each demo triggers one or mor
 | `MISSING_SERVICE` | A root operation that normally involves a specific service produced **zero traces** in the detection window — the service is structurally absent, not just erroring. | Demo 2, 3, 4 |
 | `NEW_ERROR_SIGNATURE` | A span produced an exception or error type that has never appeared in this service before. Fires on **first occurrence**, no threshold required. | Demo 1, 3, 4 |
 | `AUTODETECT_TIER1` | Splunk APM's built-in AutoDetect fired a metric-based alert (error rate spike, latency spike, request drop). This is the **native APM signal** — the framework correlates it with its own structural signals. | Demo 3 (when AutoDetect catches up) |
-| `LATENCY_ANOMALY` | Mean latency for a service/operation exceeded 3 standard deviations above its learned baseline. Fires without any threshold configuration — baseline is learned from the first 30 traces. | Demo 7 |
-| `ERROR_RATE_ANOMALY` | The fraction of error spans for a service/operation exceeded 5% over a rolling window. Complements NEW_ERROR_SIGNATURE — fires on sustained rate, not just first occurrence. | Demo 8, 9 |
+| `LATENCY_ANOMALY` | Mean latency for a service/operation exceeded 3 standard deviations above its learned baseline. Fires without any threshold configuration — baseline is learned from the first 30 traces. Baseline adapts per hour-of-day × day-of-week (168 seasonal slots). | Demo 7, 10 |
+| `ERROR_RATE_ANOMALY` | The fraction of error spans for a service/operation exceeded 5% over a rolling window. Complements NEW_ERROR_SIGNATURE — fires on sustained rate, not just first occurrence. | Demo 8, 9, 10 |
+| `INFRA_EVENT` | Pod-level Kubernetes warning event (OOMKilling, CrashLoopBackOff, BackOff, Evicted) correlated to a service by pod name. Surfaced in the topology UI alongside trace anomalies. Not a Splunk signal — sourced directly from `kubectl get events`. | Demo 10 |
 
 ### Correlation types
 
@@ -1191,7 +1192,144 @@ Kills both services simultaneously, collects all signals for 75s, triages with C
 
 ---
 
-## How it works (30-second explanation)
+## Demo 10: Live Topology UI — Confidence Scoring, User Impact, Infra Correlation
+
+**Story:** *"This is the visual layer on top of everything the framework knows. Every signal type, root cause chain, and infra event renders live on the service dependency graph. Five new capabilities surface here that go beyond what APM's topology map shows: probabilistic root cause confidence, user impact estimation, pod-level infra event correlation, topology-aware downstream suppression, and a seasonal latency baseline. Each can be demonstrated independently via the scenario buttons — no cluster changes needed."*
+
+### Start the topology server
+
+```bash
+python3 demo/topology_server.py --environment $ENV
+# Open http://localhost:8080
+```
+
+The server connects to the EC2 cluster over SSH to tail OTel collector logs in real time. The topology is built from the local baseline file (`data/baseline.$ENV.json`) at startup. All 5 new features are visible without any cluster changes — use the scenario buttons to inject synthetic events.
+
+---
+
+### Feature 1: Probabilistic Root Cause Confidence Score
+
+**Scenario to run:** `5 DB incident (multi)` or `6 Cascading failure`
+
+**What you see:** The Causality Chain panel shows the root cause with a green `N% confidence` label next to "ROOT CAUSE ★".
+
+**How the score is computed:**
+- **Anomaly type weight** — MISSING_SERVICE (1.0) > ERROR_RATE_ANOMALY (0.85) > NEW_ERROR_SIGNATURE (0.7) > LATENCY_ANOMALY (0.5) > DRIFT (0.3)
+- **Caller fraction** — fraction of all affected services that call this node (shared dependency = higher score)
+- **Timing bonus** — the service whose anomaly fired earliest gets a small boost (0–10%)
+
+```
+Score = (type_weight × 0.5) + (caller_fraction × 0.35) + (timing_bonus × 0.15)
+```
+
+**Key talking point:**
+> *"Davis AI surfaces confidence scores on every problem. This is how we do it — not a black box, but a transparent formula that weights signal type, topology centrality, and timing. `mysql:petclinic` scores 88% when three services call it and MISSING_SERVICE fires first — the shared dependency pattern is the key signal."*
+
+---
+
+### Feature 2: User Impact Estimation (spans/min)
+
+**Scenario to run:** `7 Latency spike` or `8 Error rate`
+
+**What you see:** The affected service card shows `~N spans/min affected` in blue below the anomaly message.
+
+**How it works:** The OTel processor tracks a 2-minute sliding window of span counts per service. When `LATENCY_ANOMALY` or `ERROR_RATE_ANOMALY` fires, `spans_per_min` is logged alongside the anomaly and parsed by `poll_drift_events.py`. It represents the throughput of the affected service at the time of detection — a proxy for "how many requests are impacted right now."
+
+**Key talking point:**
+> *"Dynatrace shows 'N users affected' via session correlation. We derive impact from span throughput — no session tracking needed. `~47 spans/min` on visits-service means roughly 47 in-flight requests per minute were experiencing 750ms latency instead of 3ms. Real impact, at the edge, without querying any external system."*
+
+---
+
+### Feature 3: Infra Event Correlation (kubectl warning events)
+
+**Scenario to run:** `oom-latency` (or inject manually — see below)
+
+**What you see:** The affected service node turns amber even before any trace anomaly fires. The service card shows `⚙ OOMKilling: Container killed due to OOM (×3)` in the panel. Infra events appear in the live event log as `⚙ INFRA`.
+
+**How it works:** A background task polls `kubectl get events --field-selector type=Warning` every 30 seconds over the existing SSH connection. It strips pod hash suffixes to map pod names to service names (`visits-service-6d8f9c-xkz9p` → `visits-service`), and broadcasts matching events as `infra_events` SSE messages.
+
+**Manual injection for demo (no cluster needed):**
+```bash
+curl -s -X POST http://localhost:8080/api/inject/infra \
+  -H 'Content-Type: application/json' \
+  -d '{"service":"visits-service","reason":"OOMKilling",
+       "message":"Container visits-service was OOM killed (rss=512Mi limit=256Mi)","count":3}'
+```
+
+Then click **7 Latency spike** — you'll see both the infra event (OOM) and the metric anomaly (latency spike) on the same node simultaneously.
+
+**Key talking point:**
+> *"Smartscape correlates host-level events into the causality graph automatically. We do the same at the pod layer using kubectl — no agent, no DynatraceAgent CR, no host plugin. If a pod is OOMKilling and latency is spiking, we show both signals on the same node and correlate them in the panel. The root cause score goes up because both signal types are present."*
+
+---
+
+### Feature 4: Topology-Aware Downstream Suppression
+
+**Scenario to run:** `6 Cascading failure`
+
+**What you see:** After vets-service goes MISSING and api-gateway and customers-service start erroring, the panel shows customers-service at 60% opacity with the note *"secondary effect of vets-service"*. The status badge still shows INCIDENT — the suppression is cosmetic, not a mute.
+
+**How it works:** `_downstream_suppressed()` returns `True` for a service when:
+1. It is NOT the root cause
+2. It has only DRIFT or LATENCY anomalies (not ERROR/MISSING/ERROR_RATE — those are independent signals)
+3. The root cause is reachable downstream from it (it calls the root cause, directly or transitively)
+
+The service is still listed in the panel — it's dimmed, not hidden — with a note identifying it as a secondary effect.
+
+**Key talking point:**
+> *"Davis suppresses correlated alerts on downstream services automatically once the root cause is identified. We do the same — if api-gateway is only erroring because vets-service is missing, its anomaly is flagged as a secondary effect rather than a separate incident. The on-call sees one problem, not three."*
+
+---
+
+### Feature 5: Seasonal / Time-of-Day Latency Baseline
+
+**What it is (background):** The OTel processor maintains 168 latency baseline slots (7 days × 24 hours) per (service, operation) pair. Each slot runs its own Welford online accumulator. When the current hour-of-day slot has ≥30 samples, detection uses that slot's mean and stddev instead of the flat all-time baseline.
+
+**Why it matters:** A service that normally responds in 50ms at 2am and 500ms at 9am (peak load) would generate false LATENCY_ANOMALY alerts at 9am against a flat 50ms baseline. The seasonal baseline adapts: it compares current latency against *this hour's* normal, not all-time normal.
+
+**How to see it in action:** The OTel processor logs `"seasonal_baseline": "true"` alongside `latency anomaly detected` lines once the current time slot has been trained. After the cluster has been running for several hours, `poll_drift_events.py` output will show which baseline was used.
+
+**Key talking point:**
+> *"Davis baselines every metric per day-of-week and time-of-day out of the box. We implement the same pattern in the OTel processor using 168 Welford accumulators — one per hour-of-day × day-of-week. No configuration, no re-training step. The baseline adapts as traffic naturally varies throughout the week."*
+
+---
+
+### Topology UI scenario reference
+
+| Button | Scenario | Anomaly types fired | New features demonstrated |
+|--------|----------|--------------------|-----------------------------|
+| 1 Kill service | `kill-service` | MISSING_SERVICE | Confidence score, downstream suppression |
+| 2 New call path | `new-call-path` | NEW_FINGERPRINT | New node/edge rendering |
+| 3 New error sig | `new-error` | NEW_ERROR_SIGNATURE | Error badge, log entry |
+| 4 DB gone silent | `db-dropped` | MISSING_SERVICE | Root cause inference |
+| 5 DB incident | `db-incident` | MISSING_SERVICE + NEW_ERROR_SIGNATURE × 3 | Confidence score (shared dep), downstream suppression |
+| 6 Cascading failure | `cascading` | MISSING_SERVICE → ERROR_SIG → ERROR_SIG (2s apart) | Confidence score, downstream suppression |
+| 7 Latency spike | `latency-spike` | LATENCY_ANOMALY | User impact (spans/min), amber node state |
+| 8 Error rate | `error-rate-spike` | ERROR_RATE_ANOMALY + NEW_ERROR_SIGNATURE | User impact, red-orange node state, INCIDENT badge |
+| 9 Combined | `combined-metric` | MISSING_SERVICE + NEW_ERROR_SIGNATURE + ERROR_RATE_ANOMALY | All features together |
+| — (inject) | `oom-latency` | LATENCY_ANOMALY | Infra event correlation (OOMKill + latency on same node) |
+
+**Inject infra events manually** (no cluster needed):
+```bash
+# OOMKill on visits-service
+curl -s -X POST http://localhost:8080/api/inject/infra \
+  -H 'Content-Type: application/json' \
+  -d '{"service":"visits-service","reason":"OOMKilling","message":"rss=512Mi limit=256Mi","count":3}'
+
+# CrashLoopBackOff on customers-service
+curl -s -X POST http://localhost:8080/api/inject/infra \
+  -H 'Content-Type: application/json' \
+  -d '{"service":"customers-service","reason":"CrashLoopBackOff","message":"Back-off restarting failed container","count":5}'
+```
+
+**Reset the topology UI:**
+```bash
+curl -s http://localhost:8080/api/clear   # or press C in the browser
+```
+
+---
+
+
 
 ```
 LEARN  →  Search each service independently (up to 200 traces each, parallel)
