@@ -353,6 +353,12 @@
     color: #BF5AF2;
     margin-left: 6px;
   }
+  .chain-confidence {
+    font-size: 10px;
+    color: #3FB950;
+    margin-left: 6px;
+    font-weight: 600;
+  }
 
   /* Event log */
   #event-log {
@@ -578,6 +584,9 @@ let topology   = { nodes: [], edges: [] };
 let active     = {};          // service -> [anomaly, ...]
 let rootCause  = null;
 let causalityChain = [];
+let confidence = {};          // service -> confidence score [0,1]
+let suppressed = new Set();   // services that are purely downstream effects
+let infraEvents = {};         // service -> [{reason, message, count, timestamp_ms}]
 let simulation = null;
 let nodeMap    = {};          // id -> d3 node datum
 let linkMap    = {};          // "src->dst" -> d3 link datum
@@ -606,6 +615,11 @@ async function loadTopology() {
   active     = data.active || {};
   newNodes   = data.new_nodes || [];
   newEdges   = data.new_edges || [];
+  causalityChain = data.causality_chain || [];
+  rootCause      = data.root_cause || null;
+  confidence     = data.confidence || {};
+  suppressed     = new Set(data.suppressed || []);
+  infraEvents    = data.infra_events || {};
   document.getElementById("env-label").textContent =
     `env: ${data.environment}  |  ${data.nodes.length} services  |  ${data.edges.length} edges`;
   renderGraph();
@@ -618,6 +632,8 @@ function nodeState(id) {
   if (!anoms.length) {
     if (newNodes.some(n => n.id === id)) return "new";
     if (_discoveredNodeIds.has(id)) return "discovered";
+    // Nodes with infra events but no anomaly show as latency (amber) to indicate infra pressure
+    if ((infraEvents[id] || []).length > 0) return "latency";
     return "healthy";
   }
   const types = new Set(anoms.map(a => a.anomaly_type));
@@ -830,10 +846,13 @@ function updateBadge() {
   }
 }
 
-function applyState(newActive, chain, incomingNewNodes, incomingNewEdges) {
+function applyState(newActive, chain, incomingNewNodes, incomingNewEdges, incomingConf, incomingSup, incomingInfra) {
   active = newActive || {};
   causalityChain = chain || [];
   rootCause = causalityChain.length ? causalityChain[0] : null;
+  if (incomingConf !== undefined) confidence = incomingConf || {};
+  if (incomingSup  !== undefined) suppressed = new Set(incomingSup || []);
+  if (incomingInfra !== undefined) infraEvents = incomingInfra || {};
 
   // If new nodes/edges arrived, re-render the graph to include them
   const hadNew = newNodes.length > 0 || newEdges.length > 0;
@@ -874,20 +893,24 @@ function applyState(newActive, chain, incomingNewNodes, incomingNewEdges) {
 
 function updatePanel() {
   const anyActive = Object.values(active).some(v => v.length > 0);
-  document.getElementById("panel-empty").style.display     = anyActive ? "none" : "block";
+  const anyInfra  = Object.keys(infraEvents).length > 0;
+  document.getElementById("panel-empty").style.display     = (anyActive || anyInfra) ? "none" : "block";
   document.getElementById("panel-causality").style.display = anyActive && causalityChain.length ? "block" : "none";
   document.getElementById("panel-affected").style.display  = anyActive ? "block" : "none";
 
-  // Causality chain
+  // Causality chain with confidence score
   if (causalityChain.length) {
     const chainEl = document.getElementById("chain-display");
+    const rootConf = confidence[causalityChain[0]];
+    const confLabel = rootConf !== undefined
+      ? `<span class="chain-confidence">${Math.round(rootConf * 100)}% confidence</span>` : "";
     chainEl.innerHTML = causalityChain.map((svc, i) => {
       const isRoot = i === 0;
       const arrow  = i < causalityChain.length - 1
         ? `<span class="chain-arrow">→</span>` : "";
       return `<div class="chain-item">
         <span class="${isRoot ? 'chain-root' : 'chain-svc'}">${svc}</span>
-        ${isRoot ? '<span class="chain-label">ROOT CAUSE</span>' : ''}
+        ${isRoot ? `<span class="chain-label">ROOT CAUSE</span>${confLabel}` : ''}
         ${arrow}
       </div>`;
     }).join("");
@@ -902,7 +925,7 @@ function updatePanel() {
     affectedEntries.unshift([rootCause, []]);
   }
   const affected = affectedEntries;
-  if (!affected.length) { listEl.innerHTML = ""; return; }
+  if (!affected.length && !anyInfra) { listEl.innerHTML = ""; return; }
 
   listEl.innerHTML = affected.map(([svc, anoms]) => {
     // If this service has stronger signals (ERROR/MISSING/metric), drop pure DRIFT entries
@@ -910,7 +933,9 @@ function updatePanel() {
       a.anomaly_type === "NEW_ERROR_SIGNATURE" || a.anomaly_type === "MISSING_SERVICE" ||
       a.anomaly_type === "LATENCY_ANOMALY"     || a.anomaly_type === "ERROR_RATE_ANOMALY");
     if (hasStrong) anoms = anoms.filter(a => a.anomaly_type !== "NEW_FINGERPRINT");
-    const state  = nodeState(svc);
+
+    const isSuppressed = suppressed.has(svc);
+    const state  = isSuppressed ? "drift" : nodeState(svc);
     const badgeClass = {
       rootcause: "badge-rootcause", error: "badge-error",
       missing:   "badge-missing",   drift: "badge-drift",
@@ -921,6 +946,24 @@ function updatePanel() {
       latency: "LATENCY SPIKE",  errorrate: "ERROR RATE",
     }[state] || "DRIFT";
 
+    // User impact: spans/min from any metric anomaly event
+    let impactLine = "";
+    for (const a of anoms) {
+      if (a.spans_per_min && a.spans_per_min !== "0") {
+        impactLine = `<div class="anomaly-item" style="color:#58A6FF">
+          ~${a.spans_per_min} spans/min affected</div>`;
+        break;
+      }
+    }
+
+    // Infra events for this service
+    const svcInfra = (infraEvents[svc] || []);
+    const infraItems = svcInfra.map(e => {
+      const ts = new Date(e.timestamp_ms).toLocaleTimeString();
+      return `<div class="anomaly-item" style="color:#E07B39">
+        <span class="ts">${ts}</span> ⚙ ${e.reason}: ${e.message} (×${e.count})</div>`;
+    }).join("");
+
     const anomItems = anoms.map(a => {
       const ts = new Date(a.timestamp_ms).toLocaleTimeString();
       return `<div class="anomaly-item">
@@ -928,11 +971,31 @@ function updatePanel() {
       </div>`;
     }).join("");
 
-    return `<div class="service-card state-${state}">
+    const suppressedNote = isSuppressed
+      ? `<div class="anomaly-item" style="color:#484F58;font-style:italic">secondary effect of ${rootCause}</div>` : "";
+
+    return `<div class="service-card state-${state}" ${isSuppressed ? 'style="opacity:0.6"' : ''}>
       <div class="svc-name">${svc} <span class="badge ${badgeClass}">${label}</span></div>
-      ${anomItems}
+      ${anomItems}${impactLine}${infraItems}${suppressedNote}
     </div>`;
   }).join("");
+}
+
+function addInfraLogEntries(events, affected) {
+  const logEl = document.getElementById("log-entries");
+  for (const svc of affected) {
+    for (const e of (events[svc] || [])) {
+      const ts = new Date(e.timestamp_ms).toLocaleTimeString();
+      const entry = document.createElement("div");
+      entry.className = "log-entry";
+      entry.innerHTML = `<span class="log-ts">${ts}</span> `
+        + `<span style="color:#E07B39">⚙ INFRA</span> `
+        + `<span class="log-svc">${svc}</span> `
+        + `<span style="color:#8B949E">${e.reason} ×${e.count}</span>`;
+      logEl.prepend(entry);
+    }
+  }
+  while (logEl.children.length > 50) logEl.removeChild(logEl.lastChild);
 }
 
 // ── Problem banner ────────────────────────────────────────────────────────
@@ -1072,15 +1135,21 @@ function connectSSE() {
     const msg = JSON.parse(e.data);
     if (msg.type === "drift") {
       addLogEntry(msg.event);
-      applyState(msg.active, msg.causality_chain, msg.new_nodes, msg.new_edges);
+      applyState(msg.active, msg.causality_chain, msg.new_nodes, msg.new_edges,
+                 msg.confidence, msg.suppressed, msg.infra_events);
       if (msg.problem !== undefined) applyProblem(msg.problem);
     } else if (msg.type === "state") {
-      applyState(msg.active, causalityChain, msg.new_nodes, msg.new_edges);
+      applyState(msg.active, msg.causality_chain || causalityChain, msg.new_nodes, msg.new_edges,
+                 msg.confidence, msg.suppressed, msg.infra_events);
       if (msg.problem !== undefined) applyProblem(msg.problem);
+    } else if (msg.type === "infra_events") {
+      infraEvents = msg.infra_events || {};
+      updatePanel();
+      addInfraLogEntries(msg.infra_events || {}, msg.affected || []);
     } else if (msg.type === "topology_update") {
       applyTopologyUpdate(msg);
     } else if (msg.type === "recovered") {
-      applyState({}, [], [], []);
+      applyState({}, [], [], [], {}, [], {});
       flashRecovery(msg.message);
       // Let the closed problem linger briefly so the user can see it resolved,
       // then clear the banner after 8s
