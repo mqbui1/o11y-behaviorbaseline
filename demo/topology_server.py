@@ -54,6 +54,7 @@ zscore_re  = re.compile(r'"z_score": "([^"]+)"')
 erate_re   = re.compile(r'"error_pct": "([^"]+)"')
 ecnt_re    = re.compile(r'"error_count": (\d+)')
 tcnt_re    = re.compile(r'"total_count": (\d+)')
+spm_re     = re.compile(r'"spans_per_min": "([^"]+)"')
 
 _INFRA = {"discovery-server", "config-server", "eureka-server", "eureka", "admin-server"}
 # DB_SPAN_PATTERNS: span operation prefixes that indicate a DB call.
@@ -81,6 +82,11 @@ _baseline_cache: dict = {}
 # New nodes/edges discovered via drift events (not in baseline)
 _new_nodes: dict[str, dict] = {}   # id -> {id, label}
 _new_edges: list[dict] = []        # [{source, target, label}]
+
+# Infra events: recent pod-level events from kubectl (OOMKill, BackOff, etc.)
+# service -> list of {reason, message, count, timestamp_ms}
+_infra_events: dict[str, list[dict]] = defaultdict(list)
+INFRA_EVENT_TTL = 300  # seconds
 
 # ── Problem records ────────────────────────────────────────────────────────────
 # Keyed by problem_id (e.g. "P-1746123456").  Each record:
@@ -253,28 +259,81 @@ def _topology_edges_to_graph(edges: dict, baseline_topo: dict) -> dict:
     return {"added_nodes": added_nodes, "added_edges": added_edges}
 
 
+# Anomaly type weights for confidence scoring (higher = stronger root cause signal)
+_ANOMALY_WEIGHTS = {
+    "MISSING_SERVICE":    1.0,
+    "ERROR_RATE_ANOMALY": 0.85,
+    "NEW_ERROR_SIGNATURE":0.7,
+    "LATENCY_ANOMALY":    0.5,
+    "NEW_FINGERPRINT":    0.3,
+}
+
+
+def _score_candidate(svc: str, active: dict, upstream: dict, affected: set,
+                     first_seen: dict) -> float:
+    """
+    Compute a confidence score [0, 1] for a root cause candidate.
+
+    Factors:
+      - anomaly_weight: type of anomaly (MISSING > ERROR_RATE > ERROR_SIG > LATENCY > DRIFT)
+      - caller_fraction: fraction of total affected services that call this node
+      - depth_bonus: leaf nodes (no affected downstream) score higher
+      - timing_bonus: node that fired earliest gets a small bonus
+    """
+    anoms = active.get(svc, [])
+    if not anoms:
+        return 0.0
+
+    # Highest-weight anomaly type on this node
+    type_weight = max((_ANOMALY_WEIGHTS.get(a.get("anomaly_type", ""), 0.1)
+                       for a in anoms), default=0.1)
+
+    # Fraction of affected callers (shared dep = more likely root cause)
+    callers = upstream.get(svc, [])
+    callers_affected = sum(1 for c in callers if c in affected)
+    total_affected = max(len(affected) - 1, 1)  # exclude self
+    caller_fraction = callers_affected / total_affected
+
+    # Timing: earliest anomaly timestamp gets up to 0.1 bonus
+    earliest_ts = min((a.get("timestamp_ms", 0) for a in anoms), default=0)
+    all_ts = [a.get("timestamp_ms", 0)
+              for anoms_list in active.values()
+              for a in anoms_list if a.get("timestamp_ms", 0)]
+    if all_ts:
+        min_ts, max_ts = min(all_ts), max(all_ts)
+        span = max_ts - min_ts or 1
+        timing_bonus = 0.1 * (1.0 - (earliest_ts - min_ts) / span)
+    else:
+        timing_bonus = 0.0
+
+    # Combine: weighted sum, normalised to [0, 1]
+    score = (type_weight * 0.5) + (caller_fraction * 0.35) + (timing_bonus * 0.15)
+    return min(score, 1.0)
+
+
 def _find_root_cause(topology: dict,
-                     active: dict[str, list[dict]]) -> list[str]:
+                     active: dict[str, list[dict]]) -> tuple[list[str], dict[str, float]]:
     """
     Traverse the dependency graph to find root cause across all affected services.
-    Returns causality chain: [root_cause, intermediate..., most_upstream_affected]
+
+    Returns:
+      chain      — [root_cause, intermediate..., most_upstream_affected]
+      confidence — {svc: score} for all candidates (0.0–1.0)
 
     Algorithm:
       - Start from all services with active anomalies
-      - Walk their downstream dependencies
-      - A node with anomalies and no anomalous deps is a root cause candidate
-      - If multiple candidates, prefer the one with most callers affected (shared dep)
-      - Build chain from root cause up to the most upstream affected service
+      - Walk downstream to find deepest affected nodes (root cause candidates)
+      - Score each candidate probabilistically (type weight + caller fraction + timing)
+      - Build chain from highest-scoring root cause upward
     """
     downstream = topology.get("downstream", {})
     upstream   = topology.get("upstream", {})
     affected   = {s for s, v in active.items() if v}
 
     if not affected:
-        return []
+        return [], {}
 
     def _find_deepest(svc: str, visited: set) -> str:
-        """Recursively find the deepest downstream node that also has anomalies."""
         if svc in visited:
             return svc
         visited.add(svc)
@@ -282,40 +341,40 @@ def _find_root_cause(topology: dict,
             if dep in _INFRA:
                 continue
             if dep in affected:
-                deeper = _find_deepest(dep, visited)
-                return deeper
+                return _find_deepest(dep, visited)
         return svc
 
-    # Find root cause: deepest affected node reachable from any affected service
-    candidates: dict[str, int] = {}
-    for svc in affected:
-        root = _find_deepest(svc, set())
-        callers_hit = sum(1 for c in upstream.get(root, []) if c in affected)
-        candidates[root] = max(candidates.get(root, 0), callers_hit)
+    # Collect all first-seen timestamps per service
+    first_seen: dict[str, int] = {
+        svc: min((a.get("timestamp_ms", 0) for a in anoms), default=0)
+        for svc, anoms in active.items() if anoms
+    }
 
-    # mysql:petclinic as root cause only if it has its OWN anomalies AND multiple
-    # affected services call it (shared dep = high confidence DB is the cause)
+    # Find candidates (deepest reachable affected node from each affected service)
+    candidate_svcs: set[str] = set()
+    for svc in affected:
+        candidate_svcs.add(_find_deepest(svc, set()))
+
+    # mysql:petclinic as candidate if multiple affected callers
     if "mysql:petclinic" in affected:
         callers_hit = sum(1 for svc in affected
                          if "mysql:petclinic" in downstream.get(svc, []))
         if callers_hit > 1:
-            candidates["mysql:petclinic"] = callers_hit
+            candidate_svcs.add("mysql:petclinic")
 
-    # MISSING_SERVICE anomalies are stronger root cause signals than ERROR/DRIFT —
-    # a missing service causes downstream errors, not the other way around.
-    # Give MISSING candidates a large bonus so they win ties against erroring callers.
-    def _candidate_score(svc: str) -> tuple:
-        has_missing = any(a.get("anomaly_type") == "MISSING_SERVICE"
-                          for a in active.get(svc, []))
-        return (1 if has_missing else 0, candidates[svc])
+    # Score each candidate
+    confidence: dict[str, float] = {
+        svc: _score_candidate(svc, active, upstream, affected, first_seen)
+        for svc in candidate_svcs
+    }
 
-    # Pick candidate with highest score (missing > error, then most callers affected)
-    root_cause = max(candidates, key=_candidate_score)
+    root_cause = max(candidate_svcs, key=lambda s: confidence.get(s, 0))
 
-    # Build chain: root_cause → services that call it (affected) → their callers
+    # Build chain: root_cause → services that call it → their callers
     chain = [root_cause]
     visited_chain: set[str] = {root_cause}
-    frontier = [c for c in upstream.get(root_cause, []) if c in affected and c not in visited_chain]
+    frontier = [c for c in upstream.get(root_cause, [])
+                if c in affected and c not in visited_chain]
     while frontier:
         next_layer = []
         for svc in frontier:
@@ -326,7 +385,39 @@ def _find_root_cause(topology: dict,
                                if c in affected and c not in visited_chain]
         frontier = next_layer
 
-    return chain
+    return chain, confidence
+
+
+def _downstream_suppressed(svc: str, root_cause: str, topology: dict,
+                            active: dict) -> bool:
+    """
+    Return True if svc is purely a downstream effect of root_cause.
+    Used to visually demote secondary services in the panel (#5 downstream suppression).
+
+    A service is suppressed when:
+      - It IS NOT the root cause
+      - It has ONLY DRIFT/LATENCY anomalies (not ERROR/MISSING which are independent signals)
+      - root_cause is reachable from svc via upstream links (i.e. svc calls root_cause)
+    """
+    if svc == root_cause:
+        return False
+    anoms = active.get(svc, [])
+    independent = {"NEW_ERROR_SIGNATURE", "MISSING_SERVICE", "ERROR_RATE_ANOMALY"}
+    if any(a.get("anomaly_type") in independent for a in anoms):
+        return False
+    # Check if root_cause is downstream of svc (svc → ... → root_cause)
+    downstream = topology.get("downstream", {})
+    visited: set[str] = set()
+    frontier = list(downstream.get(svc, []))
+    while frontier:
+        node = frontier.pop()
+        if node == root_cause:
+            return True
+        if node in visited:
+            continue
+        visited.add(node)
+        frontier.extend(downstream.get(node, []))
+    return False
 
 
 # ── Event parsing (mirrors poll_drift_events.py) ──────────────────────────────
@@ -355,10 +446,12 @@ def _parse_event(line: str) -> dict | None:
         cur  = cur_ms_re.search(line)
         base = base_ms_re.search(line)
         zs   = zscore_re.search(line)
-        cur_ms   = cur.group(1)  if cur  else "?"
-        base_ms  = base.group(1) if base else "?"
-        z_score  = zs.group(1)   if zs   else "?"
-        op2_val  = op2.group(1)  if op2  else ""
+        spm  = spm_re.search(line)
+        cur_ms       = cur.group(1)  if cur  else "?"
+        base_ms      = base.group(1) if base else "?"
+        z_score      = zs.group(1)   if zs   else "?"
+        op2_val      = op2.group(1)  if op2  else ""
+        spans_per_min = spm.group(1) if spm  else None
         return {
             "anomaly_type":      "LATENCY_ANOMALY",
             "service":           svc_val,
@@ -366,6 +459,7 @@ def _parse_event(line: str) -> dict | None:
             "current_mean_ms":   cur_ms,
             "baseline_mean_ms":  base_ms,
             "z_score":           z_score,
+            "spans_per_min":     spans_per_min,
             "message":           f"Latency spike: {svc_val} {cur_ms}ms (baseline {base_ms}ms, z={z_score})",
             "hash":              f"latency:{svc_val}:{op2_val}",
             "timestamp_ms":      int(time.time() * 1000),
@@ -375,10 +469,12 @@ def _parse_event(line: str) -> dict | None:
         er   = erate_re.search(line)
         ec   = ecnt_re.search(line)
         tc   = tcnt_re.search(line)
-        op2_val  = op2.group(1) if op2 else ""
-        err_pct  = er.group(1)  if er  else "?"
-        err_cnt  = int(ec.group(1)) if ec else 0
-        tot_cnt  = int(tc.group(1)) if tc else 0
+        spm  = spm_re.search(line)
+        op2_val       = op2.group(1) if op2 else ""
+        err_pct       = er.group(1)  if er  else "?"
+        err_cnt       = int(ec.group(1)) if ec else 0
+        tot_cnt       = int(tc.group(1)) if tc else 0
+        spans_per_min = spm.group(1) if spm else None
         return {
             "anomaly_type": "ERROR_RATE_ANOMALY",
             "service":      svc_val,
@@ -386,6 +482,7 @@ def _parse_event(line: str) -> dict | None:
             "error_pct":    err_pct,
             "error_count":  err_cnt,
             "total_count":  tot_cnt,
+            "spans_per_min": spans_per_min,
             "message":      f"Error rate spike: {svc_val} {err_pct} ({err_cnt}/{tot_cnt} spans)",
             "hash":         f"errorrate:{svc_val}:{op2_val}",
             "timestamp_ms": int(time.time() * 1000),
@@ -517,7 +614,7 @@ async def _tail_otel_logs(environment: str) -> None:
                         _active_anomalies[caller].append(caller_event)
 
             # Build causality chain
-            chain = _find_root_cause(_topology_cache, _active_anomalies)
+            chain, confidence = _find_root_cause(_topology_cache, _active_anomalies)
             root_cause = chain[0] if chain else svc
             affected_svcs = [s for s, v in _active_anomalies.items() if v]
 
@@ -530,14 +627,18 @@ async def _tail_otel_logs(environment: str) -> None:
             event["problem_id"] = pid
 
             # Build broadcast payload
+            suppressed = [s for s in affected_svcs
+                          if _downstream_suppressed(s, root_cause, _topology_cache, _active_anomalies)]
             payload = {
-                "type":           "drift",
-                "event":          event,
-                "active":         {k: v for k, v in _active_anomalies.items() if v},
+                "type":            "drift",
+                "event":           event,
+                "active":          {k: v for k, v in _active_anomalies.items() if v},
                 "causality_chain": chain,
-                "root_cause":     root_cause,
-                "timestamp_ms":   int(now * 1000),
-                "problem":        _problems[pid],
+                "root_cause":      root_cause,
+                "confidence":      confidence,
+                "suppressed":      suppressed,
+                "timestamp_ms":    int(now * 1000),
+                "problem":         _problems[pid],
             }
 
             # Broadcast to all SSE subscribers
@@ -693,6 +794,124 @@ async def _tail_topology_events(environment: str) -> None:
             print(f"[topology] poll error: {e}", flush=True)
 
 
+async def _poll_infra_events() -> None:
+    """Background task: poll kubectl warning events every 30s and correlate
+    with active anomalies by matching pod names to service names.
+
+    Looks for: OOMKilling, BackOff, Failed, Unhealthy, CrashLoopBackOff.
+    Stores results in _infra_events for inclusion in SSE payloads.
+    """
+    POLL_INTERVAL = 30
+    # kubectl event reasons we care about
+    WARN_REASONS = {"OOMKilling", "BackOff", "Failed", "Unhealthy",
+                    "CrashLoopBackOff", "FailedMount", "Evicted", "Killing"}
+
+    while True:
+        await asyncio.sleep(POLL_INTERVAL)
+        if not EC2_IP or not EC2_PASS:
+            continue
+        try:
+            ssh_cmd = (
+                "exec bash -c '"
+                "kubectl get events --field-selector type=Warning "
+                "--sort-by=.lastTimestamp -o json 2>/dev/null'"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                "sshpass", f"-p{EC2_PASS}",
+                "ssh", "-T", "-p", EC2_PORT,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "RequestTTY=no",
+                f"splunk@{EC2_IP}",
+                ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            raw = stdout.decode("utf-8", errors="replace").strip()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            items = data.get("items", [])
+            now_ms = int(time.time() * 1000)
+            cutoff_ms = now_ms - INFRA_EVENT_TTL * 1000
+
+            new_infra: dict[str, list[dict]] = defaultdict(list)
+            for item in items:
+                reason = item.get("reason", "")
+                if reason not in WARN_REASONS:
+                    continue
+                # Derive service name from involved object name
+                # e.g. "visits-service-6d8f9c-abc" → "visits-service"
+                obj_name = (item.get("involvedObject") or {}).get("name", "")
+                svc = _pod_name_to_service(obj_name)
+                if not svc or svc in _INFRA:
+                    continue
+                # Parse timestamp
+                ts_str = (item.get("lastTimestamp") or item.get("eventTime") or "")
+                try:
+                    import datetime
+                    ts_ms = int(datetime.datetime.fromisoformat(
+                        ts_str.replace("Z", "+00:00")).timestamp() * 1000)
+                except Exception:
+                    ts_ms = now_ms
+                if ts_ms < cutoff_ms:
+                    continue
+                msg = item.get("message", "")
+                count = item.get("count", 1)
+                new_infra[svc].append({
+                    "reason":       reason,
+                    "message":      msg[:120],
+                    "count":        count,
+                    "timestamp_ms": ts_ms,
+                    "object":       obj_name,
+                })
+
+            global _infra_events
+            _infra_events = new_infra
+
+            if new_infra:
+                # Broadcast infra update so UI can decorate nodes
+                affected_svcs = list(new_infra.keys())
+                payload = {
+                    "type":         "infra_events",
+                    "infra_events": dict(new_infra),
+                    "affected":     affected_svcs,
+                    "timestamp_ms": now_ms,
+                }
+                dead = []
+                for q in _subscribers:
+                    try:
+                        q.put_nowait(payload)
+                    except asyncio.QueueFull:
+                        dead.append(q)
+                for q in dead:
+                    _subscribers.remove(q)
+
+        except asyncio.TimeoutError:
+            print("[topology] infra poll timed out", flush=True)
+        except Exception as e:
+            print(f"[topology] infra poll error: {e}", flush=True)
+
+
+def _pod_name_to_service(pod_name: str) -> str:
+    """Strip pod hash suffixes to derive the service/deployment name.
+
+    e.g. visits-service-6d8f9c-xkz9p → visits-service
+         mysql-0 → mysql:petclinic (special case)
+    """
+    if not pod_name:
+        return ""
+    if "mysql" in pod_name or "petclinic-db" in pod_name:
+        return "mysql:petclinic"
+    # Strip up to two trailing hash segments (ReplicaSet hash + pod hash)
+    parts = pod_name.rsplit("-", 2)
+    if len(parts) == 3:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0]
+    return pod_name
+
+
 async def _expire_anomalies() -> None:
     """Background task: recovery detection + hard TTL expiry.
 
@@ -793,6 +1012,7 @@ def _make_app(environment: str):
         asyncio.create_task(_tail_otel_logs(environment))
         asyncio.create_task(_expire_anomalies())
         asyncio.create_task(_tail_topology_events(environment))
+        asyncio.create_task(_poll_infra_events())
 
     @app.get("/", response_class=HTMLResponse)
     async def _index():
@@ -801,14 +1021,24 @@ def _make_app(environment: str):
     @app.get("/api/topology")
     async def _get_topology():
         cur = _problems.get(_current_problem_id) if _current_problem_id else None
+        chain, confidence = _find_root_cause(_topology_cache, _active_anomalies)
+        root_cause = chain[0] if chain else None
+        affected_svcs = [s for s, v in _active_anomalies.items() if v]
+        suppressed = [s for s in affected_svcs
+                      if _downstream_suppressed(s, root_cause, _topology_cache, _active_anomalies)] if root_cause else []
         return JSONResponse({
-            "environment": environment,
-            "nodes":       _topology_cache.get("nodes", []),
-            "edges":       _topology_cache.get("edges", []),
-            "active":      {k: v for k, v in _active_anomalies.items() if v},
-            "new_nodes":   list(_new_nodes.values()),
-            "new_edges":   list(_new_edges),
-            "problem":     cur,
+            "environment":     environment,
+            "nodes":           _topology_cache.get("nodes", []),
+            "edges":           _topology_cache.get("edges", []),
+            "active":          {k: v for k, v in _active_anomalies.items() if v},
+            "new_nodes":       list(_new_nodes.values()),
+            "new_edges":       list(_new_edges),
+            "problem":         cur,
+            "causality_chain": chain,
+            "root_cause":      root_cause,
+            "confidence":      confidence,
+            "suppressed":      suppressed,
+            "infra_events":    dict(_infra_events),
         })
 
     @app.get("/api/clear")
@@ -872,7 +1102,7 @@ def _make_app(environment: str):
                 if not any(f"{e['source']}->{e['target']}" == key for e in _new_edges):
                     _new_edges.append({"source": src, "target": dst,
                                        "label": edge.get("label", "")})
-        chain = _find_root_cause(_topology_cache, _active_anomalies)
+        chain, confidence = _find_root_cause(_topology_cache, _active_anomalies)
         root_cause = chain[0] if chain else svc
         affected_svcs = [s for s, v in _active_anomalies.items() if v]
 
@@ -884,12 +1114,16 @@ def _make_app(environment: str):
             _update_problem(pid, root_cause, affected_svcs, event)
         event["problem_id"] = pid
 
+        suppressed = [s for s in affected_svcs
+                      if _downstream_suppressed(s, root_cause, _topology_cache, _active_anomalies)]
         payload = {
             "type":            "drift",
             "event":           event,
             "active":          {k: v for k, v in _active_anomalies.items() if v},
             "causality_chain": chain,
             "root_cause":      root_cause,
+            "confidence":      confidence,
+            "suppressed":      suppressed,
             "timestamp_ms":    event["timestamp_ms"],
             "new_nodes":       list(_new_nodes.values()),
             "new_edges":       list(_new_edges),
@@ -1051,6 +1285,7 @@ def _make_app(environment: str):
                 "current_mean_ms":  "753.4",
                 "baseline_mean_ms": "3.1",
                 "z_score":          "8496.2",
+                "spans_per_min":    "47",
                 "message":          "Latency spike: visits-service 753ms (baseline 3ms, z=8496)",
                 "hash":             "synthetic:latency:visits-service",
             },
@@ -1065,6 +1300,7 @@ def _make_app(environment: str):
                 "error_pct":    "100.0%",
                 "error_count":  42,
                 "total_count":  42,
+                "spans_per_min": "83",
                 "message":      "Error rate spike: customers-service 100.0% (42/42 spans)",
                 "hash":         "synthetic:errorrate:customers-service",
                 "_delay_ms":    0,
@@ -1115,6 +1351,22 @@ def _make_app(environment: str):
                 "_delay_ms":    2000,
             },
         ],
+        # Demo: OOMKill on visits-service pod → latency spike + infra event correlation
+        "oom-latency": [
+            {
+                "anomaly_type":     "LATENCY_ANOMALY",
+                "service":          "visits-service",
+                "root_op":          "api-gateway:GET /owners/{ownerId}/pets/{petId}/visits",
+                "operation":        "GET /owners/{ownerId}/pets/{petId}/visits",
+                "current_mean_ms":  "1243.0",
+                "baseline_mean_ms": "3.1",
+                "z_score":          "14200.0",
+                "spans_per_min":    "52",
+                "message":          "Latency spike: visits-service 1243ms (baseline 3ms, z=14200)",
+                "hash":             "synthetic:latency:visits-oom",
+                "_delay_ms":        0,
+            },
+        ],
         # Cascading failure: vets-service killed → its caller (api-gateway) starts
         # erroring → customers-service also errors (shared upstream dependency).
         # Events fire with increasing delay to show propagation unfolding over time.
@@ -1150,6 +1402,41 @@ def _make_app(environment: str):
             },
         ],
     }
+
+    @app.post("/api/inject/infra")
+    async def _inject_infra(body: dict):
+        """Inject synthetic infra events (kubectl warning events) for demo/testing.
+
+        Body: { "service": "visits-service", "reason": "OOMKilling",
+                "message": "...", "count": 1 }
+        """
+        svc    = body.get("service", "unknown")
+        reason = body.get("reason", "OOMKilling")
+        msg    = body.get("message", f"Container killed due to OOM in pod {svc}-xxx")
+        count  = body.get("count", 1)
+        ev = {
+            "reason":       reason,
+            "message":      msg[:120],
+            "count":        count,
+            "timestamp_ms": int(time.time() * 1000),
+            "object":       f"{svc}-synthetic",
+        }
+        _infra_events[svc].append(ev)
+        payload = {
+            "type":         "infra_events",
+            "infra_events": dict(_infra_events),
+            "affected":     [svc],
+            "timestamp_ms": ev["timestamp_ms"],
+        }
+        dead = []
+        for q in _subscribers:
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            _subscribers.remove(q)
+        return JSONResponse({"ok": True, "event": ev})
 
     @app.get("/api/demo/{scenario}")
     async def _demo(scenario: str, delay_ms: int = 800):
@@ -1188,10 +1475,20 @@ def _make_app(environment: str):
             try:
                 # Send current state immediately on connect
                 cur = _problems.get(_current_problem_id) if _current_problem_id else None
+                _chain, _conf = _find_root_cause(_topology_cache, _active_anomalies)
+                _rc = _chain[0] if _chain else None
+                _aff = [s for s, v in _active_anomalies.items() if v]
+                _sup = [s for s in _aff
+                        if _downstream_suppressed(s, _rc, _topology_cache, _active_anomalies)] if _rc else []
                 snapshot = {
-                    "type":    "state",
-                    "active":  {k: v for k, v in _active_anomalies.items() if v},
-                    "problem": cur,
+                    "type":            "state",
+                    "active":          {k: v for k, v in _active_anomalies.items() if v},
+                    "problem":         cur,
+                    "causality_chain": _chain,
+                    "root_cause":      _rc,
+                    "confidence":      _conf,
+                    "suppressed":      _sup,
+                    "infra_events":    dict(_infra_events),
                 }
                 yield f"data: {json.dumps(snapshot)}\n\n".encode()
                 while True:

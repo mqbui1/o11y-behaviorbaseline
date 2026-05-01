@@ -9,15 +9,44 @@ import (
 	"go.uber.org/zap"
 )
 
+// seasonalSlot holds a Welford online mean/variance accumulator for one
+// hour-of-day × day-of-week bucket (168 slots total: 7 days × 24 hours).
+type seasonalSlot struct {
+	mean  float64
+	m2    float64 // sum of squared deviations (Welford)
+	count int
+}
+
+func (s *seasonalSlot) update(x float64) {
+	s.count++
+	delta := x - s.mean
+	s.mean += delta / float64(s.count)
+	s.m2 += delta * (x - s.mean)
+}
+
+func (s *seasonalSlot) stddev() float64 {
+	if s.count < 2 {
+		return 0
+	}
+	return math.Sqrt(s.m2 / float64(s.count))
+}
+
+// seasonalKey returns the index into a 168-slot array for a given time.
+func seasonalKey(t time.Time) int {
+	return int(t.Weekday())*24 + t.Hour()
+}
+
 // metricWindow holds a rolling window of latency samples and error/total counts
 // for a single (service, operation) pair.
 type metricWindow struct {
 	// latency samples (nanoseconds), oldest first
 	latencySamples []latencySample
-	// baseline: mean and stddev computed from the learn phase
+	// flat baseline: mean and stddev computed from the learn phase (legacy / fallback)
 	baselineMean   float64
 	baselineStddev float64
 	baselineCount  int
+	// seasonal baseline: 168 slots (weekday×hour), populated in parallel with flat baseline
+	seasonal [168]seasonalSlot
 	// error rate tracking
 	errorBuckets []errorBucket // per-second buckets
 	// when baseline was last updated
@@ -35,11 +64,21 @@ type errorBucket struct {
 	total  int
 }
 
+// spanRateBucket is a one-second span-count bucket for throughput estimation.
+type spanRateBucket struct {
+	ts    time.Time
+	count int
+}
+
 // metricsTracker tracks per-(service,operation) latency and error rate,
 // compares against a rolling baseline, and emits anomaly events.
 type metricsTracker struct {
 	mu      sync.Mutex
 	windows map[string]*metricWindow // key: "service:operation"
+
+	// spanRates tracks recent span throughput per service for user impact estimation.
+	// key: service name, value: sliding window of 1s buckets over last 2 minutes.
+	spanRates map[string][]spanRateBucket
 
 	emitter *emitter
 	cfg     *Config
@@ -48,11 +87,26 @@ type metricsTracker struct {
 
 func newMetricsTracker(cfg *Config, emit *emitter) *metricsTracker {
 	return &metricsTracker{
-		windows: make(map[string]*metricWindow),
-		emitter: emit,
-		cfg:     cfg,
-		logger:  zap.NewNop(), // replaced by setLogger after construction
+		windows:   make(map[string]*metricWindow),
+		spanRates: make(map[string][]spanRateBucket),
+		emitter:   emit,
+		cfg:       cfg,
+		logger:    zap.NewNop(), // replaced by setLogger after construction
 	}
+}
+
+// spansPerMin returns the estimated spans/min for a service over the last 2 minutes.
+// Called with mu held.
+func (m *metricsTracker) spansPerMin(service string, now time.Time) float64 {
+	cutoff := now.Add(-2 * time.Minute)
+	buckets := m.spanRates[service]
+	total := 0
+	for _, b := range buckets {
+		if b.ts.After(cutoff) {
+			total += b.count
+		}
+	}
+	return float64(total) / 2.0 // spans per minute over last 2 min
 }
 
 func (m *metricsTracker) withLogger(l *zap.Logger) *metricsTracker {
@@ -104,6 +158,25 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Update per-service span rate buckets (for impact estimation)
+	spanRateCutoff := now.Add(-2 * time.Minute)
+	svcSpans := make(map[string]int)
+	for key, st := range agg {
+		svc, _ := splitKey(key)
+		svcSpans[svc] += st.count
+	}
+	for svc, cnt := range svcSpans {
+		buckets := m.spanRates[svc]
+		// Prune old buckets
+		pruned := buckets[:0]
+		for _, b := range buckets {
+			if b.ts.After(spanRateCutoff) {
+				pruned = append(pruned, b)
+			}
+		}
+		m.spanRates[svc] = append(pruned, spanRateBucket{ts: now, count: cnt})
+	}
+
 	for key, st := range agg {
 		w, ok := m.windows[key]
 		if !ok {
@@ -122,7 +195,11 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 				w.latencySamples = w.latencySamples[1:]
 			}
 
-			// Build baseline from first LearnWindow samples before detecting
+			// Always update seasonal slot (even during learn phase)
+			slot := &w.seasonal[seasonalKey(now)]
+			slot.update(avgLatency)
+
+			// Build flat baseline from first LearnWindow samples before detecting
 			if w.baselineCount < m.cfg.LatencyLearnMinSamples {
 				w.baselineCount++
 				// Update running mean and M2 for Welford's online algorithm
@@ -135,27 +212,41 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 			} else {
 				// Compute current window mean
 				currentMean := windowMean(w.latencySamples)
-				// Convert stored M2 to stddev
-				stddev := math.Sqrt(w.baselineStddev / float64(w.baselineCount))
+
+				// Prefer seasonal baseline when the current slot has enough samples,
+				// otherwise fall back to the flat baseline.
+				baselineMean := w.baselineMean
+				var stddev float64
+				if slot.count >= m.cfg.LatencyLearnMinSamples {
+					baselineMean = slot.mean
+					stddev = slot.stddev()
+				} else {
+					// Convert stored M2 to stddev
+					stddev = math.Sqrt(w.baselineStddev / float64(w.baselineCount))
+				}
 				if stddev < 1 {
 					stddev = 1 // avoid division by zero / noise
 				}
 				// Anomaly: current mean deviates by more than threshold stddevs
 				// AND is above baseline (we only care about slowdowns, not speedups)
-				zScore := (currentMean - w.baselineMean) / stddev
-				if zScore >= m.cfg.LatencyAnomalyZScore && currentMean > w.baselineMean {
+				zScore := (currentMean - baselineMean) / stddev
+				if zScore >= m.cfg.LatencyAnomalyZScore && currentMean > baselineMean {
 					svc, op := splitKey(key)
+					seasonal := slot.count >= m.cfg.LatencyLearnMinSamples
+					spMin := m.spansPerMin(svc, now)
 					m.logger.Info("latency anomaly detected",
 						zap.String("service", svc),
 						zap.String("operation", op),
 						zap.String("current_mean_ms", fmt.Sprintf("%.1f", currentMean/1e6)),
-						zap.String("baseline_mean_ms", fmt.Sprintf("%.1f", w.baselineMean/1e6)),
+						zap.String("baseline_mean_ms", fmt.Sprintf("%.1f", baselineMean/1e6)),
 						zap.String("stddev_ms", fmt.Sprintf("%.1f", stddev/1e6)),
 						zap.String("z_score", fmt.Sprintf("%.2f", zScore)),
+						zap.String("seasonal_baseline", fmt.Sprintf("%v", seasonal)),
+						zap.String("spans_per_min", fmt.Sprintf("%.0f", spMin)),
 						zap.String("environment", env),
 					)
 					_ = m.emitter.emitLatencyAnomaly(env, svc, op,
-						currentMean, w.baselineMean, stddev, zScore)
+						currentMean, baselineMean, stddev, zScore)
 				}
 			}
 		}
@@ -187,6 +278,7 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 			errorRate := float64(totalErrors) / float64(totalSpans)
 			if errorRate >= m.cfg.ErrorRateAnomalyThreshold {
 				svc, op := splitKey(key)
+				spMin := m.spansPerMin(svc, now)
 				m.logger.Info("error rate anomaly detected",
 					zap.String("service", svc),
 					zap.String("operation", op),
@@ -194,6 +286,7 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 					zap.String("error_pct", fmt.Sprintf("%.1f%%", errorRate*100)),
 					zap.Int("error_count", totalErrors),
 					zap.Int("total_count", totalSpans),
+					zap.String("spans_per_min", fmt.Sprintf("%.0f", spMin)),
 					zap.String("environment", env),
 				)
 				_ = m.emitter.emitErrorRateAnomaly(env, svc, op,
