@@ -31,30 +31,39 @@ type topologyFile struct {
 //   1. Written to topology.json alongside the baseline file
 //   2. Emitted as service.topology.edge events to Splunk so the topology
 //      server can animate them onto the graph in real time
+//   3. If TopologyDriftEnabled, new edges seen after warmup also emit
+//      topology.edge.drift events for downstream correlation.
 //
 // The tracker is lock-safe and designed to be called from analyzeTrace()
 // with minimal overhead — just map lookups on the hot path.
 type topologyTracker struct {
 	mu          sync.Mutex
 	edges       map[string]*topologyEdge // "caller->callee" -> edge
-	path        string                   // path to topology.json
-	environment string
-	emitter     *emitter
-	dirty       bool      // true when edges have changed since last flush
-	lastFlush   time.Time // last time topology.json was written
-	flushInterval time.Duration
+	// baselineEdges holds edges that were present at load time (startup).
+	// New edges discovered after startup are candidates for drift events.
+	baselineEdges map[string]struct{}
+	path          string // path to topology.json
+	environment   string
+	emitter       *emitter
+	driftEnabled   bool
+	onDriftEmitted func() // optional callback for counter increment (selfMetrics)
+	dirty          bool      // true when edges have changed since last flush
+	lastFlush      time.Time // last time topology.json was written
+	flushInterval  time.Duration
 }
 
-func newTopologyTracker(baselinePath, environment string, e *emitter) *topologyTracker {
+func newTopologyTracker(baselinePath, environment string, e *emitter, driftEnabled bool) *topologyTracker {
 	// Place topology.json next to baseline.json
 	dir := filepath.Dir(baselinePath)
 	topoPath := filepath.Join(dir, "topology.json")
 
 	t := &topologyTracker{
 		edges:         make(map[string]*topologyEdge),
+		baselineEdges: make(map[string]struct{}),
 		path:          topoPath,
 		environment:   environment,
 		emitter:       e,
+		driftEnabled:  driftEnabled,
 		flushInterval: 30 * time.Second,
 	}
 	t.load()
@@ -98,6 +107,7 @@ func (t *topologyTracker) load() {
 	for k, e := range f.Edges {
 		edge := e // copy
 		t.edges[k] = &edge
+		t.baselineEdges[k] = struct{}{} // mark as known at startup
 	}
 }
 
@@ -105,8 +115,10 @@ func (t *topologyTracker) load() {
 // from the span tree and records any new edges.
 //
 // New edges are immediately emitted as service.topology.edge events.
+// If TopologyDriftEnabled and not in warmup, new post-baseline edges also
+// emit topology.edge.drift events for downstream anomaly correlation.
 // The topology file is flushed to disk on a 30s interval.
-func (t *topologyTracker) observe(spans []spanInfo) {
+func (t *topologyTracker) observe(spans []spanInfo, inWarmup bool) {
 	if len(spans) == 0 {
 		return
 	}
@@ -146,7 +158,11 @@ func (t *topologyTracker) observe(spans []spanInfo) {
 	}
 
 	now := time.Now()
-	var newEdges []topologyEdge
+	type newEdgeInfo struct {
+		edge        topologyEdge
+		isPostBaseline bool // true if not in baselineEdges at startup
+	}
+	var newEdges []newEdgeInfo
 
 	t.mu.Lock()
 	for p := range seen {
@@ -156,6 +172,7 @@ func (t *topologyTracker) observe(spans []spanInfo) {
 			existing.Count++
 			t.dirty = true
 		} else {
+			_, wasBaseline := t.baselineEdges[key]
 			edge := &topologyEdge{
 				Caller:    p.caller,
 				Callee:    p.callee,
@@ -164,7 +181,10 @@ func (t *topologyTracker) observe(spans []spanInfo) {
 				Count:     1,
 			}
 			t.edges[key] = edge
-			newEdges = append(newEdges, *edge)
+			newEdges = append(newEdges, newEdgeInfo{
+				edge:           *edge,
+				isPostBaseline: !wasBaseline,
+			})
 			t.dirty = true
 		}
 	}
@@ -176,10 +196,17 @@ func (t *topologyTracker) observe(spans []spanInfo) {
 	t.mu.Unlock()
 
 	// Emit events for new edges (outside lock)
-	for _, edge := range newEdges {
-		if err := t.emitter.emitTopologyEdge(t.environment, edge); err != nil {
-			// Log but don't fail — topology discovery is best-effort
+	for _, ei := range newEdges {
+		if err := t.emitter.emitTopologyEdge(t.environment, ei.edge); err != nil {
 			println("[topology] emit error:", err.Error())
+		}
+		// Emit drift event for genuinely new post-baseline edges (not during warmup)
+		if ei.isPostBaseline && t.driftEnabled && !inWarmup {
+			if err := t.emitter.emitTopologyDrift(t.environment, ei.edge.Caller, ei.edge.Callee); err != nil {
+				println("[topology] drift emit error:", err.Error())
+			} else if t.onDriftEmitted != nil {
+				t.onDriftEmitted()
+			}
 		}
 	}
 

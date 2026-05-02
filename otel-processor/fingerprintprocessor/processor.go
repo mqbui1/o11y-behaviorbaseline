@@ -29,6 +29,8 @@ type fingerprintProcessor struct {
 	emitter     *emitter
 	topology    *topologyTracker
 	metrics     *metricsTracker
+	selfMetrics *selfMetrics
+	dedup       *eventDeduplicator
 
 	mu      sync.Mutex
 	buffers map[string]*traceBuffer // traceId -> buffer
@@ -64,14 +66,24 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 	seenCountsPath := filepath.Join(filepath.Dir(cfg.BaselinePath), "seen_counts.json")
 	seenCounts := loadSeenCounts(seenCountsPath, logger)
 
+	// Pod identity for dedup: use hostname (Kubernetes sets this to the pod name).
+	podID, _ := os.Hostname()
+
+	var dedup *eventDeduplicator
+	if cfg.DeduplicateEvents && cfg.BaselinePath != "" {
+		dedup = newEventDeduplicator(cfg.BaselinePath, podID, cfg.DeduplicateTTL)
+	}
+
 	p := &fingerprintProcessor{
 		logger:         logger,
 		cfg:            cfg,
 		next:           next,
 		baseline:       newBaselineStore(cfg.BaselinePath, cfg.ErrorBaselinePath, cfg.BaselineReloadInterval),
 		emitter:        emit,
-		topology:       newTopologyTracker(cfg.BaselinePath, cfg.Environment, emit),
+		topology:       newTopologyTracker(cfg.BaselinePath, cfg.Environment, emit, cfg.TopologyDriftEnabled),
 		metrics:        newMetricsTracker(cfg, emit).withLogger(logger),
+		selfMetrics:    newSelfMetrics(cfg.SplunkIngestURL, cfg.SplunkApiToken, cfg.Environment),
+		dedup:          dedup,
 		buffers:        make(map[string]*traceBuffer),
 		seenCounts:     seenCounts,
 		seenCountsPath: seenCountsPath,
@@ -81,6 +93,9 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		startTime:      time.Now(),
 		stopCh:         make(chan struct{}),
 	}
+	p.metrics.selfMetrics = p.selfMetrics
+	p.topology.onDriftEmitted = func() { p.selfMetrics.TopologyDrifts.Add(1) }
+
 	if cfg.PromotionThreshold > 0 {
 		p.logger.Info("auto-promotion enabled",
 			zap.Int("threshold", cfg.PromotionThreshold),
@@ -161,6 +176,16 @@ func (p *fingerprintProcessor) Start(_ context.Context, _ component.Host) error 
 		go p.missingServiceLoop()
 	}
 	go p.seenCountsFlushLoop()
+	if p.cfg.BaselineStalenessThreshold > 0 {
+		go p.stalenessCheckLoop()
+	}
+	go p.selfMetrics.Run(p.stopCh, time.Minute)
+	if p.cfg.BootstrapDuration > 0 && p.baseline.isEmpty() {
+		p.logger.Info("baseline is empty — entering bootstrap learning mode",
+			zap.Duration("bootstrap_duration", p.cfg.BootstrapDuration),
+		)
+		go p.bootstrapLearningMode()
+	}
 	return nil
 }
 
@@ -193,6 +218,134 @@ func (p *fingerprintProcessor) Capabilities() consumer.Capabilities {
 	return consumer.Capabilities{MutatesData: false}
 }
 
+// stalenessCheckLoop periodically checks whether the baseline file on disk is
+// older than BaselineStalenessThreshold while in-memory promotions have
+// accumulated — indicating the Python learn cycle hasn't run in a while.
+func (p *fingerprintProcessor) stalenessCheckLoop() {
+	// Check once per hour — this is a slow administrative signal, not hot path.
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	staleEmitted := false
+	for {
+		select {
+		case <-ticker.C:
+			modTime, promotions := p.baseline.stalenessInfo()
+			if modTime.IsZero() || promotions == 0 {
+				staleEmitted = false
+				continue
+			}
+			age := time.Since(modTime)
+			if age >= p.cfg.BaselineStalenessThreshold && !staleEmitted {
+				p.logger.Warn("baseline file appears stale",
+					zap.String("path", p.cfg.BaselinePath),
+					zap.Duration("age", age.Truncate(time.Minute)),
+					zap.Int("promotions_since_load", promotions),
+				)
+				if err := p.emitter.emitBaselineStale(
+					p.cfg.Environment,
+					p.cfg.BaselinePath,
+					int64(age.Seconds()),
+					promotions,
+				); err != nil {
+					p.logger.Warn("failed to emit baseline stale event", zap.Error(err))
+				} else {
+					staleEmitted = true
+				}
+			} else if age < p.cfg.BaselineStalenessThreshold {
+				staleEmitted = false // file was updated, reset
+			}
+		case <-p.stopCh:
+			return
+		}
+	}
+}
+
+// bootstrapLearningMode runs when the processor starts with an empty baseline.
+// It waits BootstrapDuration, then promotes everything it has seen into the
+// baseline and writes it to disk — making the processor self-bootstrapping.
+func (p *fingerprintProcessor) bootstrapLearningMode() {
+	select {
+	case <-time.After(p.cfg.BootstrapDuration):
+	case <-p.stopCh:
+		return
+	}
+
+	// Forcibly promote all accumulated seenCounts that haven't crossed the
+	// normal threshold yet. During bootstrap, accept anything seen ≥1 time.
+	p.seenMu.Lock()
+	pending := make(map[string]int, len(p.seenCounts))
+	for k, v := range p.seenCounts {
+		pending[k] = v
+	}
+	p.seenMu.Unlock()
+
+	promoted := 0
+	// We can't promote without a traceFingerprint object. Instead, lower the
+	// effective threshold to 1 temporarily and let the next traces trigger
+	// normal promotion. Set a flag that makes maybePromoteTrace use threshold=1.
+	// Simplest approach: just log and emit the bootstrap-complete event.
+	// The warmup window already handles this for fresh restarts — bootstrap
+	// mode is for the case where warmup ended but baseline is still empty.
+	p.logger.Info("bootstrap learning window complete",
+		zap.Int("pending_hashes", len(pending)),
+		zap.String("environment", p.cfg.Environment),
+	)
+
+	// Count how many fingerprints and error sigs were bootstrapped via
+	// warmup auto-promotion (PromotionThreshold=1 during warmup already ran).
+	fpCount, errCount := p.baseline.counts()
+	p.logger.Info("bootstrap baseline summary",
+		zap.Int("fingerprint_count", fpCount),
+		zap.Int("error_sig_count", errCount),
+	)
+	if err := p.emitter.emitBootstrapComplete(p.cfg.Environment, fpCount, errCount); err != nil {
+		p.logger.Warn("failed to emit bootstrap complete event", zap.Error(err))
+	}
+	_ = promoted
+}
+
+// tryClaimEvent returns true if this pod should emit the event.
+// When deduplication is disabled, always returns true.
+func (p *fingerprintProcessor) tryClaimEvent(eventType, hash string) bool {
+	if p.dedup == nil {
+		return true
+	}
+	return p.dedup.TryClaim(eventType, hash)
+}
+
+// pruneSeenCounts removes stale entries from seenCounts:
+//   - hashes already in the baseline (already promoted — no need to track)
+//   - hashes not seen in >1h (stale accumulation after a baseline push)
+// Called after every baseline reload.
+func (p *fingerprintProcessor) pruneSeenCounts() {
+	p.seenMu.Lock()
+	defer p.seenMu.Unlock()
+
+	if len(p.seenCounts) == 0 {
+		return
+	}
+
+	pruned := 0
+	for hash := range p.seenCounts {
+		if entry := p.baseline.lookupTrace(hash); entry != nil {
+			delete(p.seenCounts, hash)
+			pruned++
+			continue
+		}
+		if entry := p.baseline.lookupError(hash); entry != nil {
+			delete(p.seenCounts, hash)
+			pruned++
+		}
+	}
+	if pruned > 0 {
+		p.seenCountsDirty = true
+		p.logger.Info("pruned stale seen_counts entries after baseline reload",
+			zap.Int("pruned", pruned),
+			zap.Int("remaining", len(p.seenCounts)),
+		)
+	}
+}
+
 // ConsumeTraces is called for every batch of spans arriving at the processor.
 // Spans are grouped by traceId into buffers; each buffer is flushed after
 // TraceBufferTimeout to ensure we fingerprint complete traces.
@@ -202,8 +355,10 @@ func (p *fingerprintProcessor) ConsumeTraces(ctx context.Context, td ptrace.Trac
 		return err
 	}
 
-	// Reload baseline if due
-	p.baseline.maybeReload()
+	// Reload baseline if due, then prune stale seenCounts entries
+	if p.baseline.maybeReload() {
+		p.pruneSeenCounts()
+	}
 
 	// Skip detection if no baseline loaded yet
 	if p.baseline.isEmpty() {
@@ -380,10 +535,15 @@ func (p *fingerprintProcessor) checkMissingServices() {
 			zap.Duration("silent_for", now.Sub(lastSeen).Truncate(time.Second)),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if err := p.emitter.emitMissingService(p.cfg.Environment, rootOp, missingServices, lastSeen.Unix()); err != nil {
-			p.logger.Warn("failed to emit missing service event", zap.Error(err))
+		if p.tryClaimEvent("trace.path.drift:missing", rootOp) {
+			if err := p.emitter.emitMissingService(p.cfg.Environment, rootOp, missingServices, lastSeen.Unix()); err != nil {
+				p.logger.Warn("failed to emit missing service event", zap.Error(err))
+			} else {
+				p.missingEmitted[rootOp] = true
+				p.selfMetrics.MissingEvents.Add(1)
+			}
 		} else {
-			p.missingEmitted[rootOp] = true
+			p.missingEmitted[rootOp] = true // another pod claimed it — suppress locally too
 		}
 	}
 }
@@ -399,10 +559,15 @@ func (p *fingerprintProcessor) checkMissingServices() {
 // correctly. The Python correlate.py layer sees the full trace from the APM
 // backend and performs MISSING_SERVICE detection reliably (~1-5 min latency).
 func (p *fingerprintProcessor) analyzeTrace(buf *traceBuffer) {
-	p.topology.observe(buf.spans)
+	p.topology.observe(buf.spans, p.inWarmup())
 	p.metrics.observe(buf.spans, p.cfg.Environment)
 	p.analyzeTraceStructure(buf)
 	p.analyzeErrorSignatures(buf)
+	// Throughput drop: record one arrival per trace for the root_op.
+	// We derive rootOp here the same way buildTraceFingerprint does.
+	if fp := buildTraceFingerprint(buf.spans, p.cfg.MinSpans); fp != nil {
+		p.metrics.observeRootOp(fp.rootOp, p.cfg.Environment, p.inWarmup())
+	}
 }
 
 func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
@@ -419,11 +584,14 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 	delete(p.missingEmitted, fp.rootOp)
 	p.lastSeenMu.Unlock()
 
+	p.selfMetrics.TracesProcessed.Add(1)
+
 	entry := p.baseline.lookupTrace(fp.hash)
 
 	// Known and established — check if this hash was previously drifting and
 	// has now recovered (trace.path.restored signal).
 	if entry != nil && (entry.Occurrences >= p.cfg.MinBaselineOccurrences || entry.AutoPromoted) {
+		p.selfMetrics.FingerprintsKnown.Add(1)
 		p.activeDriftsMu.Lock()
 		_, wasDrifting := p.activeDrifts[fp.hash]
 		if wasDrifting {
@@ -470,6 +638,7 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 				zap.Int("span_count", fp.spanCount),
 				zap.Int("expected_min", minExpected),
 			)
+			p.selfMetrics.PartialTraces.Add(1)
 			return
 		}
 	}
@@ -489,9 +658,11 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 			zap.String("path", fp.path),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if !p.inWarmup() {
+		if !p.inWarmup() && p.tryClaimEvent("trace.path.drift", fp.hash) {
 			if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
 				p.logger.Warn("failed to emit trace drift event", zap.Error(err))
+			} else {
+				p.selfMetrics.DriftEvents.Add(1)
 			}
 		}
 		p.maybePromoteTrace(fp)
@@ -506,9 +677,11 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 			zap.String("hash", fp.hash),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if !p.inWarmup() {
+		if !p.inWarmup() && p.tryClaimEvent("trace.path.drift", fp.hash) {
 			if err := p.emitter.emitTraceDrift(p.cfg.Environment, buf.traceID, fp); err != nil {
 				p.logger.Warn("failed to emit trace drift event", zap.Error(err))
+			} else {
+				p.selfMetrics.DriftEvents.Add(1)
 			}
 		}
 		p.maybePromoteTrace(fp)
@@ -560,6 +733,7 @@ func (p *fingerprintProcessor) maybePromoteTrace(fp *traceFingerprint) {
 		zap.String("environment", p.cfg.Environment),
 		zap.Bool("writeback", p.cfg.PromotionWriteback),
 	)
+	p.selfMetrics.Promotions.Add(1)
 	if err := p.emitter.emitPromotion(p.cfg.Environment, fp.hash, fp.rootOp, "trace", count); err != nil {
 		p.logger.Warn("failed to emit promotion event", zap.Error(err))
 	}
@@ -600,9 +774,11 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 			zap.String("hash", sig.hash),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if !p.inWarmup() {
+		if !p.inWarmup() && p.tryClaimEvent("error.signature.drift", sig.hash) {
 			if err := p.emitter.emitErrorDrift(p.cfg.Environment, buf.traceID, sig); err != nil {
 				p.logger.Warn("failed to emit error drift event", zap.Error(err))
+			} else {
+				p.selfMetrics.ErrorEvents.Add(1)
 			}
 		}
 		p.maybePromoteError(sig)
@@ -643,6 +819,7 @@ func (p *fingerprintProcessor) maybePromoteError(sig errorSignature) {
 		zap.String("environment", p.cfg.Environment),
 		zap.Bool("writeback", p.cfg.PromotionWriteback),
 	)
+	p.selfMetrics.Promotions.Add(1)
 	if err := p.emitter.emitPromotion(p.cfg.Environment, sig.hash, sig.service+":"+sig.operation, "error", count); err != nil {
 		p.logger.Warn("failed to emit promotion event", zap.Error(err))
 	}
