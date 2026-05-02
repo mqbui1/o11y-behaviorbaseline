@@ -124,6 +124,56 @@ type Config struct {
 	// MinErrorRateSamples is the minimum number of trace observations required
 	// before error rate anomaly detection activates. Default: 10.
 	MinErrorRateSamples int `mapstructure:"min_error_rate_samples"`
+
+	// ── Throughput drop detection ──────────────────────────────────────────
+
+	// ThroughputDropWindow is the rolling window for measuring current request
+	// rate per root_op. Default: 2m. Set to 0 to disable.
+	ThroughputDropWindow time.Duration `mapstructure:"throughput_drop_window"`
+
+	// ThroughputDropThreshold is the fractional drop (0–1) in request rate
+	// relative to the rolling baseline that triggers a throughput.drop event.
+	// e.g. 0.5 = 50% drop. Default: 0.5.
+	ThroughputDropThreshold float64 `mapstructure:"throughput_drop_threshold"`
+
+	// ThroughputLearnMinSamples is how many trace observations to collect
+	// before activating throughput drop detection. Default: 20.
+	ThroughputLearnMinSamples int `mapstructure:"throughput_learn_min_samples"`
+
+	// ── Topology drift detection ───────────────────────────────────────────
+
+	// TopologyDriftEnabled controls whether new topology edges (service calls
+	// not seen during baseline) are emitted as topology.edge.drift events.
+	// Default: true.
+	TopologyDriftEnabled bool `mapstructure:"topology_drift_enabled"`
+
+	// ── Baseline staleness detection ──────────────────────────────────────
+
+	// BaselineStalenessThreshold is how long a baseline file can go without
+	// changing (while the processor has promoted entries) before a
+	// baseline.stale warning event is emitted. Default: 24h. Set to 0 to disable.
+	BaselineStalenessThreshold time.Duration `mapstructure:"baseline_staleness_threshold"`
+
+	// ── Bootstrap learning mode ────────────────────────────────────────────
+
+	// BootstrapDuration is how long the processor will run in "learning mode"
+	// when it starts with an empty baseline. During this period all fingerprints
+	// are collected and at the end a bootstrap baseline is written to disk.
+	// Default: 5m. Set to 0 to disable auto-bootstrap.
+	BootstrapDuration time.Duration `mapstructure:"bootstrap_duration"`
+
+	// ── Multi-pod deduplication ────────────────────────────────────────────
+
+	// DeduplicateEvents controls whether the processor uses a claim-file on the
+	// shared /baseline volume to deduplicate events across DaemonSet pods.
+	// Only one pod will emit an event for a given (event_type, hash) within
+	// DeduplicateTTL. Default: true.
+	DeduplicateEvents bool `mapstructure:"deduplicate_events"`
+
+	// DeduplicateTTL is how long a claim is held before another pod may emit
+	// the same event. Should be longer than the promotion threshold window.
+	// Default: 2m.
+	DeduplicateTTL time.Duration `mapstructure:"deduplicate_ttl"`
 }
 
 func createDefaultConfig() component.Config {
@@ -147,5 +197,13 @@ func createDefaultConfig() component.Config {
 		ErrorRateAnomalyWindow:      2 * time.Minute,
 		ErrorRateAnomalyThreshold:   0.05,
 		MinErrorRateSamples:         10,
+		ThroughputDropWindow:        2 * time.Minute,
+		ThroughputDropThreshold:     0.5,
+		ThroughputLearnMinSamples:   20,
+		TopologyDriftEnabled:        true,
+		BaselineStalenessThreshold:  24 * time.Hour,
+		BootstrapDuration:           5 * time.Minute,
+		DeduplicateEvents:           true,
+		DeduplicateTTL:              2 * time.Minute,
 	}
 }

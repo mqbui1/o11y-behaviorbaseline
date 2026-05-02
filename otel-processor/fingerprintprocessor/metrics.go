@@ -36,6 +36,15 @@ func seasonalKey(t time.Time) int {
 	return int(t.Weekday())*24 + t.Hour()
 }
 
+// throughputWindow tracks request rate per root_op for drop detection.
+type throughputWindow struct {
+	// samples holds per-trace timestamps (one per observed trace for this root_op)
+	samples      []time.Time
+	baselineRate float64 // traces/min learned from first ThroughputLearnMinSamples
+	learnCount   int
+	dropEmitted  bool // true if we already fired a drop event this silence period
+}
+
 // metricWindow holds a rolling window of latency samples and error/total counts
 // for a single (service, operation) pair.
 type metricWindow struct {
@@ -80,18 +89,23 @@ type metricsTracker struct {
 	// key: service name, value: sliding window of 1s buckets over last 2 minutes.
 	spanRates map[string][]spanRateBucket
 
-	emitter *emitter
-	cfg     *Config
-	logger  *zap.Logger
+	// throughput tracks per-root_op request rate for drop detection.
+	throughput map[string]*throughputWindow // key: root_op
+
+	emitter     *emitter
+	cfg         *Config
+	logger      *zap.Logger
+	selfMetrics *selfMetrics
 }
 
 func newMetricsTracker(cfg *Config, emit *emitter) *metricsTracker {
 	return &metricsTracker{
-		windows:   make(map[string]*metricWindow),
-		spanRates: make(map[string][]spanRateBucket),
-		emitter:   emit,
-		cfg:       cfg,
-		logger:    zap.NewNop(), // replaced by setLogger after construction
+		windows:    make(map[string]*metricWindow),
+		spanRates:  make(map[string][]spanRateBucket),
+		throughput: make(map[string]*throughputWindow),
+		emitter:    emit,
+		cfg:        cfg,
+		logger:     zap.NewNop(), // replaced by setLogger after construction
 	}
 }
 
@@ -245,8 +259,10 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 						zap.String("spans_per_min", fmt.Sprintf("%.0f", spMin)),
 						zap.String("environment", env),
 					)
-					_ = m.emitter.emitLatencyAnomaly(env, svc, op,
-						currentMean, baselineMean, stddev, zScore)
+					if err := m.emitter.emitLatencyAnomaly(env, svc, op,
+						currentMean, baselineMean, stddev, zScore); err == nil && m.selfMetrics != nil {
+						m.selfMetrics.LatencyEvents.Add(1)
+					}
 				}
 			}
 		}
@@ -289,9 +305,77 @@ func (m *metricsTracker) observe(spans []spanInfo, env string) {
 					zap.String("spans_per_min", fmt.Sprintf("%.0f", spMin)),
 					zap.String("environment", env),
 				)
-				_ = m.emitter.emitErrorRateAnomaly(env, svc, op,
-					errorRate, totalErrors, totalSpans)
+				if err := m.emitter.emitErrorRateAnomaly(env, svc, op,
+				errorRate, totalErrors, totalSpans); err == nil && m.selfMetrics != nil {
+				m.selfMetrics.ErrorRateEvents.Add(1)
 			}
+			}
+		}
+	}
+}
+
+// observeRootOp records a trace arrival for throughput drop detection.
+// Called once per flushed trace from analyzeTrace (with the resolved rootOp).
+func (m *metricsTracker) observeRootOp(rootOp, env string, inWarmup bool) {
+	if m.cfg.ThroughputDropWindow == 0 || inWarmup {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	tw, ok := m.throughput[rootOp]
+	if !ok {
+		tw = &throughputWindow{}
+		m.throughput[rootOp] = tw
+	}
+
+	tw.samples = append(tw.samples, now)
+
+	// Prune samples outside the window
+	cutoff := now.Add(-m.cfg.ThroughputDropWindow)
+	keep := 0
+	for keep < len(tw.samples) && tw.samples[keep].Before(cutoff) {
+		keep++
+	}
+	tw.samples = tw.samples[keep:]
+
+	windowMins := m.cfg.ThroughputDropWindow.Minutes()
+	currentRate := float64(len(tw.samples)) / windowMins
+
+	// Learn phase: accumulate until we have enough samples
+	if tw.learnCount < m.cfg.ThroughputLearnMinSamples {
+		tw.learnCount++
+		// Update rolling baseline rate using EWMA (α=0.1 after learn phase)
+		if tw.baselineRate == 0 {
+			tw.baselineRate = currentRate
+		} else {
+			tw.baselineRate = 0.9*tw.baselineRate + 0.1*currentRate
+		}
+		tw.dropEmitted = false
+		return
+	}
+
+	// Detection: rate dropped below threshold fraction of baseline
+	if tw.baselineRate > 0 {
+		ratio := currentRate / tw.baselineRate
+		if ratio < (1-m.cfg.ThroughputDropThreshold) && !tw.dropEmitted {
+			m.logger.Info("throughput drop detected",
+				zap.String("root_op", rootOp),
+				zap.String("current_rate_pm", fmt.Sprintf("%.2f", currentRate)),
+				zap.String("baseline_rate_pm", fmt.Sprintf("%.2f", tw.baselineRate)),
+				zap.String("drop_pct", fmt.Sprintf("%.1f%%", (1-ratio)*100)),
+				zap.String("environment", env),
+			)
+			tw.dropEmitted = true
+			if err := m.emitter.emitThroughputDrop(env, rootOp, currentRate, tw.baselineRate); err == nil && m.selfMetrics != nil {
+				m.selfMetrics.ThroughputEvents.Add(1)
+			}
+		} else if ratio >= (1-m.cfg.ThroughputDropThreshold/2) {
+			// Rate recovered to within half the threshold — reset so we can fire again
+			tw.dropEmitted = false
+			// Slowly update baseline with recovered rate
+			tw.baselineRate = 0.95*tw.baselineRate + 0.05*currentRate
 		}
 	}
 }
