@@ -570,12 +570,13 @@
   <button class="btn-scenario" onclick="runScenario('kill-service')"   title="vets-service killed — goes missing from traces">1 Kill service</button>
   <button class="btn-scenario" onclick="runScenario('new-call-path')"  title="visits-service starts calling a new downstream service">2 New call path</button>
   <button class="btn-scenario" onclick="runScenario('new-error')"      title="pets-service throws a new error signature">3 New error sig</button>
-  <button class="btn-scenario" onclick="runScenario('db-dropped')"     title="visits-service stops calling mysql:petclinic — DB gone silent">4 DB gone silent</button>
-  <button class="btn-scenario" onclick="runScenario('db-incident')"    title="DB down — multiple services get JDBC errors simultaneously">5 DB incident (multi)</button>
-  <button class="btn-scenario" onclick="runScenario('cascading')"      title="vets-service killed → api-gateway errors → customers-service times out (2s apart)">6 Cascading failure</button>
-  <button class="btn-scenario" onclick="runScenario('latency-spike')"  title="visits-service latency spikes 250× above baseline (z=8496) — OTel edge detector fires in ~10s" style="border-color:#9E5A1A;color:#E07B39">7 Latency spike</button>
-  <button class="btn-scenario" onclick="runScenario('error-rate-spike')" title="customers-service error rate hits 100% — DB connectivity lost, error signature fired 800ms later" style="border-color:#8B2010;color:#FF6B35">8 Error rate</button>
-  <button class="btn-scenario" onclick="runScenario('combined-metric')" title="vets-service killed (structural) + customers-service error rate spikes (metric) — Claude correlates all three tiers" style="border-color:#7F3FBF;color:#BF5AF2">9 Combined</button>
+  <button class="btn-scenario" onclick="runScenario('db-incident')"    title="DB down — structural drift (MISSING_SERVICE) + error drift (JDBC) fire together across all callers">4 DB incident</button>
+  <button class="btn-scenario" onclick="runScenario('cascading')"      title="vets-service killed → api-gateway errors → customers-service times out (2s apart)">5 Cascading failure</button>
+  <button class="btn-scenario" onclick="runScenario('latency-spike')"  title="visits-service latency spikes 250× above baseline (z=8496) — OTel edge detector fires in ~10s" style="border-color:#9E5A1A;color:#E07B39">6 Latency spike</button>
+  <button class="btn-scenario" onclick="runScenario('error-rate-spike')" title="customers-service error rate hits 100% — DB connectivity lost, error signature fired 800ms later" style="border-color:#8B2010;color:#FF6B35">7 Error rate</button>
+  <button class="btn-scenario" onclick="runScenario('combined-metric')" title="vets-service killed (structural) + customers-service error rate spikes (metric) — Claude correlates all three tiers" style="border-color:#7F3FBF;color:#BF5AF2">8 Combined</button>
+  <button class="btn-scenario" onclick="runScenario('slow-db')"        title="DB overloaded — all callers get correlated LATENCY spikes simultaneously, no structural drift" style="border-color:#9E5A1A;color:#E07B39">9 Slow DB</button>
+  <button class="btn-scenario" onclick="runScenario('oom-crash')"      title="customers-service: LATENCY spike (GC pressure) → MISSING (OOM crash) → api-gateway errors, 4s apart" style="border-color:#8B2010;color:#FF6B35">10 OOM crash</button>
 </div>
 
 <script>
@@ -836,7 +837,11 @@ function updateBadge() {
     const hasError     = allAnoms.some(a => a.anomaly_type === "NEW_ERROR_SIGNATURE");
     const hasMissing   = allAnoms.some(a => a.anomaly_type === "MISSING_SERVICE");
     const hasErrorRate = allAnoms.some(a => a.anomaly_type === "ERROR_RATE_ANOMALY");
-    if (hasError || hasMissing || hasErrorRate) {
+    // Latency spike across 3+ services = incident (shared-dep degradation, not isolated blip)
+    const latencySvcs  = Object.keys(active).filter(s =>
+      active[s].some(a => a.anomaly_type === "LATENCY_ANOMALY"));
+    const hasWideLatency = latencySvcs.length >= 3;
+    if (hasError || hasMissing || hasErrorRate || hasWideLatency) {
       badge.className = "status-badge status-error";
       badge.textContent = "● INCIDENT DETECTED";
     } else {
@@ -936,15 +941,35 @@ function updatePanel() {
 
     const isSuppressed = suppressed.has(svc);
     const state  = isSuppressed ? "drift" : nodeState(svc);
+
+    // Build one badge per distinct signal type present on this service.
+    // Root cause always gets its own badge first; remaining signal types follow.
+    const typeToState = {
+      "NEW_ERROR_SIGNATURE": "error", "MISSING_SERVICE": "missing",
+      "NEW_FINGERPRINT": "drift",     "LATENCY_ANOMALY": "latency",
+      "ERROR_RATE_ANOMALY": "errorrate",
+    };
     const badgeClass = {
       rootcause: "badge-rootcause", error: "badge-error",
       missing:   "badge-missing",   drift: "badge-drift",
       latency:   "badge-latency",   errorrate: "badge-errorrate",
-    }[state] || "badge-drift";
-    const label = {
+    };
+    const badgeLabel = {
       rootcause: "ROOT CAUSE ★", error: "ERROR", missing: "MISSING", drift: "DRIFT",
       latency: "LATENCY SPIKE",  errorrate: "ERROR RATE",
-    }[state] || "DRIFT";
+    };
+    const sigStates = [...new Set(anoms.map(a => typeToState[a.anomaly_type]).filter(Boolean))];
+    let badgesHtml = "";
+    if (svc === rootCause && (causalityChain.length > 1 || Object.values(active).filter(v=>v.length>0).length > 1)) {
+      badgesHtml += `<span class="badge badge-rootcause">ROOT CAUSE ★</span>`;
+    }
+    for (const s of sigStates) {
+      if (isSuppressed && s === "drift") continue; // suppress pure drift badge for secondary
+      badgesHtml += `<span class="badge ${badgeClass[s] || 'badge-drift'}">${badgeLabel[s] || s.toUpperCase()}</span>`;
+    }
+    if (!badgesHtml) {
+      badgesHtml = `<span class="badge ${badgeClass[state] || 'badge-drift'}">${badgeLabel[state] || 'DRIFT'}</span>`;
+    }
 
     // User impact: spans/min from any metric anomaly event
     let impactLine = "";
@@ -975,7 +1000,7 @@ function updatePanel() {
       ? `<div class="anomaly-item" style="color:#484F58;font-style:italic">secondary effect of ${rootCause}</div>` : "";
 
     return `<div class="service-card state-${state}" ${isSuppressed ? 'style="opacity:0.6"' : ''}>
-      <div class="svc-name">${svc} <span class="badge ${badgeClass}">${label}</span></div>
+      <div class="svc-name">${svc} ${badgesHtml}</div>
       ${anomItems}${impactLine}${infraItems}${suppressedNote}
     </div>`;
   }).join("");
