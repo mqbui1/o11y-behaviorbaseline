@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// baselineFileAge returns the modification time of a file, or zero if unavailable.
+func baselineFileAge(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
 // timeNow is a test hook; defaults to time.Now.
 var timeNow = time.Now
 
@@ -78,6 +87,12 @@ type baselineStore struct {
 	errorPath   string
 	reloadEvery time.Duration
 	lastLoaded  time.Time
+
+	// staleness tracking: count in-memory promotions since the file was last
+	// reloaded and record the file's mod time at load time.
+	promotionsMu        sync.Mutex
+	promotionsSinceLoad int
+	traceFileModTime    time.Time
 }
 
 func newBaselineStore(tracePath, errorPath string, reloadEvery time.Duration) *baselineStore {
@@ -104,15 +119,25 @@ func (bs *baselineStore) reload() {
 		bs.errorSignatures = eb
 	}
 	bs.lastLoaded = time.Now()
+	bs.traceFileModTime = baselineFileAge(bs.tracePath)
+
+	// Reset promotion counter — we just loaded a fresh baseline.
+	bs.promotionsMu.Lock()
+	bs.promotionsSinceLoad = 0
+	bs.promotionsMu.Unlock()
 }
 
-func (bs *baselineStore) maybeReload() {
+// maybeReload reloads from disk if the reload interval has elapsed.
+// Returns true if a reload actually occurred.
+func (bs *baselineStore) maybeReload() bool {
 	bs.mu.RLock()
 	due := time.Since(bs.lastLoaded) > bs.reloadEvery
 	bs.mu.RUnlock()
 	if due {
 		bs.reload()
+		return true
 	}
+	return false
 }
 
 func (bs *baselineStore) loadTraceBaseline() map[string]*fingerprintEntry {
@@ -176,6 +201,9 @@ func (bs *baselineStore) promoteTrace(fp *traceFingerprint, writeback bool) bool
 	if writeback && bs.tracePath != "" {
 		_ = bs.writeTraceBaseline()
 	}
+	bs.promotionsMu.Lock()
+	bs.promotionsSinceLoad++
+	bs.promotionsMu.Unlock()
 	return true
 }
 
@@ -204,7 +232,22 @@ func (bs *baselineStore) promoteError(sig errorSignature, writeback bool) bool {
 	if writeback && bs.errorPath != "" {
 		_ = bs.writeErrorBaseline()
 	}
+	bs.promotionsMu.Lock()
+	bs.promotionsSinceLoad++
+	bs.promotionsMu.Unlock()
 	return true
+}
+
+// StalenessInfo returns the file mod time and promotions-since-load count
+// for use by the staleness checker in processor.go.
+func (bs *baselineStore) stalenessInfo() (modTime time.Time, promotions int) {
+	bs.promotionsMu.Lock()
+	p := bs.promotionsSinceLoad
+	bs.promotionsMu.Unlock()
+	bs.mu.RLock()
+	mt := bs.traceFileModTime
+	bs.mu.RUnlock()
+	return mt, p
 }
 
 // writeTraceBaseline serialises traceFingerprints to disk atomically.
@@ -271,6 +314,13 @@ func (bs *baselineStore) isEmpty() bool {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
 	return len(bs.traceFingerprints) == 0 && len(bs.errorSignatures) == 0
+}
+
+// counts returns the number of trace fingerprints and error signatures in the baseline.
+func (bs *baselineStore) counts() (int, int) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	return len(bs.traceFingerprints), len(bs.errorSignatures)
 }
 
 // maxBaselineSpanCount returns the maximum span_count seen across all established

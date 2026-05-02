@@ -273,6 +273,89 @@ func (e *emitter) emitErrorRateAnomaly(env, service, operation string, errorRate
 	})
 }
 
+func (e *emitter) emitThroughputDrop(env, rootOp string, currentRate, baselineRate float64) error {
+	dropPct := 0.0
+	if baselineRate > 0 {
+		dropPct = (1 - currentRate/baselineRate) * 100
+	}
+	return e.send(splunkEvent{
+		EventType: "service.throughput.drop",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"anomaly_type":   "THROUGHPUT_DROP",
+			"service":        rootService(rootOp),
+			"root_operation": rootOp,
+		},
+		Properties: map[string]string{
+			"root_op":           rootOp,
+			"service":           rootService(rootOp),
+			"environment":       env,
+			"current_rate_pm":   fmt.Sprintf("%.2f", currentRate),
+			"baseline_rate_pm":  fmt.Sprintf("%.2f", baselineRate),
+			"drop_pct":          fmt.Sprintf("%.1f%%", dropPct),
+			"detector":          "otel-throughput-drop",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (e *emitter) emitTopologyDrift(env, caller, callee string) error {
+	return e.send(splunkEvent{
+		EventType: "topology.edge.drift",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"anomaly_type":   "NEW_TOPOLOGY_EDGE",
+			"caller":         caller,
+			"callee":         callee,
+		},
+		Properties: map[string]string{
+			"caller":      caller,
+			"callee":      callee,
+			"environment": env,
+			"detector":    "otel-topology-drift",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (e *emitter) emitBaselineStale(env, baselinePath string, ageSecs int64, promotionsSinceLoad int) error {
+	return e.send(splunkEvent{
+		EventType: "baseline.stale",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"anomaly_type":   "BASELINE_STALE",
+		},
+		Properties: map[string]string{
+			"baseline_path":         baselinePath,
+			"age_hours":             fmt.Sprintf("%.1f", float64(ageSecs)/3600),
+			"promotions_since_load": fmt.Sprintf("%d", promotionsSinceLoad),
+			"environment":           env,
+			"detector":              "otel-baseline-staleness",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (e *emitter) emitBootstrapComplete(env string, fingerprintCount, errorSigCount int) error {
+	return e.send(splunkEvent{
+		EventType: "baseline.bootstrap.complete",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+		},
+		Properties: map[string]string{
+			"fingerprint_count": fmt.Sprintf("%d", fingerprintCount),
+			"error_sig_count":   fmt.Sprintf("%d", errorSigCount),
+			"environment":       env,
+			"detector":          "otel-bootstrap",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func rootService(rootOp string) string {
 	if idx := strings.Index(rootOp, ":"); idx >= 0 {
 		return rootOp[:idx]
