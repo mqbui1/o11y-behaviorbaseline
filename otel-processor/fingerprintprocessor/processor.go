@@ -2,6 +2,9 @@ package fingerprintprocessor
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -32,15 +35,12 @@ type fingerprintProcessor struct {
 
 	// seenMu guards seenCounts independently of the trace buffer mutex so
 	// promotion counter updates don't contend with span ingestion.
-	// Note: seenCounts is in-memory only and resets on pod restart. In a
-	// DaemonSet where pods are evicted during rolling deploys, a hash seen
-	// 9/10 times may never reach PromotionThreshold if the pod restarts.
-	// Mitigation: set PromotionThreshold low (10 is ~2 min at typical trace
-	// rates) so the counter refills quickly after restart. For zero-loss
-	// promotion tracking, lower PromotionThreshold or rely on the Python
-	// auto-promotion path (AUTO_PROMOTE_THRESHOLD in trace_fingerprint.py).
-	seenMu     sync.Mutex
-	seenCounts map[string]int // hash -> detection count since startup
+	// seenCounts is persisted to seenCountsPath every seenFlushInterval so
+	// counts survive pod restarts (e.g. rolling deploys in a DaemonSet).
+	seenMu          sync.Mutex
+	seenCounts      map[string]int // hash -> detection count since startup
+	seenCountsPath  string
+	seenCountsDirty bool // true if counts changed since last flush
 
 	// activeDriftsMu guards activeDrifts, used for recovery signal.
 	activeDriftsMu sync.Mutex
@@ -59,6 +59,11 @@ type fingerprintProcessor struct {
 
 func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Traces) (*fingerprintProcessor, error) {
 	emit := newEmitter(cfg.SplunkIngestURL, cfg.SplunkAccessToken, cfg.SplunkApiToken)
+
+	// Derive seen_counts path from baseline path (same directory).
+	seenCountsPath := filepath.Join(filepath.Dir(cfg.BaselinePath), "seen_counts.json")
+	seenCounts := loadSeenCounts(seenCountsPath, logger)
+
 	p := &fingerprintProcessor{
 		logger:         logger,
 		cfg:            cfg,
@@ -68,7 +73,8 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		topology:       newTopologyTracker(cfg.BaselinePath, cfg.Environment, emit),
 		metrics:        newMetricsTracker(cfg, emit).withLogger(logger),
 		buffers:        make(map[string]*traceBuffer),
-		seenCounts:     make(map[string]int),
+		seenCounts:     seenCounts,
+		seenCountsPath: seenCountsPath,
 		activeDrifts:   make(map[string]string),
 		lastSeenRootOp: make(map[string]time.Time),
 		missingEmitted: make(map[string]bool),
@@ -98,17 +104,89 @@ func (p *fingerprintProcessor) inWarmup() bool {
 	return p.cfg.WarmupDuration > 0 && time.Since(p.startTime) < p.cfg.WarmupDuration
 }
 
+// loadSeenCounts reads the persisted promotion counter file from disk.
+// Returns an empty map on any error (file missing, corrupt JSON, etc.).
+func loadSeenCounts(path string, logger *zap.Logger) map[string]int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Warn("could not read seen_counts file", zap.String("path", path), zap.Error(err))
+		}
+		return make(map[string]int)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(data, &counts); err != nil {
+		logger.Warn("seen_counts file corrupt, starting fresh", zap.String("path", path), zap.Error(err))
+		return make(map[string]int)
+	}
+	logger.Info("loaded persisted seen_counts", zap.String("path", path), zap.Int("entries", len(counts)))
+	return counts
+}
+
+// flushSeenCounts writes the current seenCounts to disk atomically.
+// Called from the flush goroutine and on Shutdown.
+func (p *fingerprintProcessor) flushSeenCounts() {
+	p.seenMu.Lock()
+	if !p.seenCountsDirty {
+		p.seenMu.Unlock()
+		return
+	}
+	// Copy under lock to minimise hold time.
+	snapshot := make(map[string]int, len(p.seenCounts))
+	for k, v := range p.seenCounts {
+		snapshot[k] = v
+	}
+	p.seenCountsDirty = false
+	p.seenMu.Unlock()
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		p.logger.Warn("failed to marshal seen_counts", zap.Error(err))
+		return
+	}
+	// Write to a temp file then rename for atomicity.
+	tmp := p.seenCountsPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		p.logger.Warn("failed to write seen_counts tmp file", zap.String("path", tmp), zap.Error(err))
+		return
+	}
+	if err := os.Rename(tmp, p.seenCountsPath); err != nil {
+		p.logger.Warn("failed to rename seen_counts file", zap.Error(err))
+	}
+}
+
 func (p *fingerprintProcessor) Start(_ context.Context, _ component.Host) error {
 	go p.flushLoop()
 	if p.cfg.MissingServiceCheckInterval > 0 {
 		go p.missingServiceLoop()
 	}
+	go p.seenCountsFlushLoop()
 	return nil
 }
 
 func (p *fingerprintProcessor) Shutdown(_ context.Context) error {
 	close(p.stopCh)
+	// Persist any remaining counts before the pod exits.
+	p.seenMu.Lock()
+	p.seenCountsDirty = true // force flush even if flag was just cleared
+	p.seenMu.Unlock()
+	p.flushSeenCounts()
 	return nil
+}
+
+// seenCountsFlushLoop persists seenCounts to disk every 30 s so that
+// promotion progress survives pod evictions and rolling restarts.
+func (p *fingerprintProcessor) seenCountsFlushLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.flushSeenCounts()
+		case <-p.stopCh:
+			return
+		}
+	}
 }
 
 func (p *fingerprintProcessor) Capabilities() consumer.Capabilities {
@@ -450,6 +528,7 @@ func (p *fingerprintProcessor) maybePromoteTrace(fp *traceFingerprint) {
 	p.seenMu.Lock()
 	p.seenCounts[fp.hash]++
 	count := p.seenCounts[fp.hash]
+	p.seenCountsDirty = true
 	p.seenMu.Unlock()
 
 	// During warmup: promote immediately on first occurrence.
@@ -471,6 +550,7 @@ func (p *fingerprintProcessor) maybePromoteTrace(fp *traceFingerprint) {
 
 	p.seenMu.Lock()
 	delete(p.seenCounts, fp.hash)
+	p.seenCountsDirty = true
 	p.seenMu.Unlock()
 
 	p.logger.Info("trace fingerprint auto-promoted",
@@ -538,6 +618,7 @@ func (p *fingerprintProcessor) maybePromoteError(sig errorSignature) {
 	p.seenMu.Lock()
 	p.seenCounts[sig.hash]++
 	count := p.seenCounts[sig.hash]
+	p.seenCountsDirty = true
 	p.seenMu.Unlock()
 
 	if count < p.cfg.PromotionThreshold {
@@ -551,6 +632,7 @@ func (p *fingerprintProcessor) maybePromoteError(sig errorSignature) {
 
 	p.seenMu.Lock()
 	delete(p.seenCounts, sig.hash)
+	p.seenCountsDirty = true
 	p.seenMu.Unlock()
 
 	p.logger.Info("error signature auto-promoted",
