@@ -529,11 +529,37 @@ def build_fingerprint(trace: dict, known_root_ops: set[str] | None = None) -> di
 
 # ── Anomaly classification ─────────────────────────────────────────────────────
 
-def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
+def _auto_learn_no_missing(root_op: str, missing: set[str],
+                           environment: str | None = None) -> None:
+    """
+    Persist a no_missing_service override for root_op when watch-window evidence
+    shows the "missing" services were present in other traces this window.
+    Called at most once per root_op per watch run (idempotent — won't overwrite
+    an existing override entry).
+    """
+    overrides = load_overrides(environment)
+    root_op_flags = overrides.setdefault("root_op_flags", {})
+    if root_op_flags.get(root_op, {}).get("no_missing_service"):
+        return  # already set
+    reason = (f"auto: {sorted(missing)} seen in other traces this window — "
+              f"optional-path variant, not an outage")
+    root_op_flags[root_op] = {"no_missing_service": True, "reason": reason}
+    save_overrides(overrides, environment)
+
+
+def classify_anomaly(fp: dict, baseline: dict,
+                     watch_services: set[str] | None = None,
+                     environment: str | None = None) -> dict | None:
     """
     Compare a fingerprint against the baseline.
     Returns an anomaly dict or None if the trace matches a known pattern.
     Auto-promoted fingerprints are treated as known — no alert fired.
+
+    watch_services: set of all services seen across ALL traces for this root_op
+    in the current watch window. Used to suppress MISSING_SERVICE when the
+    "missing" service was observed in other traces this window (optional path).
+    When a new optional-path suppression is detected, it is written to the
+    overrides file so future learn runs preserve the flag automatically.
     """
     root_op = fp["root_op"]
     fp_hash = fp["hash"]
@@ -543,6 +569,12 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
         if info.get("root_op") == root_op
         and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES
     }
+
+    # If any baseline entry for this root_op has no_missing_service=True,
+    # MISSING_SERVICE checks are suppressed for all traces under this root_op.
+    _no_missing = any(
+        info.get("no_missing_service") for info in baseline_for_root.values()
+    )
 
     # NEW_FINGERPRINT — but skip if already auto-promoted.
     # A fingerprint must be seen >= MIN_BASELINE_OCCURRENCES times to be
@@ -572,7 +604,14 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
                 if c / total_patterns >= dom_threshold
             }
             missing = dominant_services - set(fp["services"])
-            if missing:
+            if missing and not _no_missing:
+                # Watch-window suppression: if ALL missing services were seen in
+                # other traces this window, this is an optional-path variant —
+                # the services aren't down, just absent on this code path.
+                # Auto-learn the suppression into the overrides file.
+                if watch_services and missing.issubset(watch_services):
+                    _auto_learn_no_missing(root_op, missing, environment)
+                    return None
                 return {
                     "type":    "MISSING_SERVICE",
                     "message": (f"Expected service(s) absent from '{root_op}': "
@@ -670,7 +709,10 @@ def classify_anomaly(fp: dict, baseline: dict) -> dict | None:
             if c / total_patterns >= dom_threshold2
         }
         missing = dominant_services - set(fp["services"])
-        if missing:
+        if missing and not _no_missing:
+            if watch_services and missing.issubset(watch_services):
+                _auto_learn_no_missing(root_op, missing, environment)
+                return None
             return {
                 "type":    "MISSING_SERVICE",
                 "message": (f"Expected service(s) absent from '{root_op}': "
@@ -721,8 +763,184 @@ def save_baseline(baseline: dict, environment: str | None = None) -> None:
     baseline["updated_at"] = datetime.now(timezone.utc).isoformat()
     baseline["environment"] = environment
     path.write_text(json.dumps(baseline, indent=2))
-    print(f"  Baseline saved -> {path}  "
-          f"({len(baseline['fingerprints'])} fingerprints)")
+    print(f"  Baseline saved -> {path}")
+
+
+# ── Persistent baseline overrides ─────────────────────────────────────────────
+# baseline_overrides.<env>.json stores per-root_op flag overrides that persist
+# across learn/reset cycles. Flags are merged back into fingerprint entries by
+# cmd_learn after every learn run, so they are never lost on re-baseline.
+#
+# Schema:
+#   { "root_op_flags": { "<root_op>": { "no_missing_service": true, "reason": "..." } } }
+#
+# Manage with:
+#   python3 trace_fingerprint.py --environment <env> overrides --set "root_op" no_missing_service true "reason text"
+#   python3 trace_fingerprint.py --environment <env> overrides --clear "root_op"
+#   python3 trace_fingerprint.py --environment <env> overrides --list
+
+def _overrides_path(environment: str | None = None) -> Path:
+    if environment:
+        return _DATA_DIR / f"baseline_overrides.{environment}.json"
+    return _DATA_DIR / "baseline_overrides.json"
+
+
+def load_overrides(environment: str | None = None) -> dict:
+    path = _overrides_path(environment)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            pass
+    return {"root_op_flags": {}}
+
+
+def save_overrides(overrides: dict, environment: str | None = None) -> None:
+    path = _overrides_path(environment)
+    path.write_text(json.dumps(overrides, indent=2))
+    print(f"  Overrides saved -> {path}")
+
+
+def _auto_detect_no_missing_service(fingerprints: dict) -> dict[str, str]:
+    """
+    Automatically determine which root_ops should have no_missing_service=True.
+    Returns a dict of {root_op: reason} for root_ops that qualify.
+
+    Two patterns are detected — both are generic, no hardcoded service names:
+
+    1. Infra peer: a service that would be flagged as "dominant missing" is itself
+       a root service in the baseline (i.e. it initiates its own traces). Such
+       services are peers, not dependencies — their absence on some paths is normal.
+       Example: discovery-server has its own Eureka heartbeat traces, so it is a
+       peer of api-gateway, not a downstream dependency.
+
+    2. Optional-path variant: a root_op has multiple baseline fingerprints and the
+       "would-be-dominant" service is absent from >= OPTIONAL_ABSENT_FRACTION of
+       them. If the service is absent in 20%+ of known-good variants, absence is a
+       normal steady-state condition, not an anomaly.
+       Example: owners/{id} has variants with and without visits-service (owners
+       who have no pets never trigger a visits-service call).
+    """
+    OPTIONAL_ABSENT_FRACTION = 0.20  # absent in ≥20% of variants → optional
+
+    # Build set of services that substantially self-originate traces.
+    # We sum occurrences across all root_ops for each service. A service
+    # qualifies as a "peer" (not a dep) only when it has enough self-originated
+    # traffic to be clearly self-driving — not just a single OTel auto-promoted
+    # stub (occurrences=1). Threshold: ≥ MIN_BASELINE_OCCURRENCES * 3 total.
+    PEER_MIN_OCCURRENCES = MIN_BASELINE_OCCURRENCES * 3
+    root_svc_occurrences: dict[str, int] = defaultdict(int)
+    for info in fingerprints.values():
+        ro = info.get("root_op", "")
+        if ":" in ro:
+            root_svc_occurrences[ro.split(":")[0]] += info.get("occurrences", 0)
+    root_services = {
+        svc for svc, occ in root_svc_occurrences.items()
+        if occ >= PEER_MIN_OCCURRENCES
+    }
+
+    # Group fingerprints by root_op for multi-variant analysis
+    by_root: dict[str, list[dict]] = defaultdict(list)
+    for info in fingerprints.values():
+        root_op = info.get("root_op", "")
+        if root_op and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES:
+            by_root[root_op].append(info)
+
+    auto_suppress: dict[str, str] = {}
+
+    for root_op, entries in by_root.items():
+        if len(entries) < 2:
+            # Single variant — can't distinguish optional from missing without
+            # multi-variant evidence; skip auto-detection for this root_op.
+            # (Infra-peer check still applies below.)
+            pass
+
+        total = len(entries)
+        root_svc = root_op.split(":")[0] if ":" in root_op else root_op
+        dom_threshold = _svc_threshold(
+            root_svc, "missing_service_dominance_threshold",
+            MISSING_SERVICE_DOMINANCE_THRESHOLD
+        )
+
+        # Count how often each service appears across variants
+        service_counts: dict[str, int] = defaultdict(int)
+        for entry in entries:
+            for svc in entry.get("services", []):
+                service_counts[svc] += 1
+
+        dominant = {s for s, c in service_counts.items()
+                    if c / total >= dom_threshold and s != root_svc}
+
+        for svc in dominant:
+            absent_count = total - service_counts[svc]
+
+            # Pattern 1: infra peer — the "dominant" service is itself a root service
+            if svc in root_services:
+                auto_suppress[root_op] = (
+                    f"auto: '{svc}' is a peer service (has own root traces), "
+                    f"not a downstream dependency"
+                )
+                break
+
+            # Pattern 2: optional-path variant — absent in ≥ OPTIONAL_ABSENT_FRACTION
+            # of baseline variants, meaning absence is a known-good state
+            if total >= 2 and absent_count / total >= OPTIONAL_ABSENT_FRACTION:
+                auto_suppress[root_op] = (
+                    f"auto: '{svc}' absent in {absent_count}/{total} baseline variants "
+                    f"({absent_count/total:.0%}) — optional path"
+                )
+                break
+
+    return auto_suppress
+
+
+def apply_overrides(fingerprints: dict, environment: str | None = None) -> int:
+    """
+    Merge persistent root_op flag overrides into fingerprint entries, then
+    auto-detect additional no_missing_service candidates from the baseline itself.
+    Returns number of entries updated.
+
+    Order of precedence (highest wins):
+      1. Explicit overrides file (baseline_overrides.<env>.json) — always applied
+      2. Auto-detection (_auto_detect_no_missing_service) — fills in the rest
+         without requiring any human configuration
+
+    Auto-detected suppressions are also written back to the overrides file so
+    they are visible, auditable, and can be cleared with `overrides --clear`.
+    """
+    overrides = load_overrides(environment)
+    root_op_flags = overrides.setdefault("root_op_flags", {})
+
+    # Auto-detect candidates and merge into overrides (won't overwrite explicit entries)
+    auto = _auto_detect_no_missing_service(fingerprints)
+    auto_added = 0
+    for root_op, reason in auto.items():
+        if root_op not in root_op_flags:
+            root_op_flags[root_op] = {"no_missing_service": True, "reason": reason}
+            auto_added += 1
+        elif not root_op_flags[root_op].get("no_missing_service"):
+            # Explicit entry exists but flag not set — don't override explicit decision
+            pass
+
+    if auto_added:
+        save_overrides(overrides, environment)
+
+    # Apply all flags (explicit + auto-detected) to fingerprint entries
+    updated = 0
+    for h, fp in fingerprints.items():
+        root_op = fp.get("root_op", "")
+        if root_op in root_op_flags:
+            flags = root_op_flags[root_op]
+            changed = False
+            for flag, value in flags.items():
+                if flag == "reason":
+                    continue
+                if fp.get(flag) != value:
+                    fp[flag] = value
+                    changed = True
+            if changed:
+                updated += 1
+    return updated
 
 
 # ── OTel baseline merge ────────────────────────────────────────────────────────
@@ -1020,6 +1238,14 @@ def cmd_learn(window_minutes: int = 120,
 
     print(f"  Summary: {new_count} new, {updated_count} updated, "
           f"{skipped} skipped (noise/shallow)")
+
+    # Merge persistent overrides (no_missing_service etc.) back into fingerprints.
+    # This runs after every learn so flags set via `overrides --set` survive re-learn.
+    overrides_applied = apply_overrides(fingerprints, environment)
+    if overrides_applied:
+        print(f"  Applied overrides to {overrides_applied} fingerprint(s) "
+              f"(from baseline_overrides.{environment}.json)")
+
     save_baseline(baseline, environment)
 
 
@@ -1040,6 +1266,11 @@ def cmd_watch(window_minutes: int = 10,
         print(f"  [warn] Baseline for {env_desc} is empty — run 'learn' first.",
               file=sys.stderr)
         sys.exit(1)
+
+    # Apply persistent overrides in-memory so no_missing_service flags are
+    # respected even when the baseline hasn't been re-learned since the override
+    # was set. Does not write to disk — learn does the durable merge.
+    apply_overrides(baseline["fingerprints"], environment)
 
     # Run topology discovery and trace search concurrently — they're independent.
     now_ms   = int(time.time() * 1000)
@@ -1132,6 +1363,16 @@ def cmd_watch(window_minutes: int = 10,
         if v.get("root_op")
     }
 
+    # First pass: build per-root_op service presence map from the watch window.
+    # Used to suppress MISSING_SERVICE when the "missing" service was seen in
+    # other traces of the same root_op this window (optional-path variant).
+    watch_root_op_services: dict[str, set[str]] = defaultdict(set)
+    for _, trace in fetched:
+        fp_pre = build_fingerprint(trace, known_root_ops=known_root_ops)
+        if fp_pre:
+            for svc in fp_pre.get("services", []):
+                watch_root_op_services[fp_pre["root_op"]].add(svc)
+
     seen_root_ops: set[str] = set()
     for trace_id, trace in fetched:
         fp = build_fingerprint(trace, known_root_ops=known_root_ops)
@@ -1147,7 +1388,9 @@ def cmd_watch(window_minutes: int = 10,
         if fp["hash"] in alerted_hashes:
             continue
 
-        anomaly = classify_anomaly(fp, baseline)
+        anomaly = classify_anomaly(fp, baseline,
+                                   watch_services=watch_root_op_services.get(fp["root_op"], set()),
+                                   environment=environment)
         if anomaly:
             alerted_hashes.add(fp["hash"])
             svc_anomalies[root_svc_key] += 1
@@ -1263,6 +1506,9 @@ def cmd_watch(window_minutes: int = 10,
         if root_op in seen_root_ops:
             continue
         if _is_noise_trace(root_op.split(":", 1)[-1] if ":" in root_op else root_op):
+            continue
+        # Skip if any baseline entry for this root_op suppresses MISSING_SERVICE
+        if any(e.get("no_missing_service") for e in bl_entries):
             continue
         # Also skip if any span path in the baseline entries is a noise operation
         # (e.g. Eureka registration PUTs rooted at a service span like customers-service:PUT)
@@ -1474,6 +1720,71 @@ def cmd_show(environment: str | None = None) -> None:
         print()
 
 
+def cmd_overrides(action: str, root_op: str | None = None,
+                  flag: str | None = None, value: str | None = None,
+                  reason: str | None = None,
+                  environment: str | None = None) -> None:
+    """
+    Manage persistent baseline overrides.
+
+    Overrides are stored in data/baseline_overrides.<env>.json and survive
+    every `learn --reset` and `--bootstrap` cycle. They are automatically
+    merged back into fingerprint entries by `learn`.
+
+    Usage:
+      overrides --list
+      overrides --set "api-gateway:GET" no_missing_service true "discovery-server is optional infra"
+      overrides --clear "api-gateway:GET"
+    """
+    overrides = load_overrides(environment)
+    root_op_flags = overrides.setdefault("root_op_flags", {})
+
+    if action == "list":
+        if not root_op_flags:
+            print("  No overrides set.")
+            return
+        print(f"  Overrides ({_overrides_path(environment)}):")
+        for op, flags in sorted(root_op_flags.items()):
+            reason_str = f"  # {flags['reason']}" if flags.get("reason") else ""
+            flag_strs = ", ".join(f"{k}={v}" for k, v in flags.items() if k != "reason")
+            print(f"    {op!r}: {flag_strs}{reason_str}")
+        return
+
+    if action == "set":
+        if not root_op or not flag or value is None:
+            print("Error: --set requires root_op, flag, and value", file=sys.stderr)
+            sys.exit(1)
+        # Parse value: "true"/"false" → bool, else keep as string
+        parsed_value: bool | str
+        if value.lower() == "true":
+            parsed_value = True
+        elif value.lower() == "false":
+            parsed_value = False
+        else:
+            parsed_value = value
+        entry = root_op_flags.setdefault(root_op, {})
+        entry[flag] = parsed_value
+        if reason:
+            entry["reason"] = reason
+        save_overrides(overrides, environment)
+        print(f"  Set override: {root_op!r} -> {flag}={parsed_value}"
+              + (f" ({reason})" if reason else ""))
+        print("  Run 'learn' to apply to current baseline, or push baseline manually.")
+        return
+
+    if action == "clear":
+        if not root_op:
+            print("Error: --clear requires root_op", file=sys.stderr)
+            sys.exit(1)
+        if root_op in root_op_flags:
+            del root_op_flags[root_op]
+            save_overrides(overrides, environment)
+            print(f"  Cleared override for {root_op!r}")
+        else:
+            print(f"  No override found for {root_op!r}")
+        return
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -1513,6 +1824,25 @@ def main() -> None:
         "hashes", nargs="*",
         help="Fingerprint hash(es) to promote. Omit to promote all pending.",
     )
+    p_overrides = sub.add_parser(
+        "overrides",
+        help="Manage persistent per-root_op flag overrides (survive learn --reset)",
+    )
+    _ov_group = p_overrides.add_mutually_exclusive_group(required=True)
+    _ov_group.add_argument("--list", dest="ov_action", action="store_const",
+                           const="list", help="List current overrides")
+    _ov_group.add_argument("--set", dest="ov_action", action="store_const",
+                           const="set", help="Set a flag override")
+    _ov_group.add_argument("--clear", dest="ov_action", action="store_const",
+                           const="clear", help="Clear all overrides for a root_op")
+    p_overrides.add_argument("root_op", nargs="?", default=None,
+                             help="root_op string (e.g. 'api-gateway:GET')")
+    p_overrides.add_argument("flag", nargs="?", default=None,
+                             help="Flag name (e.g. no_missing_service)")
+    p_overrides.add_argument("value", nargs="?", default=None,
+                             help="Flag value: true or false")
+    p_overrides.add_argument("reason", nargs="?", default=None,
+                             help="Optional explanation (stored as metadata)")
 
     args = parser.parse_args()
     env = args.environment
@@ -1528,6 +1858,9 @@ def main() -> None:
         cmd_show(environment=env)
     elif args.command == "promote":
         cmd_promote(args.hashes or None, environment=env)
+    elif args.command == "overrides":
+        cmd_overrides(args.ov_action, args.root_op, args.flag, args.value,
+                      args.reason, environment=env)
 
 
 if __name__ == "__main__":

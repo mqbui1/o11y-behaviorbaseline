@@ -184,8 +184,14 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
             last_app_svc = svc
         for svc in svcs:
             node_traffic[svc] += occ
+        # Only add forward edges — skip any edge whose target appeared earlier in the
+        # path.  APM fan-out paths (api-gateway → customers-service → api-gateway →
+        # visits-service) otherwise create cycles that corrupt root-cause traversal.
+        seen_svcs: set[str] = set()
         for i in range(len(svcs) - 1):
-            edge_weights[(svcs[i], svcs[i + 1])] += occ
+            seen_svcs.add(svcs[i])
+            if svcs[i + 1] not in seen_svcs:
+                edge_weights[(svcs[i], svcs[i + 1])] += occ
 
     upstream:   dict[str, list[str]] = defaultdict(list)
     downstream: dict[str, list[str]] = defaultdict(list)
@@ -269,8 +275,8 @@ _ANOMALY_WEIGHTS = {
 }
 
 
-def _score_candidate(svc: str, active: dict, upstream: dict, affected: set,
-                     first_seen: dict) -> float:
+def _score_candidate(svc: str, active: dict, upstream: dict, downstream: dict,
+                     affected: set, first_seen: dict) -> float:
     """
     Compute a confidence score [0, 1] for a root cause candidate.
 
@@ -288,11 +294,17 @@ def _score_candidate(svc: str, active: dict, upstream: dict, affected: set,
     type_weight = max((_ANOMALY_WEIGHTS.get(a.get("anomaly_type", ""), 0.1)
                        for a in anoms), default=0.1)
 
-    # Fraction of affected callers (shared dep = more likely root cause)
+    # Fraction of affected services that call THIS node (shared dep = more likely cause)
     callers = upstream.get(svc, [])
     callers_affected = sum(1 for c in callers if c in affected)
     total_affected = max(len(affected) - 1, 1)  # exclude self
     caller_fraction = callers_affected / total_affected
+
+    # Fraction of affected services that THIS node calls (upstream orchestrator pattern)
+    # An upstream service that triggered N downstream anomalies is also a strong candidate.
+    callees = downstream.get(svc, [])
+    callees_affected = sum(1 for c in callees if c in affected)
+    callee_fraction = callees_affected / total_affected
 
     # Timing: earliest anomaly timestamp gets up to 0.1 bonus
     earliest_ts = min((a.get("timestamp_ms", 0) for a in anoms), default=0)
@@ -306,8 +318,9 @@ def _score_candidate(svc: str, active: dict, upstream: dict, affected: set,
     else:
         timing_bonus = 0.0
 
-    # Combine: weighted sum, normalised to [0, 1]
-    score = (type_weight * 0.5) + (caller_fraction * 0.35) + (timing_bonus * 0.15)
+    # Combine: caller_fraction and callee_fraction together capture both "shared dep"
+    # and "upstream orchestrator" patterns.
+    score = (type_weight * 0.5) + (max(caller_fraction, callee_fraction) * 0.35) + (timing_bonus * 0.15)
     return min(score, 1.0)
 
 
@@ -362,9 +375,27 @@ def _find_root_cause(topology: dict,
         if callers_hit > 1:
             candidate_svcs.add("mysql:petclinic")
 
+    # Timing override: if an upstream node fired significantly before ALL its
+    # affected downstream nodes, it is more likely the root cause (the gateway
+    # itself is slow, not its dependencies).  Add it as a candidate.
+    # Threshold: upstream must predate every downstream by ≥5s.
+    for svc in list(affected):
+        svc_ts = first_seen.get(svc, 0)
+        if not svc_ts:
+            continue
+        deps_affected = [d for d in downstream.get(svc, []) if d in affected]
+        if not deps_affected:
+            continue  # already a leaf — already a candidate
+        all_deps_later = all(
+            first_seen.get(d, svc_ts) >= svc_ts + 5_000
+            for d in deps_affected
+        )
+        if all_deps_later:
+            candidate_svcs.add(svc)
+
     # Score each candidate
     confidence: dict[str, float] = {
-        svc: _score_candidate(svc, active, upstream, affected, first_seen)
+        svc: _score_candidate(svc, active, upstream, downstream, affected, first_seen)
         for svc in candidate_svcs
     }
 
@@ -1070,9 +1101,11 @@ def _make_app(environment: str):
         _active_anomalies[svc].append(event)
         if atype == "MISSING_SERVICE":
             caller = event.get("root_op", "").split(":")[0]
-            if caller and caller != svc and caller not in _INFRA:
-                # Only inject a DRIFT marker on the caller if it has no own anomaly yet.
-                # If the caller already has ERROR/MISSING events, those tell the story better.
+            # Only inject a DRIFT marker on the caller if:
+            #   1. It directly calls the missing service in the topology (not just an upstream router)
+            #   2. It has no own anomaly yet (ERROR/MISSING events tell the story better)
+            direct_callers = _topology_cache.get("upstream", {}).get(svc, [])
+            if caller and caller != svc and caller not in _INFRA and caller in direct_callers:
                 if not _active_anomalies[caller]:
                     caller_event = dict(event,
                         service=caller,
@@ -1225,28 +1258,62 @@ def _make_app(environment: str):
             },
         ],
         # 4. DB caller no longer calls the DB (visits-service stops reaching mysql:petclinic)
-        "db-dropped": [
+        # DB down: structural drift (MISSING_SERVICE) + error drift (JDBC) fire together —
+        # same root cause, two tiers of signal, as happens in production.
+        "db-incident": [
+            # Structural tier: mysql:petclinic disappears from all callers' trace paths.
+            # Each event is emitted twice — once attributed to mysql:petclinic (so it
+            # enters `active` and wins root-cause scoring) and once to the caller (so
+            # the caller shows a MISSING badge alongside its ERROR badge).
             {
                 "anomaly_type":     "MISSING_SERVICE",
                 "service":          "mysql:petclinic",
                 "root_op":          "visits-service:POST /owners/{ownerId}/pets/{petId}/visits",
                 "missing_services": ["mysql:petclinic"],
-                "message":          "MISSING_SERVICE: mysql:petclinic absent — visits-service no longer writes to DB",
+                "message":          "MISSING_SERVICE: mysql:petclinic absent from visits-service traces",
                 "hash":             "synthetic:missing:mysql-petclinic-visits",
             },
-        ],
-        # Full incident: DB down → multiple callers affected
-        "db-incident": [
-            # First fire mysql:petclinic as MISSING so it enters `affected` and
-            # the causality algorithm can identify it as the shared root cause.
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "visits-service",
+                "root_op":          "visits-service:POST /owners/{ownerId}/pets/{petId}/visits",
+                "missing_services": ["mysql:petclinic"],
+                "message":          "MISSING_SERVICE: mysql:petclinic absent from visits-service traces",
+                "hash":             "synthetic:missing:mysql-petclinic-visits-caller",
+            },
             {
                 "anomaly_type":     "MISSING_SERVICE",
                 "service":          "mysql:petclinic",
                 "root_op":          "api-gateway:GET /owners",
                 "missing_services": ["mysql:petclinic"],
-                "message":          "MISSING_SERVICE: mysql:petclinic unreachable — DB down",
-                "hash":             "synthetic:missing:mysql-petclinic",
+                "message":          "MISSING_SERVICE: mysql:petclinic absent from customers-service traces",
+                "hash":             "synthetic:missing:mysql-petclinic-customers",
             },
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "customers-service",
+                "root_op":          "api-gateway:GET /owners",
+                "missing_services": ["mysql:petclinic"],
+                "message":          "MISSING_SERVICE: mysql:petclinic absent from customers-service traces",
+                "hash":             "synthetic:missing:mysql-petclinic-customers-caller",
+            },
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "mysql:petclinic",
+                "root_op":          "api-gateway:GET /vets",
+                "missing_services": ["mysql:petclinic"],
+                "message":          "MISSING_SERVICE: mysql:petclinic absent from vets-service traces",
+                "hash":             "synthetic:missing:mysql-petclinic-vets",
+            },
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "vets-service",
+                "root_op":          "api-gateway:GET /vets",
+                "missing_services": ["mysql:petclinic"],
+                "message":          "MISSING_SERVICE: mysql:petclinic absent from vets-service traces",
+                "hash":             "synthetic:missing:mysql-petclinic-vets-caller",
+            },
+            # Error tier: all three callers throw JDBC connection errors
             {
                 "anomaly_type": "NEW_ERROR_SIGNATURE",
                 "service":      "visits-service",
@@ -1401,6 +1468,98 @@ def _make_app(environment: str):
                 "_delay_ms":    2000,
             },
         ],
+
+        # Slow DB: mysql:petclinic responds but is overloaded → all callers get
+        # correlated LATENCY_ANOMALY simultaneously.  No structural drift (DB still
+        # reachable), but shared-dep latency root cause should be identified.
+        "slow-db": [
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "mysql:petclinic",
+                "root_op":      "customers-service:GET /owners",
+                "operation":    "SELECT owners",
+                "current_mean_ms": "4200",
+                "baseline_mean_ms": "12",
+                "z_score":      "18.4",
+                "message":      "Latency spike: mysql:petclinic 4200ms (baseline 12ms, z=18.4)",
+                "hash":         "synthetic:latency:mysql-slow",
+                "_delay_ms":    0,
+            },
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "operation":    "GET /owners",
+                "current_mean_ms": "4350",
+                "baseline_mean_ms": "38",
+                "z_score":      "14.2",
+                "message":      "Latency spike: customers-service 4350ms (baseline 38ms, z=14.2)",
+                "hash":         "synthetic:latency:customers-slow",
+                "_delay_ms":    500,
+            },
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "vets-service",
+                "root_op":      "api-gateway:GET /vets",
+                "operation":    "SELECT vets",
+                "current_mean_ms": "4180",
+                "baseline_mean_ms": "15",
+                "z_score":      "16.9",
+                "message":      "Latency spike: vets-service 4180ms (baseline 15ms, z=16.9)",
+                "hash":         "synthetic:latency:vets-slow",
+                "_delay_ms":    500,
+            },
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "visits-service",
+                "root_op":      "api-gateway:GET /visits",
+                "operation":    "SELECT visits",
+                "current_mean_ms": "4290",
+                "baseline_mean_ms": "22",
+                "z_score":      "15.7",
+                "message":      "Latency spike: visits-service 4290ms (baseline 22ms, z=15.7)",
+                "hash":         "synthetic:latency:visits-slow",
+                "_delay_ms":    500,
+            },
+        ],
+
+        # OOM / crash sequence: service degrades under memory pressure before dying.
+        # Phase 1 (t=0): LATENCY spike — requests slowing as GC pressure mounts.
+        # Phase 2 (t=4s): MISSING — service crashes, disappears from traces entirely.
+        # Two separate signals, one root cause, time-ordered causality.
+        "oom-crash": [
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "operation":    "GET /owners",
+                "current_mean_ms": "3800",
+                "baseline_mean_ms": "38",
+                "z_score":      "12.6",
+                "message":      "Latency spike: customers-service 3800ms (baseline 38ms, z=12.6) — GC pressure",
+                "hash":         "synthetic:latency:customers-oom",
+                "_delay_ms":    0,
+            },
+            {
+                "anomaly_type": "MISSING_SERVICE",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "missing_services": ["customers-service"],
+                "message":      "MISSING_SERVICE: customers-service absent — OOM crash after latency spike",
+                "hash":         "synthetic:missing:customers-oom",
+                "_delay_ms":    4000,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "api-gateway",
+                "root_op":      "api-gateway:GET /owners",
+                "error_type":   "ServiceUnavailableException",
+                "operation":    "GET /owners",
+                "message":      "New error: ServiceUnavailableException on GET /owners — customers-service crashed",
+                "hash":         "synthetic:err:api-gw-customers-oom",
+                "_delay_ms":    1000,
+            },
+        ],
     }
 
     @app.post("/api/inject/infra")
@@ -1442,8 +1601,9 @@ def _make_app(environment: str):
     async def _demo(scenario: str, delay_ms: int = 800):
         """Fire a named demo scenario, broadcasting events with delay_ms between them.
 
-        Scenarios: kill-service | new-call-path | new-error | db-dropped | db-incident |
-                   cascading | latency-spike | error-rate-spike | combined-metric
+        Scenarios: kill-service | new-call-path | new-error | db-incident |
+                   cascading | latency-spike | error-rate-spike | combined-metric |
+                   slow-db | oom-crash
         """
         from fastapi import HTTPException
         if scenario not in _DEMO_SCENARIOS:

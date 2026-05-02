@@ -53,7 +53,7 @@ print(f'  Error baseline wiped (data/error_baseline.{e}.json)')
 # Stage error baseline on cluster (ConfigMap+inject happens after step 6)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "$_REPO/data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
-# NOTE: /tmp/otel_baseline.json on EC2 is the OTel-format baseline (22 fingerprints, no_missing_service flags).
+# NOTE: /tmp/otel_baseline.json on EC2 is the OTel-format baseline (31 fingerprints, no_missing_service flags).
 # It is managed separately and must NOT be overwritten by this script.
 # Also wipe OTel in-memory error baseline on each pod so demo error signatures fire fresh
 $K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \

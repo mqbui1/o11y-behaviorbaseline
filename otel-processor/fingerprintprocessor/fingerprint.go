@@ -151,11 +151,16 @@ func buildTraceFingerprint(spans []spanInfo, minSpans int) *traceFingerprint {
 
 	rootOp := root.service + ":" + root.operation
 
-	// Build edge list: parent:op -> child:op in time order
+	// Build edge list: only cross-service edges (parent.service != child.service).
+	// Intra-service spans (method calls, DB queries, framework internals) are
+	// excluded because they vary by data volume, caching, and query plans —
+	// including them produces unstable hashes that never match the baseline.
+	// Cross-service edges capture the service topology, which is what we care about.
 	type edge struct {
 		from string
 		to   string
 	}
+	seen := make(map[string]struct{}) // deduplicate edges
 	var edges []edge
 	for _, s := range spans {
 		pid := parentMap[s.spanID]
@@ -166,6 +171,15 @@ func buildTraceFingerprint(spans []spanInfo, minSpans int) *traceFingerprint {
 		if !ok {
 			continue
 		}
+		// Skip intra-service edges
+		if parent.service == s.service {
+			continue
+		}
+		key := parent.service + ":" + parent.operation + "|" + s.service + ":" + s.operation
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
 		edges = append(edges, edge{
 			from: parent.service + ":" + parent.operation,
 			to:   s.service + ":" + s.operation,

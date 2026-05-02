@@ -439,6 +439,10 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 
 // maybePromoteTrace increments the seen counter for fp.hash and promotes the
 // fingerprint into the baseline when the count reaches PromotionThreshold.
+// During warmup, the threshold is 1 — every unique fingerprint seen during
+// the warmup window is immediately promoted. This ensures the processor learns
+// the current trace shapes from live traffic on every restart, making the
+// baseline self-healing without any manual intervention.
 func (p *fingerprintProcessor) maybePromoteTrace(fp *traceFingerprint) {
 	if p.cfg.PromotionThreshold <= 0 {
 		return
@@ -448,7 +452,15 @@ func (p *fingerprintProcessor) maybePromoteTrace(fp *traceFingerprint) {
 	count := p.seenCounts[fp.hash]
 	p.seenMu.Unlock()
 
-	if count < p.cfg.PromotionThreshold {
+	// During warmup: promote immediately on first occurrence.
+	// This re-learns the current trace shape from live traffic, so the
+	// baseline stays in sync with the running application without manual pushes.
+	effectiveThreshold := p.cfg.PromotionThreshold
+	if p.inWarmup() {
+		effectiveThreshold = 1
+	}
+
+	if count < effectiveThreshold {
 		return
 	}
 
