@@ -259,7 +259,7 @@ func (bs *baselineStore) traceFingerprintsByRootOp(rootOp string, minOccurrences
 	defer bs.mu.RUnlock()
 	var out []*fingerprintEntry
 	for _, e := range bs.traceFingerprints {
-		if e.RootOp == rootOp && e.Occurrences >= minOccurrences {
+		if e.RootOp == rootOp && (e.Occurrences >= minOccurrences || e.AutoPromoted) {
 			out = append(out, e)
 		}
 	}
