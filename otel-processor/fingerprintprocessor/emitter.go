@@ -356,6 +356,61 @@ func (e *emitter) emitBootstrapComplete(env string, fingerprintCount, errorSigCo
 	})
 }
 
+func (e *emitter) emitNewQueryPlan(env, service, dbSystem, template, hash string) error {
+	tmplTrunc := template
+	if len(tmplTrunc) > 300 {
+		tmplTrunc = tmplTrunc[:300] + "..."
+	}
+	return e.send(splunkEvent{
+		EventType: "db.query.new_plan",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"sf_service":     service,
+			"anomaly_type":   "NEW_QUERY_PLAN",
+		},
+		Properties: map[string]string{
+			"service":     service,
+			"environment": env,
+			"db_system":   dbSystem,
+			"template":    tmplTrunc,
+			"hash":        hash,
+			"detector":    "otel-db-query",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (e *emitter) emitSlowQuery(env, service, dbSystem, template, hash string,
+	currentMeanNs, baselineMeanNs, stddevNs, zScore float64) error {
+	tmplTrunc := template
+	if len(tmplTrunc) > 300 {
+		tmplTrunc = tmplTrunc[:300] + "..."
+	}
+	return e.send(splunkEvent{
+		EventType: "db.query.slow",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"sf_service":     service,
+			"anomaly_type":   "SLOW_QUERY",
+		},
+		Properties: map[string]string{
+			"service":          service,
+			"environment":      env,
+			"db_system":        dbSystem,
+			"template":         tmplTrunc,
+			"hash":             hash,
+			"current_mean_ms":  fmt.Sprintf("%.1f", currentMeanNs/1e6),
+			"baseline_mean_ms": fmt.Sprintf("%.1f", baselineMeanNs/1e6),
+			"stddev_ms":        fmt.Sprintf("%.1f", stddevNs/1e6),
+			"z_score":          fmt.Sprintf("%.2f", zScore),
+			"detector":         "otel-db-query",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func rootService(rootOp string) string {
 	if idx := strings.Index(rootOp, ":"); idx >= 0 {
 		return rootOp[:idx]

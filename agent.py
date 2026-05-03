@@ -36,6 +36,12 @@ from pathlib import Path
 
 import collect
 
+try:
+    from core.cross_env import cross_env_context as _cross_env_context
+    _CROSS_ENV_AVAILABLE = True
+except ImportError:
+    _CROSS_ENV_AVAILABLE = False
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 _ENV_FILE = Path(__file__).parent / ".env"
@@ -46,7 +52,10 @@ if _ENV_FILE.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip())
 
-ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
+ACCESS_TOKEN  = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
+# Optional: set CROSS_ENV_ENVS="staging-env,prod-env" to enable cross-env correlation
+# in the Claude prompt. E.g. CROSS_ENV_ENVS="petclinictest-2d77-workshop,petclinic-prod"
+CROSS_ENV_ENVS = os.environ.get("CROSS_ENV_ENVS", "")
 AWS_REGION   = os.environ.get("AWS_REGION", "us-west-2")
 BEDROCK_ARN  = os.environ.get(
     "CLAUDE_MODEL",
@@ -81,6 +90,9 @@ The input may include several enrichment fields — use all of them:
     Use the highest-confidence hypothesis as your starting point for root_cause.
   - "recent_deployments": services deployed recently. If the affected service was deployed
     within the last hour, downgrade severity unless symptoms are severe.
+  - "cross_env_context": anomalies seen in a paired environment (staging/production).
+    If staging shows an anomaly not yet in production, treat as early warning and recommend
+    proactive action. If production preceded staging, the prod incident is the root cause.
 
 Your job:
 1. Determine what is actually wrong
@@ -485,6 +497,15 @@ def main() -> None:
 
     if hyp_ctx:
         watch_result["hypothesis_context"] = hyp_ctx
+
+    # Cross-environment correlation context (optional — requires CROSS_ENV_ENVS)
+    if _CROSS_ENV_AVAILABLE and CROSS_ENV_ENVS:
+        _ce_parts = [p.strip() for p in CROSS_ENV_ENVS.split(",") if p.strip()]
+        if len(_ce_parts) == 2:
+            print(f"  Fetching cross-env context ({_ce_parts[0]} → {_ce_parts[1]})...")
+            _ce_ctx = _cross_env_context(_ce_parts[0], _ce_parts[1], window_minutes=30)
+            if _ce_ctx:
+                watch_result["cross_env_context"] = _ce_ctx
 
     print("  Reasoning with Claude...")
     try:
