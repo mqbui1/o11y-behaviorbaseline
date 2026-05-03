@@ -11,6 +11,7 @@ Triage mode: wait for events, collect for a settle window, emit agent.py JSON, e
   --timeout-seconds N  Give up if no events arrive within N seconds (default: 120)
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -77,7 +78,7 @@ def _load_dedup(env: str) -> dict:
 def _save_dedup(env: str, state: dict) -> None:
     _dedup_path(env).write_text(json.dumps(state))
 
-drift_re    = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected|latency anomaly detected|error rate anomaly detected)')
+drift_re    = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected|latency anomaly detected|error rate anomaly detected|slow db query detected|new db query plan detected)')
 hash_re     = re.compile(r'"hash": "([^"]+)"')
 op_re       = re.compile(r'"root_op": "([^"]+)"')
 svc_re      = re.compile(r'"service": "([^"]+)"')
@@ -93,18 +94,82 @@ zscore_re   = re.compile(r'"z_score": "([^"]+)"')
 erate_re    = re.compile(r'"error_pct": "([^"]+)"')
 ecnt_re     = re.compile(r'"error_count": (\d+)')
 tcnt_re     = re.compile(r'"total_count": (\d+)')
+dbsys_re    = re.compile(r'"db_system": "([^"]+)"')
+tmpl_re     = re.compile(r'"template": "([^"]+)"')
 
 DEDUP_TTL = 90
+# Events within this many seconds of the first event are grouped into one incident
+INCIDENT_WINDOW_SECONDS = 30
+
+
+def _group_into_incidents(events: list[dict]) -> list[dict]:
+    """
+    Group co-occurring anomalies into incidents.
+
+    Events that fire within INCIDENT_WINDOW_SECONDS of the first event in a
+    cluster are assigned a shared incident_id and an incident_group label that
+    summarises the involved signal types. This gives agent.py richer context
+    for root-cause reasoning and suppresses duplicate pages for the same
+    underlying outage.
+
+    A new incident group starts whenever a gap > INCIDENT_WINDOW_SECONDS
+    occurs between consecutive events.
+    """
+    if not events:
+        return events
+
+    # Sort by timestamp_ms so clusters are contiguous
+    sorted_events = sorted(events, key=lambda e: e.get("timestamp_ms", 0))
+
+    groups: list[list[dict]] = []
+    current_group: list[dict] = [sorted_events[0]]
+
+    for evt in sorted_events[1:]:
+        gap_s = (evt.get("timestamp_ms", 0) - current_group[-1].get("timestamp_ms", 0)) / 1000
+        if gap_s <= INCIDENT_WINDOW_SECONDS:
+            current_group.append(evt)
+        else:
+            groups.append(current_group)
+            current_group = [evt]
+    groups.append(current_group)
+
+    result: list[dict] = []
+    for group in groups:
+        # Stable incident_id: hash of sorted anomaly types + services
+        sig = "|".join(sorted(
+            f"{e.get('anomaly_type')}:{e.get('service','')}"
+            for e in group
+        ))
+        incident_id = "INC-" + hashlib.sha1(sig.encode()).hexdigest()[:8].upper()
+
+        # Human-readable group label: unique signal types
+        types_seen = sorted({e.get("anomaly_type", "UNKNOWN") for e in group})
+        services_seen = sorted({e.get("service", "") for e in group if e.get("service")})
+        group_label = (
+            f"{'+'.join(types_seen)} on {','.join(services_seen)}"
+            if services_seen else "+".join(types_seen)
+        )
+
+        for evt in group:
+            annotated = dict(evt)
+            annotated["incident_id"]    = incident_id
+            annotated["incident_group"] = group_label
+            annotated["incident_size"]  = len(group)
+            result.append(annotated)
+
+    return result
 
 
 def _parse_event(line: str) -> dict | None:
     """Parse a drift log line into an anomaly dict (agent.py schema)."""
     if not drift_re.search(line):
         return None
-    is_error     = "error signature" in line
-    is_missing   = "missing service" in line
-    is_latency   = "latency anomaly" in line
+    is_error      = "error signature" in line
+    is_missing    = "missing service" in line
+    is_latency    = "latency anomaly" in line
     is_error_rate = "error rate anomaly" in line
+    is_slow_query = "slow db query" in line
+    is_new_query  = "new db query plan" in line
     h    = hash_re.search(line)
     op   = op_re.search(line)
     svc  = svc_re.search(line)
@@ -155,6 +220,47 @@ def _parse_event(line: str) -> dict | None:
             "total_count":  tc_val,
             "message":      f"Error rate spike on {svc_val} {op2_val}: {er_val} ({ec_val}/{tc_val} spans)",
             "hash":         f"errrate:{svc_val}:{op2_val}",
+            "source":       "otel-edge",
+            "timestamp_ms": int(time.time() * 1000),
+        }
+    elif is_slow_query:
+        db_sys  = dbsys_re.search(line)
+        tmpl    = tmpl_re.search(line)
+        cur_ms  = cur_ms_re.search(line)
+        base_ms = base_ms_re.search(line)
+        zs      = zscore_re.search(line)
+        db_sys_val  = db_sys.group(1)  if db_sys  else "?"
+        tmpl_val    = tmpl.group(1)    if tmpl    else ""
+        cur_val     = cur_ms.group(1)  if cur_ms  else "?"
+        base_val    = base_ms.group(1) if base_ms else "?"
+        zs_val      = zs.group(1)      if zs      else "?"
+        h_val_local = h.group(1)       if h       else f"slowq:{svc_val}:{db_sys_val}"
+        return {
+            "anomaly_type":      "SLOW_QUERY",
+            "service":           svc_val,
+            "db_system":         db_sys_val,
+            "template":          tmpl_val[:120] + ("..." if len(tmpl_val) > 120 else ""),
+            "current_mean_ms":   cur_val,
+            "baseline_mean_ms":  base_val,
+            "z_score":           zs_val,
+            "message":           f"Slow DB query on {svc_val} ({db_sys_val}): {cur_val}ms (baseline {base_val}ms, z={zs_val})",
+            "hash":              h_val_local,
+            "source":            "otel-edge",
+            "timestamp_ms":      int(time.time() * 1000),
+        }
+    elif is_new_query:
+        db_sys  = dbsys_re.search(line)
+        tmpl    = tmpl_re.search(line)
+        db_sys_val = db_sys.group(1) if db_sys else "?"
+        tmpl_val   = tmpl.group(1)   if tmpl   else ""
+        h_val_local = h.group(1)     if h      else f"newq:{svc_val}:{db_sys_val}"
+        return {
+            "anomaly_type": "NEW_QUERY_PLAN",
+            "service":      svc_val,
+            "db_system":    db_sys_val,
+            "template":     tmpl_val[:120] + ("..." if len(tmpl_val) > 120 else ""),
+            "message":      f"New DB query plan on {svc_val} ({db_sys_val}): {tmpl_val[:80]}",
+            "hash":         h_val_local,
             "source":       "otel-edge",
             "timestamp_ms": int(time.time() * 1000),
         }
@@ -358,6 +464,10 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
                     etype = "service.latency.anomaly"
                 elif atype == "ERROR_RATE_ANOMALY":
                     etype = "service.error.rate.anomaly"
+                elif atype == "SLOW_QUERY":
+                    etype = "db.query.slow"
+                elif atype == "NEW_QUERY_PLAN":
+                    etype = "db.query.new_plan"
                 else:
                     etype = "trace.path.drift"
                 print(f"[{ts}] {etype}")
@@ -368,6 +478,10 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
                     print(f"  current={event.get('current_mean_ms')}ms  baseline={event.get('baseline_mean_ms')}ms  z={event.get('z_score')}")
                 if atype == "ERROR_RATE_ANOMALY":
                     print(f"  error_pct={event.get('error_pct')}  ({event.get('error_count')}/{event.get('total_count')} spans)")
+                if atype in ("SLOW_QUERY", "NEW_QUERY_PLAN"):
+                    print(f"  db={event.get('db_system')}  template={event.get('template','')[:80]}")
+                if atype == "SLOW_QUERY":
+                    print(f"  current={event.get('current_mean_ms')}ms  baseline={event.get('baseline_mean_ms')}ms  z={event.get('z_score')}")
                 if event.get("trace_id"):
                     print(f"  trace_id={event['trace_id']}")
                 print()
@@ -385,13 +499,22 @@ def _run_watch(triage: bool, environment: str, settle: int, timeout: int,
             print("  No drift events received within timeout.", file=sys.stderr)
             sys.exit(1)
         _save_dedup(environment, new_dedup)
+        grouped = _group_into_incidents(collected)
+        # Summarise incident grouping for operator visibility
+        incident_ids = sorted({e["incident_id"] for e in grouped})
+        if len(incident_ids) > 1:
+            print(f"  [{time.strftime('%H:%M:%S')}] Grouped {len(collected)} events into "
+                  f"{len(incident_ids)} incident(s): {', '.join(incident_ids)}", file=sys.stderr)
+        elif incident_ids:
+            print(f"  [{time.strftime('%H:%M:%S')}] Incident {incident_ids[0]}: "
+                  f"{grouped[0].get('incident_group', '')} ({len(collected)} signal(s))", file=sys.stderr)
         result = {
             "environment":    environment,
             "timestamp":      datetime.now(timezone.utc).isoformat(),
             "window_minutes": 0,
             "source":         "otel-edge-direct",
-            "checked":        len(collected),
-            "anomalies":      collected,
+            "checked":        len(grouped),
+            "anomalies":      grouped,
         }
         print(json.dumps(result))
 

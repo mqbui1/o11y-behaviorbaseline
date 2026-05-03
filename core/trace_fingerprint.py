@@ -1144,12 +1144,14 @@ def cmd_learn(window_minutes: int = 120,
             h = fp["hash"]
             observed_hashes.add(h)
             if h in fingerprints:
-                # Already established — increment occurrence count
+                # Already established — increment occurrence count and refresh last_seen
                 fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
+                fingerprints[h]["last_seen"] = datetime.now(timezone.utc).isoformat()
                 updated_count += 1
             else:
                 # Stage until seen MIN_BASELINE_OCCURRENCES times this window
                 if h not in staged:
+                    now_iso = datetime.now(timezone.utc).isoformat()
                     staged[h] = {
                         "hash":          h,
                         "path":          fp["path"],
@@ -1161,7 +1163,8 @@ def cmd_learn(window_minutes: int = 120,
                         "watch_hits":    0,
                         "auto_promoted": False,
                         "promoted_at":   None,
-                        "first_seen":    datetime.now(timezone.utc).isoformat(),
+                        "first_seen":    now_iso,
+                        "last_seen":     now_iso,
                     }
                 staged[h]["occurrences"] += 1
                 if staged[h]["occurrences"] >= effective_min_occurrences:
@@ -1720,6 +1723,69 @@ def cmd_show(environment: str | None = None) -> None:
         print()
 
 
+def cmd_decay(stale_days: int = 14, prune_days: int = 30,
+              dry_run: bool = False, environment: str | None = None) -> None:
+    """Age out baseline entries that haven't been seen recently.
+
+    Entries last seen more than `stale_days` days ago have their occurrence
+    count halved (confidence decay) so they drift toward the promotion
+    threshold and eventually fall below it during the next learn run.
+
+    Entries last seen more than `prune_days` days ago are removed outright,
+    unless they are auto_promoted (manually accepted), which are never pruned
+    by decay — only by an explicit learn --reset.
+
+    Intended to be run periodically (e.g. weekly via cron) to keep the
+    baseline fresh as the application evolves.
+    """
+    baseline = load_baseline(environment)
+    fps = baseline.get("fingerprints", {})
+    if not fps:
+        print("Baseline is empty — nothing to decay.")
+        return
+
+    now = datetime.now(timezone.utc)
+    decayed: list[str] = []
+    pruned:  list[str] = []
+
+    for h, info in list(fps.items()):
+        if info.get("auto_promoted"):
+            continue  # never auto-decay manually promoted entries
+
+        last_seen_str = info.get("last_seen") or info.get("promoted_at") or info.get("first_seen")
+        if not last_seen_str:
+            continue
+        try:
+            last_seen_dt = datetime.fromisoformat(last_seen_str.replace("Z", "+00:00"))
+            if last_seen_dt.tzinfo is None:
+                last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        age_days = (now - last_seen_dt).days
+
+        if age_days >= prune_days:
+            pruned.append(h)
+            if not dry_run:
+                del fps[h]
+            print(f"  {'[dry-run] ' if dry_run else ''}PRUNE  {info['root_op']}  [{h[:12]}]"
+                  f"  last_seen={age_days}d ago  occ={info.get('occurrences',1)}")
+        elif age_days >= stale_days:
+            decayed.append(h)
+            if not dry_run:
+                old_occ = info.get("occurrences", 1)
+                fps[h]["occurrences"] = max(1, old_occ // 2)
+            print(f"  {'[dry-run] ' if dry_run else ''}DECAY  {info['root_op']}  [{h[:12]}]"
+                  f"  last_seen={age_days}d ago  occ={info.get('occurrences',1)}"
+                  f"  -> {max(1, info.get('occurrences',1) // 2)}")
+
+    print(f"\n  Decay run: {len(decayed)} decayed, {len(pruned)} pruned"
+          f"{' (dry-run — no changes saved)' if dry_run else ''}")
+
+    if not dry_run and (decayed or pruned):
+        save_baseline(baseline, environment)
+
+
 def cmd_overrides(action: str, root_op: str | None = None,
                   flag: str | None = None, value: str | None = None,
                   reason: str | None = None,
@@ -1844,6 +1910,17 @@ def main() -> None:
     p_overrides.add_argument("reason", nargs="?", default=None,
                              help="Optional explanation (stored as metadata)")
 
+    p_decay = sub.add_parser(
+        "decay",
+        help="Age out stale baseline entries (run weekly to keep baseline fresh)",
+    )
+    p_decay.add_argument("--stale-days", type=int, default=14,
+                         help="Entries not seen in this many days have occurrences halved (default: 14)")
+    p_decay.add_argument("--prune-days", type=int, default=30,
+                         help="Entries not seen in this many days are removed (default: 30)")
+    p_decay.add_argument("--dry-run", action="store_true",
+                         help="Print what would change without saving")
+
     args = parser.parse_args()
     env = args.environment
 
@@ -1861,6 +1938,8 @@ def main() -> None:
     elif args.command == "overrides":
         cmd_overrides(args.ov_action, args.root_op, args.flag, args.value,
                       args.reason, environment=env)
+    elif args.command == "decay":
+        cmd_decay(args.stale_days, args.prune_days, args.dry_run, environment=env)
 
 
 if __name__ == "__main__":
