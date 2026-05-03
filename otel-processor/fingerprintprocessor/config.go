@@ -162,6 +162,22 @@ type Config struct {
 	// Default: 5m. Set to 0 to disable auto-bootstrap.
 	BootstrapDuration time.Duration `mapstructure:"bootstrap_duration"`
 
+	// ── Database query fingerprinting ─────────────────────────────────────
+
+	// DbQueryLatencyWindow is the rolling window for DB query latency tracking.
+	// When a normalised query template's mean latency deviates by more than
+	// DbQueryLatencyZScore stddevs above its baseline, a db.query.slow event
+	// is emitted.  Set to 0 to disable DB query tracking entirely.  Default: 5m.
+	DbQueryLatencyWindow time.Duration `mapstructure:"db_query_latency_window"`
+
+	// DbQueryLearnMinSamples is the number of observations required before
+	// slow-query detection activates for a given template.  Default: 10.
+	DbQueryLearnMinSamples int `mapstructure:"db_query_learn_min_samples"`
+
+	// DbQueryLatencyZScore is the z-score threshold for slow query detection.
+	// Default: 3.0.
+	DbQueryLatencyZScore float64 `mapstructure:"db_query_latency_z_score"`
+
 	// ── Multi-pod deduplication ────────────────────────────────────────────
 
 	// DeduplicateEvents controls whether the processor uses a claim-file on the
@@ -205,5 +221,8 @@ func createDefaultConfig() component.Config {
 		BootstrapDuration:           5 * time.Minute,
 		DeduplicateEvents:           true,
 		DeduplicateTTL:              2 * time.Minute,
+		DbQueryLatencyWindow:        5 * time.Minute,
+		DbQueryLearnMinSamples:      10,
+		DbQueryLatencyZScore:        3.0,
 	}
 }

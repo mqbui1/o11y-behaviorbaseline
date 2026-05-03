@@ -29,6 +29,7 @@ type fingerprintProcessor struct {
 	emitter     *emitter
 	topology    *topologyTracker
 	metrics     *metricsTracker
+	dbQueries   *dbQueryTracker
 	selfMetrics *selfMetrics
 	dedup       *eventDeduplicator
 
@@ -83,6 +84,7 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		topology:       newTopologyTracker(cfg.BaselinePath, cfg.Environment, emit, cfg.TopologyDriftEnabled),
 		metrics:        newMetricsTracker(cfg, emit).withLogger(logger),
 		selfMetrics:    newSelfMetrics(cfg.SplunkIngestURL, cfg.SplunkApiToken, cfg.Environment),
+		// dbQueries tracker is wired in below (needs p.inWarmup reference)
 		dedup:          dedup,
 		buffers:        make(map[string]*traceBuffer),
 		seenCounts:     seenCounts,
@@ -95,6 +97,7 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 	}
 	p.metrics.selfMetrics = p.selfMetrics
 	p.topology.onDriftEmitted = func() { p.selfMetrics.TopologyDrifts.Add(1) }
+	p.dbQueries = newDbQueryTracker(cfg, emit, p.inWarmup).withLogger(logger)
 
 	if cfg.PromotionThreshold > 0 {
 		p.logger.Info("auto-promotion enabled",
@@ -561,6 +564,7 @@ func (p *fingerprintProcessor) checkMissingServices() {
 func (p *fingerprintProcessor) analyzeTrace(buf *traceBuffer) {
 	p.topology.observe(buf.spans, p.inWarmup())
 	p.metrics.observe(buf.spans, p.cfg.Environment)
+	p.dbQueries.observe(buf.spans, p.cfg.Environment)
 	p.analyzeTraceStructure(buf)
 	p.analyzeErrorSignatures(buf)
 	// Throughput drop: record one arrival per trace for the root_op.
