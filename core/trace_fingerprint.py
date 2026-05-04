@@ -1191,24 +1191,28 @@ def cmd_learn(window_minutes: int = 120,
     # won't appear in steady-state traffic. Keeping them causes false
     # MISSING_SERVICE alerts after every service restart.
     # This is generic — no hardcoded service names needed.
-    root_services = {
-        info["root_op"].split(":")[0]
-        for info in fingerprints.values()
-        if ":" in info.get("root_op", "")
-    }
-    infra_only = []
-    for h, info in fingerprints.items():
-        if info.get("auto_promoted"):
-            continue
-        root_svc = info["root_op"].split(":")[0] if ":" in info.get("root_op", "") else ""
-        non_root_svcs = {s for s in info.get("services", []) if s != root_svc}
-        if non_root_svcs and non_root_svcs.isdisjoint(root_services):
-            infra_only.append(h)
-    if infra_only:
-        for h in infra_only:
-            del fingerprints[h]
-        print(f"  Filtered {len(infra_only)} infra-only fingerprint(s) "
-              f"(non-root services never appear as roots — startup/init calls)")
+    # Skip in bootstrap mode: short windows may not yet have enough service
+    # diversity for downstream services to appear as roots. The filter runs
+    # correctly on subsequent regular learn runs once traffic stabilises.
+    if not bootstrap:
+        root_services = {
+            info["root_op"].split(":")[0]
+            for info in fingerprints.values()
+            if ":" in info.get("root_op", "")
+        }
+        infra_only = []
+        for h, info in fingerprints.items():
+            if info.get("auto_promoted"):
+                continue
+            root_svc = info["root_op"].split(":")[0] if ":" in info.get("root_op", "") else ""
+            non_root_svcs = {s for s in info.get("services", []) if s != root_svc}
+            if non_root_svcs and non_root_svcs.isdisjoint(root_services):
+                infra_only.append(h)
+        if infra_only:
+            for h in infra_only:
+                del fingerprints[h]
+            print(f"  Filtered {len(infra_only)} infra-only fingerprint(s) "
+                  f"(non-root services never appear as roots — startup/init calls)")
 
     rare = len([h for h in staged if h not in fingerprints])
     if rare:
