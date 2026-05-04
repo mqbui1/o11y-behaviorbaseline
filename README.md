@@ -240,6 +240,7 @@ Action types: `NO_ACTION`, `SUPPRESS_ANOMALY`, `RELEARN_BASELINE`, `EMIT_EVENT`,
 | 4  | Splunk APM AutoDetect _(native)_ | p99 latency drift per service | Built-in — fires for all APM environments automatically |
 | 2  | `core/trace_fingerprint.py`  | New/changed execution paths, missing services | SHA-256 of ordered parent→child span edge sequence |
 | 3+ | `core/error_fingerprint.py`  | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
+| DB | `otel-processor` (`dbquery.go`) | New SQL query templates, slow queries vs baseline | Normalises SQL literals → template, z-score vs Welford baseline per (service, db_system, template) |
 | C  | `core/correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 2/3 events by service within a time window |
 
 **Tiers 1b, 3, and 4** are native Splunk APM AutoDetect — no provisioning required; they fire automatically for every APM-enabled environment.
@@ -381,6 +382,8 @@ Tiers 2, 3, and C emit **custom events** queryable via SignalFlow:
 |------------|------|----------------|
 | `trace.path.drift` | 2 | `anomaly_type`, `root_operation`, `fp_hash`, `sf_environment` |
 | `error.signature.drift` | 3 | `anomaly_type`, `service`, `error_type`, `sig_hash`, `sf_environment` |
+| `db.query.new_plan` | DB | `service`, `db_system`, `query_template`, `query_hash`, `sf_environment` |
+| `db.query.slow` | DB | `service`, `db_system`, `query_template`, `query_hash`, `current_mean_ms`, `baseline_mean_ms`, `z_score`, `sf_environment` |
 | `behavioral_baseline.correlated_anomaly` | C | `service`, `corr_type`, `severity`, `tiers`, `sf_environment` |
 | `deployment.started` | input | `service`, `sf_environment` |
 | `behavioral_baseline.agent.action` | agent | `service`, `action`, `reason`, `severity` |
@@ -731,6 +734,9 @@ All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprin
 | `partial_trace_threshold` | `0.7` | Min fraction of baseline span count required to fingerprint (0.0 = disabled). Guards against false positives when spans split across collector nodes. |
 | `promotion_threshold` | `10` | Number of detections before a new hash is auto-promoted into the baseline. Set to `0` to disable. |
 | `promotion_writeback` | `true` | Write the updated baseline back to disk after promotion so other pods pick it up on their next reload. Requires the baseline path to be writable (emptyDir, not a read-only ConfigMap). |
+| `db_query_latency_window` | `5m` | Rolling window for DB query latency tracking. Set to `0` to disable DB query fingerprinting entirely. |
+| `db_query_learn_min_samples` | `10` | Observations per query template required before slow-query detection activates. During this period the baseline mean/stddev is built with Welford's algorithm. |
+| `db_query_latency_z_score` | `3.0` | Z-score threshold above baseline mean that triggers a `db.query.slow` event. Also emits `db.query.new_plan` on the first occurrence of any previously-unseen normalised query template (after warmup). |
 
 ---
 
