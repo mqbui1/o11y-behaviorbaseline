@@ -143,7 +143,7 @@ WEBHOOK_URL         = os.environ.get("TRIAGE_WEBHOOK_URL")
 # Max traces to fetch per anomaly service for context
 MAX_TRACES_PER_SERVICE = 3
 # Max spans to include in the Claude prompt (keep tokens manageable)
-MAX_SPANS_IN_PROMPT = 30
+MAX_SPANS_IN_PROMPT = 50
 
 # ── Triage dedup state ────────────────────────────────────────────────────────
 # Key format: "service:corr_type" — suppresses re-triage of the same ongoing
@@ -475,7 +475,8 @@ def get_trace_full(trace_id: str) -> dict | None:
 def _summarize_trace(trace: dict) -> dict:
     """
     Produce a compact, human-readable summary of a trace for the LLM prompt.
-    Truncates to MAX_SPANS_IN_PROMPT spans to keep token count manageable.
+    Truncates to MAX_SPANS_IN_PROMPT spans, prioritising DB spans so slow-query
+    evidence is never truncated away in DB-heavy traces.
     """
     spans = trace.get("spans", [])
     total_spans = len(spans)
@@ -483,27 +484,37 @@ def _summarize_trace(trace: dict) -> dict:
     # Sort by startTime
     spans_sorted = sorted(spans, key=lambda s: s.get("startTime", 0))
 
-    # Collect interesting tags (errors, HTTP status, exceptions)
+    # Prioritise DB spans so they survive truncation
+    db_spans = [s for s in spans_sorted
+                if any(t["key"] == "db.statement" for t in s.get("tags", []))]
+    other_spans = [s for s in spans_sorted if s not in db_spans]
+    remaining_slots = max(0, MAX_SPANS_IN_PROMPT - len(db_spans))
+    candidate_spans = db_spans + other_spans[:remaining_slots]
+
+    # Collect interesting tags (errors, HTTP status, DB statements, exceptions)
     error_spans = []
-    for span in spans_sorted[:MAX_SPANS_IN_PROMPT]:
+    for span in candidate_spans:
         tags = {t["key"]: t["value"] for t in span.get("tags", [])}
         has_error = (
             tags.get("error") in ("true", "True", True)
             or tags.get("otel.status_code") == "ERROR"
             or tags.get("http.status_code", "200").startswith(("4", "5"))
         )
+        is_db = bool(tags.get("db.statement"))
+        if not has_error and not is_db:
+            continue
         span_summary = {
-            "service":   span.get("serviceName"),
-            "operation": span.get("operationName"),
+            "service":     span.get("serviceName"),
+            "operation":   span.get("operationName"),
             "duration_ms": round(span.get("duration", 0) / 1000, 1),
         }
-        if has_error:
-            if tags.get("http.status_code"):
-                span_summary["http_status"] = tags["http.status_code"]
-            if tags.get("exception.message"):
-                span_summary["exception"] = tags["exception.message"][:200]
-            if tags.get("db.statement"):
-                span_summary["db_statement"] = tags["db.statement"][:100]
+        if tags.get("http.status_code"):
+            span_summary["http_status"] = tags["http.status_code"]
+        if tags.get("exception.message"):
+            span_summary["exception"] = tags["exception.message"][:200]
+        if tags.get("db.statement"):
+            span_summary["db_statement"] = tags["db.statement"][:200]
+        if has_error or is_db:
             error_spans.append(span_summary)
 
     # All services involved
@@ -511,13 +522,13 @@ def _summarize_trace(trace: dict) -> dict:
 
     root = spans_sorted[0] if spans_sorted else {}
     return {
-        "trace_id":      trace.get("traceID"),
+        "trace_id":          trace.get("traceID"),
         "total_duration_ms": round(trace.get("duration", 0) / 1000, 1),
-        "total_spans":   total_spans,
-        "services":      services,
-        "root_service":  root.get("serviceName"),
-        "root_operation": root.get("operationName"),
-        "error_spans":   error_spans,
+        "total_spans":       total_spans,
+        "services":          services,
+        "root_service":      root.get("serviceName"),
+        "root_operation":    root.get("operationName"),
+        "error_spans":       error_spans,
     }
 
 
@@ -542,6 +553,8 @@ Anomaly types:
 - SPAN_COUNT_SPIKE: far more spans than normal (cascading retries, fan-out explosion)
 - NEW_SIGNATURE: new error pattern never seen in baseline (new bug, unhandled edge case)
 - SIGNATURE_VANISHED: error that was common is now gone (possible fix, or service completely down)
+- SLOW_QUERY: a DB query whose latency z-score has spiked above baseline (missing index, lock contention, data volume)
+- NEW_QUERY_PLAN: a normalised SQL template never seen before (new code path hitting DB, schema migration, ORM change)
 
 ROOT CAUSE REASONING RULES — follow these in order:
 1. MISSING_SERVICE is direct evidence: the named service is absent from traces. It is down.
@@ -727,6 +740,22 @@ def triage_anomaly(corr: dict, traces: list[dict], dry_run: bool = False,
                 metric_lines.append(f"- {msg}")
         if len(metric_lines) > 2:
             context_parts += metric_lines
+
+    # ── DB query anomaly context: slow/new query signals from OTel ────────────
+    db_anomalies = [
+        a for a in corr.get("anomaly_types", [])
+        if a in ("SLOW_QUERY", "NEW_QUERY_PLAN")
+    ]
+    if db_anomalies:
+        db_lines = [
+            "",
+            "## DB Query Anomalies (OTel edge detector)",
+        ]
+        for msg in corr.get("messages", []):
+            if "Slow query" in msg or "New query" in msg or "db.query" in msg.lower():
+                db_lines.append(f"- {msg}")
+        if len(db_lines) > 2:
+            context_parts += db_lines
 
     user_message = "\n".join(context_parts)
 
