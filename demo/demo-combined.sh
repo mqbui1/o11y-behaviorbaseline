@@ -48,7 +48,7 @@ if [ "$RESTORE" = "true" ]; then
   exit 0
 fi
 
-echo "=== Demo 9: Combined Signal — Structural + Metric Anomaly — env=$ENV ==="
+echo "=== Demo 8: Combined Signal — Structural + Metric Anomaly — env=$ENV ==="
 echo ""
 echo "  Kill 1 : vets-service      → MISSING_SERVICE (structural, ~15s)"
 echo "  Kill 2 : petclinic-db      → ERROR_RATE_ANOMALY + NEW_ERROR_SIGNATURE (~30s)"
