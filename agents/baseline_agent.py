@@ -222,7 +222,7 @@ def _push_baseline(env: str, baseline_path: Path) -> bool:
         return False
     print(f"  ConfigMap behavioral-baseline updated.")
 
-    # Inject into running pods
+    # Inject into running pods — retry once on failure (pod may be briefly restarting)
     rc, pods_out = _kubectl(
         "get", "pods", "-l", "app=otelcol-fingerprint",
         "--field-selector=status.phase=Running",
@@ -237,7 +237,16 @@ def _push_baseline(env: str, baseline_path: Path) -> bool:
             injected += 1
             print(f"    {pod}: injected")
         else:
-            print(f"    {pod}: skipped")
+            # Retry once after a short pause — pod may be mid-restart
+            time.sleep(3)
+            rc, _ = _kubectl("cp", str(baseline_path),
+                             f"{pod}:/baseline/baseline.json", "-c", "otelcol")
+            if rc == 0:
+                injected += 1
+                print(f"    {pod}: injected (retry)")
+            else:
+                print(f"    {pod}: skipped (pod not ready — ConfigMap reload will catch up)",
+                      file=sys.stderr)
     print(f"  Injected into {injected}/{len(pods)} pod(s).")
     return True
 
