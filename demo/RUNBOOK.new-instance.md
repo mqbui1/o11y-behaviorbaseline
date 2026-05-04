@@ -60,26 +60,42 @@ All PetClinic pods should be `Running`.
 
 ## Step 2 — Build and load OTel processor image
 
-**The cluster does NOT have a pre-populated local registry.** The image must be built on EC2
-and imported directly into k3d (no push/pull from ghcr.io needed):
+**The cluster does NOT have a local registry.** Build the image directly on EC2
+and import it into k3d — no registry push needed, and ghcr.io is private so pulling won't work.
 
 ```bash
+# Get the k3d cluster name first
+sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no splunk@<new-ip> \
+  "k3d cluster list"
+# → NAME                  SERVERS   AGENTS ...
+#   test-7bb4-cluster      1/1       2/2    ...  ← this is <cluster-name>
+
 # Copy source to EC2
 rsync -av -e "sshpass -p Sp1unkH00di3 ssh -p 2222 -o StrictHostKeyChecking=no" \
   otel-processor/ splunk@<new-ip>:~/otelcol-fingerprint-src/
 
-# Build on EC2 (takes ~2 min — Go compile)
+# Build on EC2 WITHOUT a registry prefix (takes ~2 min — Go compile)
+# Do NOT use localhost:9999/... — k3d has no local registry on port 9999
 sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no splunk@<new-ip> \
-  "cd ~/otelcol-fingerprint-src && docker build -t localhost:9999/otelcol-fingerprint:latest ."
+  "cd ~/otelcol-fingerprint-src && docker build --no-cache -t otelcol-fingerprint:latest ."
 
-# Import directly into all k3d nodes (bypasses registry — use cluster name from `k3d cluster list`)
+# Import directly into all k3d nodes (this copies the image into each k3d node's containerd)
 sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no splunk@<new-ip> \
-  "k3d image import localhost:9999/otelcol-fingerprint:latest -c <cluster-name>"
-# cluster name: k3d cluster list → e.g. petclinicXXXX-cluster
+  "k3d image import otelcol-fingerprint:latest -c <cluster-name>"
 ```
 
-> **Important:** `daemonset.yaml` uses `imagePullPolicy: IfNotPresent` — this is required for
-> k3d image import to work. Do NOT change it to `Always`.
+Before applying the daemonset, patch the image reference and pull policy in the manifest:
+
+```bash
+sshpass -p "Sp1unkH00di3" ssh -p 2222 -o StrictHostKeyChecking=no splunk@<new-ip> "
+  sed -i 's|localhost:9999/otelcol-fingerprint:latest|otelcol-fingerprint:latest|g' /tmp/daemonset.yaml
+  sed -i 's|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|g' /tmp/daemonset.yaml
+"
+```
+
+> **`imagePullPolicy: Never`** is required for k3d image import. With `IfNotPresent`, k3d may
+> still attempt a registry pull on some node configurations. `Never` forces use of the locally
+> imported image and avoids `ImagePullBackOff`.
 
 ---
 
@@ -286,8 +302,8 @@ Update `.env` and `MEMORY.md` with the new cluster details:
 | Dashboard not created (403) | Token lacks write permission — skip dashboard, everything else still works |
 | Traces not reaching fingerprint pods | Check `OTEL_EXPORTER_OTLP_ENDPOINT` in app pod: `kubectl exec <pod> -- env \| grep OTLP` |
 | App traces going to splunk-otel-collector instead | Instrumentation CR override not working — use `kubectl set env deployment/<svc> OTEL_EXPORTER_OTLP_ENDPOINT=...` directly |
-| `otelcol-fingerprint` pod stuck in ImagePullBackOff | Image not imported — run `k3d image import localhost:9999/otelcol-fingerprint:latest -c <cluster>` |
-| ghcr.io pull unauthorized | Image is private — build locally on EC2 with `docker build`, then `k3d image import` |
+| `otelcol-fingerprint` pod stuck in ImagePullBackOff | Image not imported — run `k3d image import otelcol-fingerprint:latest -c <cluster>` (no registry prefix); also ensure `imagePullPolicy: Never` in daemonset.yaml |
+| ghcr.io pull unauthorized | Image is private — build locally on EC2 with `docker build --no-cache -t otelcol-fingerprint:latest .`, then `k3d image import otelcol-fingerprint:latest -c <cluster>` |
 | `poll_drift_events.py` silent | Pods may have cycled — restart the script to pick up fresh pod names |
 | ConfigMap not updating | Use `kubectl delete + create`, never `kubectl apply` |
 | False drift events after reset | Run `bash demo/demo-reset.sh` — clears dedup state and error baseline |
