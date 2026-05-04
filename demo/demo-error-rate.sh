@@ -49,7 +49,7 @@ if [ "$RESTORE" = "true" ]; then
   exit 0
 fi
 
-echo "=== Demo 8: ERROR_RATE_ANOMALY — env=$ENV ==="
+echo "=== Demo 7: ERROR_RATE_ANOMALY — env=$ENV ==="
 echo ""
 echo "  Method : Kill petclinic-db → customers-service errors on every DB call"
 echo "  Signal : ERROR_RATE_ANOMALY fires when error rate > 5% over 10+ samples"
