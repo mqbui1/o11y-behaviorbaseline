@@ -8,13 +8,13 @@ The framework emits four distinct anomaly signals. Each demo triggers one or mor
 
 | Signal | What it means | Demo |
 |--------|--------------|------|
-| `NEW_FINGERPRINT` | A trace took a call path that has never been seen before — a new service was called, or an existing one was skipped. Fires on the **first occurrence**. | Demo 5 |
-| `MISSING_SERVICE` | A root operation that normally involves a specific service produced **zero traces** in the detection window — the service is structurally absent, not just erroring. | Demo 2, 3, 4 |
-| `NEW_ERROR_SIGNATURE` | A span produced an exception or error type that has never appeared in this service before. Fires on **first occurrence**, no threshold required. | Demo 1, 3, 4 |
-| `AUTODETECT_TIER1` | Splunk APM's built-in AutoDetect fired a metric-based alert (error rate spike, latency spike, request drop). This is the **native APM signal** — the framework correlates it with its own structural signals. | Demo 3 (when AutoDetect catches up) |
-| `LATENCY_ANOMALY` | Mean latency for a service/operation exceeded 3 standard deviations above its learned baseline. Fires without any threshold configuration — baseline is learned from the first 30 traces. Baseline adapts per hour-of-day × day-of-week (168 seasonal slots). | Demo 7, 10 |
-| `ERROR_RATE_ANOMALY` | The fraction of error spans for a service/operation exceeded 5% over a rolling window. Complements NEW_ERROR_SIGNATURE — fires on sustained rate, not just first occurrence. | Demo 8, 9, 10 |
-| `INFRA_EVENT` | Pod-level Kubernetes warning event (OOMKilling, CrashLoopBackOff, BackOff, Evicted) correlated to a service by pod name. Surfaced in the topology UI alongside trace anomalies. Not a Splunk signal — sourced directly from `kubectl get events`. | Demo 10 |
+| `NEW_FINGERPRINT` | A trace took a call path that has never been seen before — a new service was called, or an existing one was skipped. Fires on the **first occurrence**. | Demo 2 |
+| `MISSING_SERVICE` | A root operation that normally involves a specific service produced **zero traces** in the detection window — the service is structurally absent, not just erroring. | Demo 1, 4, 5, 8 |
+| `NEW_ERROR_SIGNATURE` | A span produced an exception or error type that has never appeared in this service before. Fires on **first occurrence**, no threshold required. | Demo 3, 4, 5 |
+| `AUTODETECT_TIER1` | Splunk APM's built-in AutoDetect fired a metric-based alert (error rate spike, latency spike, request drop). This is the **native APM signal** — the framework correlates it with its own structural signals. | Demo 5 (when AutoDetect catches up) |
+| `LATENCY_ANOMALY` | Mean latency for a service/operation exceeded 3 standard deviations above its learned baseline. Fires without any threshold configuration — baseline is learned from the first 30 traces. Baseline adapts per hour-of-day × day-of-week (168 seasonal slots). | Demo 6, 9, 10 |
+| `ERROR_RATE_ANOMALY` | The fraction of error spans for a service/operation exceeded 5% over a rolling window. Complements NEW_ERROR_SIGNATURE — fires on sustained rate, not just first occurrence. | Demo 7, 8 |
+| `INFRA_EVENT` | Pod-level Kubernetes warning event (OOMKilling, CrashLoopBackOff, BackOff, Evicted) correlated to a service by pod name. Surfaced in the topology UI alongside trace anomalies. Not a Splunk signal — sourced directly from `kubectl get events`. | Demo 10 (topology UI) |
 
 ### Correlation types
 
@@ -183,7 +183,7 @@ k "mkdir -p /home/splunk/otel-processor/data && \
 # Should be silent (no false positives):
 python3 -u demo/poll_drift_events.py
 
-# Kill visits-service to confirm Demo 1 fires within ~20s:
+# Kill visits-service to confirm Demo 1 (kill-service) fires within ~20s:
 k "kubectl scale deployment visits-service --replicas=0"
 # Expected: trace.path.drift event appears in poll_drift_events.py within ~20s
 # Restore:
@@ -428,7 +428,7 @@ python3 demo/demo_watch.py --environment $ENV --quiet
 
 ---
 
-## Demo 1: DB Goes Down — New Error Signatures
+## Demo 3: New Error Signature — DB Goes Down
 
 **Story:** *"The database goes down. Services start throwing transaction errors and health check failures that have never appeared before. The framework detects brand new error signatures on first occurrence — no threshold, no tuning required."*
 
@@ -469,7 +469,7 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 ```
 
 > Severity shows `DEGRADED` (not `INCIDENT`) because only the customer/owner path is affected —
-> vets-service is still up. Demo 3 (both DB + vets down) produces `INCIDENT`.
+> vets-service is still up. Demo 4 (both DB + vets down) produces `INCIDENT`.
 
 **Expected alerts.log:**
 ```
@@ -523,7 +523,7 @@ Waits for events from the OTel log stream, collects for 5s, then pipes directly 
 
 ---
 
-## Demo 2: Gap Demo — APM Still Green, Framework Already Paged
+## Demo 1: Kill Service — APM Still Green, Framework Already Paged
 
 **Story:** *"vets-service is killed. The APM Service Map shows green — no alert, no incident. APM metrics need time to accumulate before any threshold fires. Meanwhile, the OTel edge processor detected the structural absence on the very first affected trace and fired in ~10 seconds. Claude reads that signal, names vets-service as the root cause, and calls PAGE_ONCALL — all before APM knows anything happened."*
 
@@ -583,7 +583,7 @@ APM still has no alert at this point.
 
 ---
 
-## Demo 3: Correlated Anomaly — Two Tiers Fire Simultaneously
+## Demo 4: DB Gone Silent — Correlated Anomaly, Two Tiers
 
 **Story:** *"Both vets-service AND the database go down at the same time. Within 10–15 seconds, the error tier detects new DB exception signatures and Claude triages: mysql:petclinic is down, PAGE_ONCALL. Then ~60 seconds later, the structural absence detector independently fires MISSING_SERVICE for vets-service — no traces at all, not even failed ones. Two detection mechanisms, two latencies, one complete picture."*
 
@@ -690,7 +690,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 20
 
 ---
 
-## Demo 4: Deploy-Correlated Severity Downgrade
+## Demo 5: Deploy-Correlated Severity Downgrade
 
 **Story:** *"A deploy of vets-service is announced via `notify_deployment.py`. The deploy is bad — vets-service crashes immediately on startup. Anomalies fire: trace tier detects MISSING_SERVICE, error tier detects new WebClientRequestException and 503 signatures. On its own, agent.py calls it INCIDENT + PAGE_ONCALL. But `correlate.py` finds the deployment event in its window and downgrades severity from Major → Minor, annotating it as `[deployment-correlated]`. The on-call gets context: this looks like a deploy regression, not a random outage."*
 
@@ -772,7 +772,7 @@ python3 core/correlate.py --environment $ENV --window-minutes 55
 
 ---
 
-## Demo 5: Self-Healing — Live Auto-Promotion
+## Demo 2: New Call Path — Self-Healing Auto-Promotion
 
 **Story:** *"A deploy of vets-service changes its trace structure. The new call path fires NEW_FINGERPRINT on the first watch run — then again on the second. On the second hit, the framework auto-promotes it: the new path is accepted as baseline with zero human intervention. By the third watch run, silence. The framework learned the new normal entirely on its own."*
 
@@ -882,11 +882,11 @@ python3 core/trace_fingerprint.py --environment $ENV promote
 
 ---
 
-## Demo 6: Auto-Onboarding a New Environment
+## Demo 0b: Auto-Onboarding a New Environment
 
 **Story:** *"A new environment shows up in Splunk APM — a team just deployed their first instrumented services. `onboard.py --auto` discovers it automatically, builds baselines from live traffic, creates a dashboard, and generates a runbook via Claude. Zero manual configuration. The framework is fully operational for the new environment in one command. In the cluster, `baseline-agent` picks it up on its next 6h onboard cycle."*
 
-> **Why this is last:** `onboard.py --auto` re-learns baselines from the last 120 minutes (which may include outage errors from earlier demos). Running it last means there's no cleanup needed before subsequent demos.
+> **Why this is run after the main demos:** `onboard.py --auto` re-learns baselines from the last 120 minutes (which may include outage errors from earlier demos). Running it last means there's no cleanup needed before subsequent demos.
 
 ### Prerequisites
 ```bash
@@ -1006,7 +1006,7 @@ echo "Onboarding state restored."
 
 ---
 
-## Demo 7: Latency Anomaly — Service Slowdown Detection
+## Demo 6: Latency Spike — Service Slowdown Detection
 
 **Story:** *"visits-service is running normally. The OTel processor silently learns its latency baseline from the first 30 traces. We then inject 3 seconds of network delay. The processor detects the z-score spike on the very next trace and fires LATENCY_ANOMALY — no threshold configured, no alert rule written. Claude triages: DEGRADED, latency spike on visits-service, investigate immediately."*
 
@@ -1069,11 +1069,11 @@ This injects 3s of network delay into `visits-service` via `tc-netem` (no code c
 
 ---
 
-## Demo 8: Error Rate Anomaly — Sustained Failure Detection
+## Demo 7: Error Rate Anomaly — Sustained Failure Detection
 
 **Story:** *"The database goes down. customers-service starts throwing CannotCreateTransactionException on every DB call. Two signals fire in sequence: NEW_ERROR_SIGNATURE on the very first error span (~10s), then ERROR_RATE_ANOMALY once the error rate crosses 5% over 10+ samples (~30s). Claude receives both signals together and triages: INCIDENT, database connectivity failure, PAGE_ONCALL."*
 
-> **Difference from Demo 1:** Demo 1 shows NEW_ERROR_SIGNATURE (first occurrence, no threshold). Demo 8 shows ERROR_RATE_ANOMALY — the *metric* signal that fires when errors are sustained, even if the error type was seen before. Together they give complete coverage: first occurrence AND ongoing rate.
+> **Difference from Demo 3:** Demo 3 shows NEW_ERROR_SIGNATURE (first occurrence, no threshold). Demo 7 shows ERROR_RATE_ANOMALY — the *metric* signal that fires when errors are sustained, even if the error type was seen before. Together they give complete coverage: first occurrence AND ongoing rate.
 
 ### Prerequisites
 ```bash
@@ -1134,7 +1134,7 @@ Kills the DB, waits 90s for errors to accumulate, restores the DB, then runs tri
 
 ---
 
-## Demo 9: Combined Signal — All Three Tiers Simultaneously
+## Demo 8: Combined Signal — All Three Tiers Simultaneously
 
 **Story:** *"Two things go wrong at once: vets-service is killed and the database goes down. Within 90 seconds, three distinct signal types fire: NEW_ERROR_SIGNATURE from DB exceptions, MISSING_SERVICE from vets-service going structurally absent, and ERROR_RATE_ANOMALY from the sustained DB error rate. Claude receives all three in one triage window and correlates them — naming both mysql:petclinic and vets-service as root causes, INCIDENT, PAGE_ONCALL."*
 
@@ -1194,6 +1194,50 @@ Kills both services simultaneously, collects all signals for 75s, triages with C
 
 ## Demo 10: Live Topology UI — Confidence Scoring, User Impact, Infra Correlation
 
+## Demo 9: Slow DB — Correlated Latency Across All Callers
+
+**Story:** *"The database is still up and reachable, but it's overloaded — every service that calls it starts slowing down simultaneously. No structural drift fires (the DB is still in the traces). Instead, mysql:petclinic scores highest in root-cause confidence because it's the shared node whose latency anomaly fired first and whose callers (customers-service, vets-service, visits-service) all show correlated spikes."*
+
+### Prerequisites
+```bash
+./demo/demo-between.sh
+```
+
+### Step 1 — Start the topology server (if not already running)
+```bash
+python3 demo/topology_server.py --environment $ENV
+# Open http://localhost:8080
+```
+
+### Step 2 — Inject the slow-db scenario
+Click **9 Slow DB** in the topology UI, or run:
+```bash
+curl -s http://localhost:8080/api/demo/slow-db | jq .
+```
+
+**What fires (in sequence, ~500ms apart):**
+- `LATENCY_ANOMALY` — mysql:petclinic: 4200ms (baseline 12ms, z=18.4)
+- `LATENCY_ANOMALY` — customers-service: 4350ms (baseline 38ms, z=14.2)
+- `LATENCY_ANOMALY` — vets-service: 4180ms (baseline 15ms, z=16.9)
+- `LATENCY_ANOMALY` — visits-service: 4290ms (baseline 22ms, z=15.7)
+
+**What you see in the topology UI:**
+- All four nodes turn amber simultaneously
+- Root-cause panel identifies mysql:petclinic with high confidence (fired first, all callers affected)
+- No structural drift — the DB is still reachable, just slow
+
+**Key talking points:**
+- *"Every service calling the DB slows down in lockstep. No threshold was tuned — each service has its own learned baseline, and each one independently detects a z-score spike."*
+- *"The root-cause score uses topology: mysql:petclinic is the shared dependency of all three slow services. Caller fraction = 3/3 = 100%, so it wins the confidence race even without a MISSING_SERVICE signal."*
+- *"This is the case that kills threshold alerting — each service's latency looks like a separate problem. The framework sees a shared cause from the topology."*
+
+### Restore
+```bash
+curl -s http://localhost:8080/api/clear
+```
+
+---
+
 **Story:** *"This is the visual layer on top of everything the framework knows. Every signal type, root cause chain, and infra event renders live on the service dependency graph. Five new capabilities surface here that go beyond what APM's topology map shows: probabilistic root cause confidence, user impact estimation, pod-level infra event correlation, topology-aware downstream suppression, and a seasonal latency baseline. Each can be demonstrated independently via the scenario buttons — no cluster changes needed."*
 
 ### Start the topology server
@@ -1209,7 +1253,7 @@ The server connects to the EC2 cluster over SSH to tail OTel collector logs in r
 
 ### Feature 1: Probabilistic Root Cause Confidence Score
 
-**Scenario to run:** `5 DB incident (multi)` or `6 Cascading failure`
+**Scenario to run:** Click **4 DB gone silent** or **5 Cascading failure** in the topology UI, or run `curl -s http://localhost:8080/api/demo/db-incident` / `cascading`
 
 **What you see:** The Causality Chain panel shows the root cause with a green `N% confidence` label next to "ROOT CAUSE ★".
 
@@ -1229,7 +1273,7 @@ Score = (type_weight × 0.5) + (caller_fraction × 0.35) + (timing_bonus × 0.15
 
 ### Feature 2: User Impact Estimation (spans/min)
 
-**Scenario to run:** `7 Latency spike` or `8 Error rate`
+**Scenario to run:** Click **6 Latency spike** or **7 Error rate** in the topology UI, or run `curl -s http://localhost:8080/api/demo/latency-spike` / `error-rate-spike`
 
 **What you see:** The affected service card shows `~N spans/min affected` in blue below the anomaly message.
 
@@ -1242,7 +1286,14 @@ Score = (type_weight × 0.5) + (caller_fraction × 0.35) + (timing_bonus × 0.15
 
 ### Feature 3: Infra Event Correlation (kubectl warning events)
 
-**Scenario to run:** `oom-latency` (or inject manually — see below)
+**Scenario to run:** Inject an infra event manually (no cluster needed), then click **6 Latency spike**:
+```bash
+curl -s -X POST http://localhost:8080/api/inject/infra \
+  -H 'Content-Type: application/json' \
+  -d '{"service":"visits-service","reason":"OOMKilling",
+       "message":"Container visits-service was OOM killed (rss=512Mi limit=256Mi)","count":3}'
+# Then click 6 Latency spike in the UI (or: curl -s http://localhost:8080/api/demo/latency-spike)
+```
 
 **What you see:** The affected service node turns amber even before any trace anomaly fires. The service card shows `⚙ OOMKilling: Container killed due to OOM (×3)` in the panel. Infra events appear in the live event log as `⚙ INFRA`.
 
@@ -1256,7 +1307,7 @@ curl -s -X POST http://localhost:8080/api/inject/infra \
        "message":"Container visits-service was OOM killed (rss=512Mi limit=256Mi)","count":3}'
 ```
 
-Then click **7 Latency spike** — you'll see both the infra event (OOM) and the metric anomaly (latency spike) on the same node simultaneously.
+Then click **6 Latency spike** — you'll see both the infra event (OOM) and the metric anomaly (latency spike) on the same node simultaneously.
 
 **Key talking point:**
 > *"Smartscape correlates host-level events into the causality graph automatically. We do the same at the pod layer using kubectl — no agent, no DynatraceAgent CR, no host plugin. If a pod is OOMKilling and latency is spiking, we show both signals on the same node and correlate them in the panel. The root cause score goes up because both signal types are present."*
@@ -1265,7 +1316,7 @@ Then click **7 Latency spike** — you'll see both the infra event (OOM) and the
 
 ### Feature 4: Topology-Aware Downstream Suppression
 
-**Scenario to run:** `6 Cascading failure`
+**Scenario to run:** Click **5 Cascading failure** in the topology UI, or run `curl -s http://localhost:8080/api/demo/cascading`
 
 **What you see:** After vets-service goes MISSING and api-gateway and customers-service start erroring, the panel shows customers-service at 60% opacity with the note *"secondary effect of vets-service"*. The status badge still shows INCIDENT — the suppression is cosmetic, not a mute.
 
@@ -1294,29 +1345,46 @@ The service is still listed in the panel — it's dimmed, not hidden — with a 
 
 ---
 
+### Feature 6: Time-Ordered Causality — Degradation Before Crash
+
+**Scenario to run:** Click **10 DB crash** in the topology UI, or run `curl -s http://localhost:8080/api/demo/oom-crash`
+
+**What fires (in sequence):**
+- t=0s: `LATENCY_ANOMALY` — customers-service 3800ms (baseline 38ms, z=12.6) — GC pressure mounting
+- t=4s: `MISSING_SERVICE` — customers-service absent from traces — OOM crash
+- t=5s: `NEW_ERROR_SIGNATURE` — api-gateway ServiceUnavailableException on GET /owners
+
+**What you see:** The causality chain panel shows the three events time-ordered with a note: *"Latency spike preceded crash by 4s — degradation before failure."* The confidence score for customers-service is boosted by the timing correlation (latency fired first on the same service that later went MISSING).
+
+**Key talking point:**
+> *"This is the OOM pattern — GC pressure causes latency to spike before the pod dies. Two separate signal types, one service, 4 seconds apart. The framework correlates them by service and timestamp, surfaces the degradation-before-crash story, and scores it as a single incident rather than two unrelated alerts."*
+
+---
+
 ### Topology UI scenario reference
 
-| Button | Scenario | Anomaly types fired | New features demonstrated |
-|--------|----------|--------------------|-----------------------------|
+| Button | Scenario key | Anomaly types fired | Features demonstrated |
+|--------|-------------|--------------------|-----------------------|
 | 1 Kill service | `kill-service` | MISSING_SERVICE | Confidence score, downstream suppression |
 | 2 New call path | `new-call-path` | NEW_FINGERPRINT | New node/edge rendering |
 | 3 New error sig | `new-error` | NEW_ERROR_SIGNATURE | Error badge, log entry |
-| 4 DB gone silent | `db-dropped` | MISSING_SERVICE | Root cause inference |
-| 5 DB incident | `db-incident` | MISSING_SERVICE + NEW_ERROR_SIGNATURE × 3 | Confidence score (shared dep), downstream suppression |
-| 6 Cascading failure | `cascading` | MISSING_SERVICE → ERROR_SIG → ERROR_SIG (2s apart) | Confidence score, downstream suppression |
-| 7 Latency spike | `latency-spike` | LATENCY_ANOMALY | User impact (spans/min), amber node state |
-| 8 Error rate | `error-rate-spike` | ERROR_RATE_ANOMALY + NEW_ERROR_SIGNATURE | User impact, red-orange node state, INCIDENT badge |
-| 9 Combined | `combined-metric` | MISSING_SERVICE + NEW_ERROR_SIGNATURE + ERROR_RATE_ANOMALY | All features together |
+| 4 DB gone silent | `db-incident` | MISSING_SERVICE + NEW_ERROR_SIGNATURE × 3 | Confidence score (shared dep), downstream suppression |
+| 5 Cascading failure | `cascading` | MISSING_SERVICE → ERROR_SIG → ERROR_SIG (2s apart) | Confidence score, downstream suppression |
+| 6 Latency spike | `latency-spike` | LATENCY_ANOMALY | User impact (spans/min), amber node state |
+| 7 Error rate | `error-rate-spike` | ERROR_RATE_ANOMALY + NEW_ERROR_SIGNATURE | User impact, red-orange node state, INCIDENT badge |
+| 8 Combined | `combined-metric` | MISSING_SERVICE + NEW_ERROR_SIGNATURE + ERROR_RATE_ANOMALY | All features together |
+| 9 Slow DB | `slow-db` | LATENCY_ANOMALY × 4 (shared dep) | Root cause confidence (topology-based, no structural drift) |
+| 10 DB crash | `oom-crash` | LATENCY_ANOMALY → MISSING_SERVICE → NEW_ERROR_SIGNATURE | Time-ordered causality, degradation before crash |
 | — (inject) | `oom-latency` | LATENCY_ANOMALY | Infra event correlation (OOMKill + latency on same node) |
 
-**Inject infra events manually** (no cluster needed):
+**Inject infra events manually** (no cluster needed — combine with any scenario button):
 ```bash
-# OOMKill on visits-service
+# OOMKill on visits-service — then click 6 Latency spike
 curl -s -X POST http://localhost:8080/api/inject/infra \
   -H 'Content-Type: application/json' \
   -d '{"service":"visits-service","reason":"OOMKilling","message":"rss=512Mi limit=256Mi","count":3}'
 
-# CrashLoopBackOff on customers-service
+# CrashLoopBackOff on customers-service — then click 10 DB crash
 curl -s -X POST http://localhost:8080/api/inject/infra \
   -H 'Content-Type: application/json' \
   -d '{"service":"customers-service","reason":"CrashLoopBackOff","message":"Back-off restarting failed container","count":5}'
@@ -1351,20 +1419,20 @@ WATCH  →  Two paths:
   Lifecycle (Python, learn/promote/heal — not a detection path):
           Sample traces from the last N minutes via Splunk APM API
           Builds and maintains the fingerprint baseline that the OTel processor uses
-          Used in Demo 5 (Python watch) and Demo 6 (auto-onboarding) only
+          Used in Demo 2 (Python watch) and Demo 0b (auto-onboarding) only
 
 TRIAGE →  Claude reads the JSON anomaly list
           Reasons about severity, root cause, action
           Writes DETECTION + TRIAGE to alerts.log
 ```
 
-Detection path — triage directly from OTel logs (used in Demos 1–4, no Splunk indexing wait):
+Detection path — triage directly from OTel logs (used in Demos 1–8, no Splunk indexing wait):
 ```bash
 python3 demo/poll_drift_events.py --triage --environment $ENV \
   | python3 agent.py --environment $ENV
 ```
 
-Python watch — baseline lifecycle only (used in Demo 5 auto-promotion):
+Python watch — baseline lifecycle only (used in Demo 2 auto-promotion):
 ```bash
 AUTO_PROMOTE_THRESHOLD=2 python3 core/trace_fingerprint.py --environment $ENV watch --window-minutes 5
 ```

@@ -75,7 +75,7 @@ if [ "$STOP" = "true" ]; then
   exit 0
 fi
 
-echo "=== Demo 7: LATENCY_ANOMALY — env=$ENV ==="
+echo "=== Demo 6: LATENCY_ANOMALY — env=$ENV ==="
 echo ""
 echo "  Target service : $TARGET"
 echo "  Injected delay : ${DELAY_MS}ms per network call"
