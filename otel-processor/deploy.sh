@@ -1,19 +1,22 @@
 #!/bin/bash
-# deploy.sh — Build, push, and deploy the otelcol-fingerprint DaemonSet.
+# deploy.sh — Build, push/import, and deploy the otelcol-fingerprint DaemonSet.
 #
 # Usage:
-#   Run Steps 0 (learn/promote) locally on your Mac, then Steps 1-6 on EC2.
+#   Run Steps 0 (learn/promote) locally on your Mac, then Steps 1-7 on EC2.
 #   Or run the whole script on EC2 if python3 + Splunk API access is available there.
 #
 #   Local (Mac) — learn + promote only:
-#     # Wait ~15 min after app pod restart for DB query patterns to stabilize
 #     python3 core/trace_fingerprint.py --environment <env> learn --bootstrap --window-minutes 30
 #     python3 core/trace_fingerprint.py --environment <env> promote
 #     sshpass scp -P 2222 data/baseline.<env>.json splunk@<EC2_IP>:/tmp/
-#     # Then on EC2: ./otel-processor/deploy.sh <environment> --skip-learn
+#     # Then on EC2: K3D_CLUSTER=<name> ./otel-processor/deploy.sh <environment> --skip-learn
 #
-#   EC2 (all steps at once, requires Splunk API access from EC2):
-#     ./otel-processor/deploy.sh <environment>
+#   EC2 / k3d cluster (no local registry):
+#     K3D_CLUSTER=<cluster-name> ./otel-processor/deploy.sh <environment>
+#     # cluster name: k3d cluster list  →  e.g. test-7bb4-cluster
+#
+#   Cluster with a local registry:
+#     REGISTRY=localhost:9999 ./otel-processor/deploy.sh <environment>
 #
 # Flags:
 #   --skip-learn   Skip the learn/promote step (use existing baseline files)
@@ -21,7 +24,7 @@
 #
 # What it does:
 #   0. Learn + promote baseline from live APM data (unless --skip-learn)
-#   1. Build the collector image and push to the local k3d registry
+#   1. Build the collector image; import into k3d (K3D_CLUSTER set) or push to registry
 #   2. Seed the behavioral-baseline ConfigMap (delete+create, never apply)
 #   3. Create/update the baseline-sync-scripts ConfigMap
 #   4. Patch the OTel Operator Instrumentation CR so app pods send traces
@@ -55,13 +58,17 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_DIR/data"
 K8S_DIR="$SCRIPT_DIR/k8s"
 
-REGISTRY="${REGISTRY:-localhost:9999}"
-IMAGE="$REGISTRY/otelcol-fingerprint:latest"
+# For k3d clusters there is no local registry — images are imported directly
+# into k3d node containerd via `k3d image import`.  Set REGISTRY=localhost:9999
+# only if your cluster actually has a registry running on that port.
+REGISTRY="${REGISTRY:-}"
+IMAGE="${REGISTRY:+$REGISTRY/}otelcol-fingerprint:latest"
+K3D_CLUSTER="${K3D_CLUSTER:-}"   # set to cluster name to use k3d image import
 
 echo "=== otelcol-fingerprint deploy ==="
 echo "  Environment : $ENVIRONMENT"
-echo "  Registry    : $REGISTRY"
 echo "  Image       : $IMAGE"
+echo "  K3D_CLUSTER : ${K3D_CLUSTER:-(not set — using docker push)}"
 echo "  Skip learn  : $SKIP_LEARN"
 echo "  Skip build  : $SKIP_BUILD"
 echo ""
@@ -90,11 +97,26 @@ if [ ! -f "$ERROR_BASELINE" ]; then
   echo '{"signatures":{}}' > "$ERROR_BASELINE"
 fi
 
-# ── Step 1: Build and push image ──────────────────────────────────────────────
+# ── Step 1: Build and push/import image ───────────────────────────────────────
 if [ "$SKIP_BUILD" = "false" ]; then
   echo "--- Step 1: Build image ---"
-  docker build -t "$IMAGE" "$SCRIPT_DIR"
-  docker push "$IMAGE"
+  docker build --no-cache -t "$IMAGE" "$SCRIPT_DIR"
+  if [ -n "$K3D_CLUSTER" ]; then
+    echo "  Importing into k3d cluster '$K3D_CLUSTER' (no registry needed)..."
+    k3d image import "$IMAGE" -c "$K3D_CLUSTER"
+    # Patch daemonset.yaml to use the plain image name + Never pull policy
+    sed -i.bak \
+      -e "s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|g" \
+      "$K8S_DIR/daemonset.yaml"
+  elif [ -n "$REGISTRY" ]; then
+    docker push "$IMAGE"
+  else
+    echo "  WARNING: K3D_CLUSTER and REGISTRY are both unset."
+    echo "  Image was built but not pushed/imported. Set one of:"
+    echo "    K3D_CLUSTER=<name>   for k3d clusters (uses k3d image import)"
+    echo "    REGISTRY=<host:port> for clusters with a registry"
+    exit 1
+  fi
   echo ""
 else
   echo "--- Step 1: Skipping build ---"
@@ -139,7 +161,14 @@ else
     kubectl patch instrumentation "$INSTR_NAME" --type=merge -p \
       "{\"spec\":{\"exporter\":{\"endpoint\":\"$FP_GRPC\"},\"java\":{\"env\":[{\"name\":\"OTEL_EXPORTER_OTLP_ENDPOINT\",\"value\":\"$FP_HTTP\"}]}}}"
     echo "  Patched '$INSTR_NAME': exporter → otelcol-fingerprint"
-    echo "  NOTE: restart app deployments to pick up the new endpoint:"
+    echo ""
+    echo "  NOTE: If the OTel Operator reconciles and resets the CR patch, use"
+    echo "  kubectl set env directly on each deployment instead (survives reconciliation):"
+    echo "    for svc in api-gateway customers-service vets-service visits-service admin-server; do"
+    echo "      kubectl set env deployment/\$svc OTEL_EXPORTER_OTLP_ENDPOINT=$FP_HTTP"
+    echo "    done"
+    echo ""
+    echo "  Restart app deployments to pick up the new endpoint:"
     echo "    kubectl rollout restart deployment/<your-app-deployments>"
   fi
 fi
