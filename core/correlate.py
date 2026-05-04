@@ -105,6 +105,8 @@ TIER_EVENT_MAP = {
     "error.signature.spike":      "tier3",  # known sig firing at spike rate
     "service.latency.anomaly":    "tier2",  # latency spike above learned baseline
     "service.error.rate.anomaly": "tier2",  # error rate above threshold
+    "db.query.slow":              "tier2",  # DB query latency z-score above baseline
+    "db.query.new_plan":          "tier2",  # new normalised SQL template (schema/code change)
 }
 
 # Event types that cancel out a previous drift — used to suppress stale alerts
@@ -466,8 +468,9 @@ def _infer_service_from_event(dims: dict, props: dict) -> str | None:
     root_op = dims.get("root_operation", "")
     if ":" in root_op:
         return root_op.split(":")[0]
-    # Fall back to checking properties
-    return props.get("services", "").split(",")[0] or None
+    # db.query.* events carry service directly in dims (already checked by caller),
+    # but also expose it via query_hash prefix — fall back to properties
+    return props.get("service") or props.get("services", "").split(",")[0] or None
 
 
 # ── Correlation ────────────────────────────────────────────────────────────────
