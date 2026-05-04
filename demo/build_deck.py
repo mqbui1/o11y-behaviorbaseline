@@ -356,6 +356,7 @@ def slide_solution_overview(prs):
         "  \u2022  Service missing from traces (MISSING_SERVICE)",
         "  \u2022  Unknown call path appeared (NEW_FINGERPRINT)",
         "  \u2022  Brand new error type, first occurrence fires",
+        "  \u2022  New DB query template or slow query (z-score)",
         "  \u2022  Fires in ~10s — no poll interval, no Splunk wait",
         "  \u2022  2+ tiers on same service \u2192 correlated alert ([Critical] MULTI_TIER)",
         "  \u2022  Anomaly correlated to a recent deploy \u2192 severity downgrade",
@@ -497,8 +498,8 @@ def slide_tiers(prs):
          RGBColor(0x55, 0x77, 0x99),   # muted — not this framework
          RGBColor(0xAA, 0xBB, 0xCC)),
         ("Tier 2",
-         "Trace Path Drift\n(trace_fingerprint.py)",
-         "MISSING_SERVICE\n  \u2192 expected service absent from traces\n\nNEW_FINGERPRINT\n  \u2192 unknown call path appeared\n\nSpan count spike\n  \u2192 unexpected extra hops",
+         "Trace Path + DB Drift\n(trace_fingerprint.py)",
+         "MISSING_SERVICE\n  \u2192 expected service absent from traces\n\nNEW_FINGERPRINT\n  \u2192 unknown call path appeared\n\nDB query: new template or slow query\n  \u2192 z-score above baseline mean",
          CYAN, WHITE),
         ("Tier 3",
          "Error Signature Drift\n(error_fingerprint.py)",
@@ -610,7 +611,7 @@ def slide_petclinic_topology(prs):
     add_rect(s, Inches(0.45), Inches(4.82), Inches(9.2), Inches(0.42), RGBColor(0x1A, 0x3A, 0x5C))
     add_textbox(s, Inches(0.57), Inches(4.84), Inches(9.0), Inches(0.38),
                 "Loadgen hits api-gateway every ~5 s  \u00b7  OTel Java agent on all services  \u00b7  "
-                "Traces + metrics flow to Splunk Observability (env: petclinicmbtest)",
+                "Traces + metrics flow to Splunk Observability (env: test-7bb4-workshop)",
                 font_size=10, color=RGBColor(0xBB, 0xCC, 0xDD))
 
     footer(s)
@@ -698,8 +699,8 @@ def slide_key_capabilities(prs):
          "AWS Bedrock (Claude) synthesizes all signals\ninto a plain-English verdict: severity, root cause,\naffected services, recommended action."),
         ("Deployment-Aware",
          "Integrates with CI/CD via a one-line hook.\nAnomalies within 60 min of a deploy are\nauto-annotated and severity-downgraded."),
-        ("Auto-Onboarding",
-         "Runs every 6h via cron. New environments\nare discovered, baselined, and fully operational\nwith no human intervention."),
+        ("DB Query Fingerprinting",
+         "Normalises every SQL query template and\ntracks latency vs baseline (Welford z-score).\nFires on new query plans or slowdowns in ~10s."),
         ("Self-Healing",
          "New patterns after deploys auto-promote after\n2 clean runs. Baselines re-learn autonomously\nafter an incident resolves."),
     ]
