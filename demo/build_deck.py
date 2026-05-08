@@ -535,7 +535,7 @@ def slide_tiers(prs):
     # Bottom callout
     add_rect(s, Inches(0.45), Inches(4.88), Inches(9.2), Inches(0.38), RGBColor(0x1A, 0x3A, 0x5C))
     add_textbox(s, Inches(0.57), Inches(4.9), Inches(9.0), Inches(0.34),
-                "Demo 3:  vets-service + DB down  \u2192  Tier 3 fires in ~10s (error signatures)  +  Tier 2 fires at ~60s (MISSING_SERVICE)  "
+                "Demo 4:  vets-service + DB down  \u2192  Tier 3 fires in ~10s (error signatures)  +  Tier 2 fires at ~60s (MISSING_SERVICE)  "
                 "\u2192  correlate.py emits  [Major] TIER2_TIER3",
                 font_size=10, bold=False, color=RGBColor(0xFF, 0xCC, 0x44))
 
@@ -632,24 +632,32 @@ def slide_demo_overview(prs):
     demos = [
         ("Demo 0", "Steady State",
          "Framework in normal operation — baselines learned, 0 drift events. 8-check pre-flight confirms every layer is ready."),
-        ("Demo 1", "DB Outage \u2192 New Error Signatures",
-         "DB goes down. CannotCreateTransactionException fires on first affected trace (~10s via OTel edge). Claude: INCIDENT, PAGE_ONCALL."),
-        ("Demo 2", "The Gap Demo \u2192 APM Still Green",
-         "vets-service killed. APM Service Map shows green. OTel edge fires trace.path.drift in ~10s. Claude pages on-call before APM knows."),
-        ("Demo 3", "Correlated Anomaly \u2192 Two Tiers",
-         "vets-service + DB killed. Error tier fires in ~10s, MISSING_SERVICE fires at ~60s. Claude: mysql:petclinic root cause. TIER2_TIER3."),
-        ("Demo 4", "Deploy-Correlated Severity Downgrade",
+        ("Demo 1", "Kill Service \u2192 APM Still Green",
+         "vets-service killed. APM Service Map shows green. OTel edge fires MISSING_SERVICE in ~10s. Claude detects before APM knows."),
+        ("Demo 2", "New Call Path \u2192 Self-Healing",
+         "New service added to call path. NEW_FINGERPRINT fires on runs 1+2, auto-promotes on run 2. Run 3: silence. Zero human intervention."),
+        ("Demo 3", "New Error Signature \u2192 DB Kill",
+         "DB goes down. CannotCreateTransactionException fires on first affected trace (~10s via OTel edge). Claude: INCIDENT."),
+        ("Demo 4", "DB Gone Silent \u2192 Two Tiers",
+         "vets-service + DB killed. Error tier fires in ~10s, MISSING_SERVICE at ~60s. Claude: mysql:petclinic root cause. TIER2_TIER3."),
+        ("Demo 5", "Deploy-Correlated Severity Downgrade",
          "Bad deploy announced via notify_deployment.py. correlate.py finds the deployment event and downgrades Major \u2192 Minor [deployment-correlated]."),
-        ("Demo 5", "Self-Healing \u2192 Auto-Promotion",
-         "New call path fires NEW_FINGERPRINT on watch runs 1 and 2, auto-promotes on run 2. Run 3: silence. No human intervention."),
-        ("Demo 6", "Auto-Onboarding",
-         "New environment discovered. Baselines built, dashboard created, cron scheduled, Claude runbook generated \u2014 in ~60 seconds."),
+        ("Demo 6", "Latency Spike",
+         "visits-service latency spikes 250\u00d7 above baseline (z=8496). OTel edge detector fires LATENCY_ANOMALY in ~10s."),
+        ("Demo 7", "Error Rate Anomaly",
+         "customers-service error rate hits 100%. ERROR_RATE_ANOMALY + NEW_ERROR_SIGNATURE fire together. Claude: correlated incident."),
+        ("Demo 8", "Combined Signal",
+         "vets-service killed (structural) + customers-service error rate spikes (metric). Claude correlates all three tiers simultaneously."),
+        ("Demo 9", "Slow DB",
+         "DB overloaded — all callers get correlated LATENCY_ANOMALY spikes. Root cause: mysql:petclinic (shared dep, no structural drift)."),
+        ("Demo 0b", "Auto-Onboarding",
+         "New environment discovered. Baselines built, dashboard created, Claude runbook generated \u2014 in ~60 seconds."),
     ]
 
     col1_x = Inches(0.45)
     col2_x = Inches(1.6)
     col3_x = Inches(3.2)
-    row_h  = Inches(0.56)
+    row_h  = Inches(0.415)
     start_y = Inches(1.06)
 
     for i, (num, title, desc) in enumerate(demos):
@@ -657,15 +665,15 @@ def slide_demo_overview(prs):
         # Row alternating shade
         if i % 2 == 0:
             add_rect(s, Inches(0.45), y, Inches(9.2), row_h - Inches(0.03), DKGRAY)
-        add_textbox(s, col1_x + Inches(0.08), y + Inches(0.05),
-                    Inches(1.0), Inches(0.42),
-                    num, font_size=11, bold=True, color=CYAN)
-        add_textbox(s, col2_x, y + Inches(0.05),
-                    Inches(1.5), Inches(0.42),
-                    title, font_size=11, bold=True, color=WHITE)
-        add_textbox(s, col3_x, y + Inches(0.05),
-                    Inches(6.35), Inches(0.45),
-                    desc, font_size=10, color=RGBColor(0xBB, 0xCC, 0xDD))
+        add_textbox(s, col1_x + Inches(0.08), y + Inches(0.04),
+                    Inches(1.0), Inches(0.36),
+                    num, font_size=10, bold=True, color=CYAN)
+        add_textbox(s, col2_x, y + Inches(0.04),
+                    Inches(1.5), Inches(0.36),
+                    title, font_size=10, bold=True, color=WHITE)
+        add_textbox(s, col3_x, y + Inches(0.04),
+                    Inches(6.35), Inches(0.38),
+                    desc, font_size=9, color=RGBColor(0xBB, 0xCC, 0xDD))
 
     # Demo note bar at bottom
     add_rect(s, Inches(0.45), H - Inches(0.55), Inches(9.2), Inches(0.38),
