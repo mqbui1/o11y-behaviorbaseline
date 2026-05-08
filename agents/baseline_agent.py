@@ -207,20 +207,110 @@ def _kubectl(*args: str) -> tuple[int, str]:
     return result.returncode, out
 
 
+def _merge_baselines(existing: dict, incoming: dict) -> dict:
+    """
+    Merge two trace baseline dicts (both have a "fingerprints" key).
+    For each hash present in either:
+      - If only in one, take it as-is.
+      - If in both, keep the entry with higher occurrences; preserve
+        auto_promoted=True and no_missing_service=True from either side.
+    Returns a new merged dict.
+    """
+    existing_fps = existing.get("fingerprints", {})
+    incoming_fps = incoming.get("fingerprints", {})
+    merged = dict(existing_fps)
+    for h, entry in incoming_fps.items():
+        if h not in merged:
+            merged[h] = entry
+        else:
+            ex = merged[h]
+            # Keep higher occurrence count
+            if entry.get("occurrences", 0) > ex.get("occurrences", 0):
+                merged[h] = dict(entry)
+            # Preserve protective flags from either side
+            if entry.get("auto_promoted") or ex.get("auto_promoted"):
+                merged[h]["auto_promoted"] = True
+            if entry.get("no_missing_service") or ex.get("no_missing_service"):
+                merged[h]["no_missing_service"] = True
+    result = dict(existing)
+    result["fingerprints"] = merged
+    return result
+
+
+def _merge_error_baselines(existing: dict, incoming: dict) -> dict:
+    """
+    Merge two error baseline dicts (both have a "signatures" key).
+    Union of hashes; keep higher occurrences on conflict.
+    """
+    existing_sigs = existing.get("signatures", {})
+    incoming_sigs = incoming.get("signatures", {})
+    merged = dict(existing_sigs)
+    for h, entry in incoming_sigs.items():
+        if h not in merged:
+            merged[h] = entry
+        elif entry.get("occurrences", 0) > merged[h].get("occurrences", 0):
+            merged[h] = entry
+    result = dict(existing)
+    result["signatures"] = merged
+    return result
+
+
 def _push_baseline(env: str, baseline_path: Path) -> bool:
-    """Update ConfigMap and inject baseline into running otelcol-fingerprint pods."""
+    """
+    Merge local baseline with current ConfigMap content, then update ConfigMap
+    and inject merged baseline into running otelcol-fingerprint pods.
+
+    Merge semantics: union of hashes, higher occurrences wins on conflict,
+    auto_promoted/no_missing_service flags preserved from either side.
+    This prevents OTel-promoted hashes from being wiped on every learn cycle.
+    """
     if DRY_RUN:
-        print(f"  [dry-run] Would push {baseline_path.name} to ConfigMap + pods")
+        print(f"  [dry-run] Would merge+push {baseline_path.name} to ConfigMap + pods")
         return True
+
+    # Load the locally-learned baseline
+    try:
+        local = json.loads(baseline_path.read_text())
+    except Exception as e:
+        print(f"  [warn] Could not read {baseline_path}: {e}", file=sys.stderr)
+        return False
+
+    # Read current ConfigMap to extract OTel-promoted hashes before overwriting
+    rc, cm_json = _kubectl("get", "configmap", "behavioral-baseline", "-o", "json")
+    if rc == 0:
+        try:
+            cm_data = json.loads(cm_json).get("data", {})
+            existing_trace = json.loads(cm_data.get("baseline.json", "{}"))
+            merged = _merge_baselines(existing_trace, local)
+            otel_only = len(merged.get("fingerprints", {})) - len(local.get("fingerprints", {}))
+            if otel_only > 0:
+                print(f"  Preserved {otel_only} OTel-promoted hash(es) from ConfigMap.")
+        except Exception as e:
+            print(f"  [warn] Could not parse ConfigMap baseline for merge, using local only: {e}",
+                  file=sys.stderr)
+            merged = local
+    else:
+        merged = local  # ConfigMap doesn't exist yet
+
+    # Write merged baseline to a temp file for kubectl create
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
+        json.dump(merged, tf, indent=2)
+        merged_path = tf.name
 
     # Update ConfigMap (delete+create so data is always fresh)
     rc, out = _kubectl("delete", "configmap", "behavioral-baseline", "--ignore-not-found")
     rc, out = _kubectl("create", "configmap", "behavioral-baseline",
-                       f"--from-file=baseline.json={baseline_path}")
+                       f"--from-file=baseline.json={merged_path}")
+    Path(merged_path).unlink(missing_ok=True)
     if rc != 0:
         print(f"  [warn] ConfigMap update failed: {out}", file=sys.stderr)
         return False
-    print(f"  ConfigMap behavioral-baseline updated.")
+
+    # Write merged baseline back to the local path so injected pods get the full set
+    baseline_path.write_text(json.dumps(merged, indent=2))
+    fp_count = len(merged.get("fingerprints", {}))
+    print(f"  ConfigMap behavioral-baseline updated ({fp_count} fingerprints).")
 
     # Inject into running pods — retry once on failure (pod may be briefly restarting)
     rc, pods_out = _kubectl(
