@@ -340,36 +340,73 @@ def check_local_baseline_staleness() -> None:
         pass  # best-effort
 
 
+def _merge_baselines(existing: dict, incoming: dict) -> dict:
+    """
+    Merge two trace baseline dicts. Union of hashes; higher occurrences wins.
+    Preserves auto_promoted=True and no_missing_service=True from either side.
+    """
+    existing_fps = existing.get("fingerprints", {})
+    incoming_fps = incoming.get("fingerprints", {})
+    merged = dict(existing_fps)
+    for h, entry in incoming_fps.items():
+        if h not in merged:
+            merged[h] = entry
+        else:
+            ex = merged[h]
+            if entry.get("occurrences", 0) > ex.get("occurrences", 0):
+                merged[h] = dict(entry)
+            if entry.get("auto_promoted") or ex.get("auto_promoted"):
+                merged[h]["auto_promoted"] = True
+            if entry.get("no_missing_service") or ex.get("no_missing_service"):
+                merged[h]["no_missing_service"] = True
+    result = dict(existing)
+    result["fingerprints"] = merged
+    return result
+
+
+def _merge_error_baselines(existing: dict, incoming: dict) -> dict:
+    """Union of error signatures; higher occurrences wins on conflict."""
+    existing_sigs = existing.get("signatures", {})
+    incoming_sigs = incoming.get("signatures", {})
+    merged = dict(existing_sigs)
+    for h, entry in incoming_sigs.items():
+        if h not in merged:
+            merged[h] = entry
+        elif entry.get("occurrences", 0) > merged[h].get("occurrences", 0):
+            merged[h] = entry
+    result = dict(existing)
+    result["signatures"] = merged
+    return result
+
+
 def patch_configmap() -> bool:
     """
-    Read current baseline files from disk and patch the ConfigMap.
+    Read current baseline files from disk, merge with existing ConfigMap content
+    (preserving OTel-promoted hashes from other pods), then PUT the merged result.
     Returns True on success.
     """
     try:
-        baseline_json = Path(BASELINE_PATH).read_text()
+        local_baseline = json.loads(Path(BASELINE_PATH).read_text())
     except Exception as e:
         print(f"[warn] Could not read {BASELINE_PATH}: {e}", flush=True)
         return False
 
     try:
-        error_baseline_json = Path(ERROR_BASELINE_PATH).read_text()
+        local_error = json.loads(Path(ERROR_BASELINE_PATH).read_text())
     except Exception as e:
         print(f"[warn] Could not read {ERROR_BASELINE_PATH}: {e}", flush=True)
-        error_baseline_json = '{"signatures":{}}'
+        local_error = {"signatures": {}}
 
     # Validate both files are valid JSON before pushing
-    try:
-        json.loads(baseline_json)
-        json.loads(error_baseline_json)
-    except json.JSONDecodeError as e:
-        print(f"[warn] Baseline file is not valid JSON, skipping patch: {e}", flush=True)
+    if not isinstance(local_baseline, dict) or not isinstance(local_error, dict):
+        print(f"[warn] Baseline files are not valid JSON objects, skipping patch", flush=True)
         return False
 
-    fingerprint_count = len(json.loads(baseline_json).get("fingerprints", {}))
-    sig_count = len(json.loads(error_baseline_json).get("signatures", {}))
+    fingerprint_count = len(local_baseline.get("fingerprints", {}))
+    sig_count = len(local_error.get("signatures", {}))
 
     if DRY_RUN:
-        print(f"[dry-run] Would patch ConfigMap {CONFIGMAP_NAME}: "
+        print(f"[dry-run] Would merge+patch ConfigMap {CONFIGMAP_NAME}: "
               f"{fingerprint_count} trace fingerprints, {sig_count} error signatures",
               flush=True)
         return True
@@ -388,6 +425,7 @@ def patch_configmap() -> bool:
     ctx = ssl.create_default_context(cafile=ca_cert)
 
     # Step 1: GET the current ConfigMap to obtain resourceVersion (required for PUT)
+    # and to merge existing content with local promotions.
     get_req = urllib.request.Request(
         url,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -402,6 +440,29 @@ def patch_configmap() -> bool:
     except Exception as e:
         print(f"[error] ConfigMap GET failed: {e}", flush=True)
         return False
+
+    # Merge: union local promotions with what other pods already wrote.
+    # This makes cross-pod promotion additive rather than last-writer-wins.
+    cm_data = current.get("data", {})
+    try:
+        existing_trace = json.loads(cm_data.get("baseline.json", "{}"))
+        merged_trace = _merge_baselines(existing_trace, local_baseline)
+    except Exception:
+        merged_trace = local_baseline
+    try:
+        existing_error = json.loads(cm_data.get("error_baseline.json", "{}"))
+        merged_error = _merge_error_baselines(existing_error, local_error)
+    except Exception:
+        merged_error = local_error
+
+    merged_fp_count = len(merged_trace.get("fingerprints", {}))
+    preserved = merged_fp_count - fingerprint_count
+    if preserved > 0:
+        print(f"[sync] Preserved {preserved} hash(es) from other pods during merge.",
+              flush=True)
+
+    baseline_json = json.dumps(merged_trace)
+    error_baseline_json = json.dumps(merged_error)
 
     # Step 2: PUT (full replacement) — avoids the last-applied-configuration
     # annotation caching problem that makes strategic-merge-patch silently ignore
@@ -440,7 +501,9 @@ def patch_configmap() -> bool:
         return False
 
     print(f"[sync] ConfigMap {CONFIGMAP_NAME} patched: "
-          f"{fingerprint_count} trace fingerprints, {sig_count} error signatures",
+          f"{merged_fp_count} trace fingerprints "
+          f"({fingerprint_count} local + {preserved} from other pods), "
+          f"{len(merged_error.get('signatures', {}))} error signatures",
           flush=True)
     return True
 
