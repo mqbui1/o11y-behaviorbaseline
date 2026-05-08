@@ -57,6 +57,12 @@ type fingerprintProcessor struct {
 
 	startTime time.Time // used for warm-up window check
 
+	// bootstrapMu guards bootstrapFPs, which buffers the last-seen traceFingerprint
+	// per hash during the bootstrap window so bootstrapLearningMode can force-promote
+	// everything at the end of BootstrapDuration without waiting for PromotionThreshold.
+	bootstrapMu sync.Mutex
+	bootstrapFPs map[string]*traceFingerprint // hash -> fingerprint (last seen)
+
 	stopCh chan struct{}
 }
 
@@ -92,6 +98,7 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		activeDrifts:   make(map[string]string),
 		lastSeenRootOp: make(map[string]time.Time),
 		missingEmitted: make(map[string]bool),
+		bootstrapFPs:   make(map[string]*traceFingerprint),
 		startTime:      time.Now(),
 		stopCh:         make(chan struct{}),
 	}
@@ -263,9 +270,33 @@ func (p *fingerprintProcessor) stalenessCheckLoop() {
 	}
 }
 
+// infraOnlyServices are Eureka/Spring Cloud infra services whose root ops should
+// not be baselined — they generate heartbeat traffic that is not user-facing and
+// causes false MISSING_SERVICE alerts when routing is uneven.
+var infraOnlyServices = map[string]bool{
+	"discovery-server": true,
+	"config-server":    true,
+	"admin-server":     true,
+}
+
+// isInfraRootOp returns true if all services in the fingerprint are infra-only.
+// Mirrors the infra-only filter in core/trace_fingerprint.py cmd_learn.
+func isInfraRootOp(fp *traceFingerprint) bool {
+	if len(fp.services) == 0 {
+		return false
+	}
+	for _, svc := range fp.services {
+		if !infraOnlyServices[svc] {
+			return false
+		}
+	}
+	return true
+}
+
 // bootstrapLearningMode runs when the processor starts with an empty baseline.
-// It waits BootstrapDuration, then promotes everything it has seen into the
-// baseline and writes it to disk — making the processor self-bootstrapping.
+// It waits BootstrapDuration, then force-promotes every fingerprint buffered
+// during the window (filtered for infra-only root ops) and writes the baseline
+// to disk — making the processor self-bootstrapping with no manual intervention.
 func (p *fingerprintProcessor) bootstrapLearningMode() {
 	select {
 	case <-time.After(p.cfg.BootstrapDuration):
@@ -273,38 +304,47 @@ func (p *fingerprintProcessor) bootstrapLearningMode() {
 		return
 	}
 
-	// Forcibly promote all accumulated seenCounts that haven't crossed the
-	// normal threshold yet. During bootstrap, accept anything seen ≥1 time.
-	p.seenMu.Lock()
-	pending := make(map[string]int, len(p.seenCounts))
-	for k, v := range p.seenCounts {
+	// Snapshot the buffered fingerprints collected during the bootstrap window.
+	p.bootstrapMu.Lock()
+	pending := make(map[string]*traceFingerprint, len(p.bootstrapFPs))
+	for k, v := range p.bootstrapFPs {
 		pending[k] = v
 	}
-	p.seenMu.Unlock()
+	p.bootstrapMu.Unlock()
 
 	promoted := 0
-	// We can't promote without a traceFingerprint object. Instead, lower the
-	// effective threshold to 1 temporarily and let the next traces trigger
-	// normal promotion. Set a flag that makes maybePromoteTrace use threshold=1.
-	// Simplest approach: just log and emit the bootstrap-complete event.
-	// The warmup window already handles this for fresh restarts — bootstrap
-	// mode is for the case where warmup ended but baseline is still empty.
-	p.logger.Info("bootstrap learning window complete",
-		zap.Int("pending_hashes", len(pending)),
-		zap.String("environment", p.cfg.Environment),
-	)
+	skippedInfra := 0
+	for hash, fp := range pending {
+		// Skip infra-only root ops (Eureka heartbeats, Spring health checks)
+		if isInfraRootOp(fp) {
+			skippedInfra++
+			continue
+		}
+		// Skip if already promoted during warmup
+		if entry := p.baseline.lookupTrace(hash); entry != nil {
+			continue
+		}
+		if p.baseline.promoteTrace(fp, p.cfg.PromotionWriteback) {
+			promoted++
+			p.seenMu.Lock()
+			delete(p.seenCounts, hash)
+			p.seenCountsDirty = true
+			p.seenMu.Unlock()
+		}
+	}
 
-	// Count how many fingerprints and error sigs were bootstrapped via
-	// warmup auto-promotion (PromotionThreshold=1 during warmup already ran).
 	fpCount, errCount := p.baseline.counts()
-	p.logger.Info("bootstrap baseline summary",
-		zap.Int("fingerprint_count", fpCount),
-		zap.Int("error_sig_count", errCount),
+	p.logger.Info("bootstrap learning window complete",
+		zap.Int("buffered_hashes", len(pending)),
+		zap.Int("newly_promoted", promoted),
+		zap.Int("skipped_infra", skippedInfra),
+		zap.Int("total_fingerprints", fpCount),
+		zap.Int("total_error_sigs", errCount),
+		zap.String("environment", p.cfg.Environment),
 	)
 	if err := p.emitter.emitBootstrapComplete(p.cfg.Environment, fpCount, errCount); err != nil {
 		p.logger.Warn("failed to emit bootstrap complete event", zap.Error(err))
 	}
-	_ = promoted
 }
 
 // tryClaimEvent returns true if this pod should emit the event.
@@ -702,6 +742,15 @@ func (p *fingerprintProcessor) maybePromoteTrace(fp *traceFingerprint) {
 	if p.cfg.PromotionThreshold <= 0 {
 		return
 	}
+
+	// During bootstrap: buffer every fingerprint so bootstrapLearningMode can
+	// force-promote the full set at the end of BootstrapDuration.
+	if p.cfg.BootstrapDuration > 0 && time.Since(p.startTime) < p.cfg.BootstrapDuration {
+		p.bootstrapMu.Lock()
+		p.bootstrapFPs[fp.hash] = fp
+		p.bootstrapMu.Unlock()
+	}
+
 	p.seenMu.Lock()
 	p.seenCounts[fp.hash]++
 	count := p.seenCounts[fp.hash]
