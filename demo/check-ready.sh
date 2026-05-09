@@ -38,23 +38,29 @@ else
 fi
 
 # ── 2. Cluster pods ───────────────────────────────────────────────────────────
-echo "[2/6] Cluster pod health..."
+echo "[2/7] Cluster pod health..."
 _POD_OUT=$($K "kubectl get pods --no-headers 2>/dev/null" 2>/dev/null || true)
 NOT_RUNNING=$(echo "$_POD_OUT" | grep -vE 'Running|Completed|^$' | grep -cE '^[a-z]' || true)
 FP_PODS=$(echo "$_POD_OUT" | grep 'otelcol-fingerprint' | grep -c Running || true)
+AGG_PODS=$(echo "$_POD_OUT" | grep 'otelcol-aggregator' | grep -c Running || true)
 if [ "${NOT_RUNNING:-0}" -eq 0 ] 2>/dev/null; then
     ok "All pods Running"
 else
     fail "${NOT_RUNNING} pod(s) not in Running state — check: kubectl get pods"
 fi
 if [ "${FP_PODS:-0}" -eq 3 ] 2>/dev/null; then
-    ok "otelcol-fingerprint: 3/3 pods running"
+    ok "otelcol-fingerprint (forwarder): 3/3 pods running"
 else
     fail "otelcol-fingerprint: only ${FP_PODS:-0}/3 pods running"
 fi
+if [ "${AGG_PODS:-0}" -eq 2 ] 2>/dev/null; then
+    ok "otelcol-aggregator (detector): 2/2 pods running"
+else
+    fail "otelcol-aggregator: only ${AGG_PODS:-0}/2 pods running — run: kubectl apply -f otel-processor/k8s/aggregator.yaml"
+fi
 
 # ── 3. Baseline fingerprints (local + cluster ConfigMap) ─────────────────────
-echo "[3/6] Baseline..."
+echo "[3/7] Baseline..."
 FP_COUNT=$(python3 -c "
 import json, sys
 from pathlib import Path
@@ -81,7 +87,7 @@ else
 fi
 
 # ── 4. Splunk API connectivity ────────────────────────────────────────────────
-echo "[4/6] Splunk API connectivity..."
+echo "[4/7] Splunk API connectivity..."
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "X-SF-Token: $SPLUNK_ACCESS_TOKEN" \
     "https://api.us1.signalfx.com/v2/organization" 2>/dev/null)
@@ -91,19 +97,21 @@ else
     fail "Splunk API returned HTTP $HTTP_CODE — check SPLUNK_ACCESS_TOKEN"
 fi
 
-# ── 5. OTel processor steady state (cluster pod logs, last 30s) ───────────────
-echo "[5/6] OTel processor steady state (cluster logs)..."
-DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=30s 2>/dev/null; done" 2>/dev/null \
+# ── 5. OTel processor steady state (aggregator pod logs, last 30s) ──────────
+# Detection events come from the aggregator tier (fingerprintprocessor runs there).
+# DaemonSet pods are pure forwarders — they produce no detection log lines.
+echo "[5/7] OTel processor steady state (aggregator logs)..."
+DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=30s 2>/dev/null; done" 2>/dev/null \
     | grep -cE 'trace drift detected|new trace fingerprint|new error signature' || echo "0")
 DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
 if [ "${DRIFT_COUNT:-0}" -eq 0 ] 2>/dev/null; then
-    ok "OTel processor: 0 drift events in last 30s — steady state"
+    ok "OTel aggregator: 0 drift events in last 30s — steady state"
 else
-    warn "OTel processor: ${DRIFT_COUNT} drift event(s) in last 30s — wait for steady state or run demo-reset.sh"
+    warn "OTel aggregator: ${DRIFT_COUNT} drift event(s) in last 30s — wait for steady state or run demo-reset.sh"
 fi
 
 # ── 6. OTel events in Splunk (last 3m) ───────────────────────────────────────
-echo "[6/6] OTel events in Splunk (last 3m)..."
+echo "[6/7] OTel events in Splunk (last 3m)..."
 EVENT_COUNT=$(python3 -c "
 import urllib.request, urllib.parse, json, time, os
 token = os.environ.get('SPLUNK_ACCESS_TOKEN','')
@@ -127,6 +135,16 @@ if [ "$EVENT_COUNT" = "0" ] || [ "$EVENT_COUNT" = "?" ]; then
     ok "No stale OTel events in Splunk"
 else
     warn "$EVENT_COUNT OTel event(s) still in 3m window — wait ~3m or they won't affect demos"
+fi
+
+# ── 7. Aggregator baseline loaded (what the detector actually has in-memory) ──
+echo "[7/7] Aggregator baseline (live pod file)..."
+AGG_FP=$($K "pod=\$(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
+  kubectl exec \$pod -c otelcol -- sh -c 'grep -o '\\''\"hash\"'\\'' /baseline/baseline.json | wc -l' 2>/dev/null" 2>/dev/null | tr -d ' \n' || echo "0")
+if echo "$AGG_FP" | grep -qE '^[0-9]+$' && [ "${AGG_FP:-0}" -gt 5 ] 2>/dev/null; then
+    ok "Aggregator baseline: ${AGG_FP} fingerprints on disk (ready to detect)"
+else
+    fail "Aggregator baseline empty or unreadable — inject with: ./otel-processor/deploy.sh $ENV --skip-learn --skip-build"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
