@@ -1,33 +1,33 @@
-# Custom OTel Collector DaemonSet with fingerprint processor.
-# Replaces (or runs alongside) the default splunk-otel-collector agent DaemonSet.
+# otelcol-aggregator — StatefulSet tier that receives TraceID-routed spans
+# from the DaemonSet loadbalancing exporter and runs the fingerprintprocessor
+# with complete traces (no split-trace problem).
 #
-# Image must be built and pushed first:
-#   docker build -t <your-registry>/otelcol-fingerprint:latest otel-processor/
-#   docker push <your-registry>/otelcol-fingerprint:latest
+# Deploy BEFORE updating the DaemonSet — aggregator must be ready to receive
+# before the DaemonSet starts routing to it.
 ---
 apiVersion: apps/v1
-kind: DaemonSet
+kind: StatefulSet
 metadata:
-  name: otelcol-fingerprint
+  name: otelcol-aggregator
   namespace: default
   labels:
-    app: otelcol-fingerprint
+    app: otelcol-aggregator
 spec:
+  serviceName: otelcol-aggregator
+  # 2 replicas: loadbalancingexporter will consistently hash each TraceID to
+  # one of these two pods, ensuring all spans for a trace land on the same pod.
+  # Increase replicas for higher throughput — loadbalancingexporter resolves
+  # backends via DNS on the headless service and rehashes on membership change.
+  replicas: 2
   selector:
     matchLabels:
-      app: otelcol-fingerprint
+      app: otelcol-aggregator
   template:
     metadata:
       labels:
-        app: otelcol-fingerprint
+        app: otelcol-aggregator
     spec:
-      serviceAccountName: otelcol-fingerprint
-      tolerations:
-        - key: node-role.kubernetes.io/control-plane
-          effect: NoSchedule
-      # Copy baseline files from the ConfigMap into the writable emptyDir volume
-      # before the collector starts. The sidecar keeps the ConfigMap (and therefore
-      # this volume on the next pod restart) in sync after each auto-promotion.
+      serviceAccountName: otelcol-fingerprint  # reuse same SA/RBAC as DaemonSet
       initContainers:
         - name: baseline-init
           image: busybox:1.36
@@ -65,7 +65,7 @@ spec:
             - name: SPLUNK_API_URL
               value: "https://api.us1.signalfx.com"
           ports:
-            - containerPort: 4317   # OTLP gRPC
+            - containerPort: 4317   # OTLP gRPC (from DaemonSet loadbalancer)
             - containerPort: 4318   # OTLP HTTP
             - containerPort: 13133  # health_check
           livenessProbe:
@@ -76,20 +76,17 @@ spec:
             periodSeconds: 15
           resources:
             limits:
-              memory: 512Mi
-              cpu: 250m
+              memory: 768Mi
+              cpu: 500m
             requests:
-              memory: 128Mi
-              cpu: 50m
+              memory: 256Mi
+              cpu: 100m
           volumeMounts:
             - name: config
               mountPath: /etc/otelcol
             - name: baseline
-              mountPath: /baseline   # writable emptyDir — auto-promotion writes here
+              mountPath: /baseline
 
-        # Sidecar: watches Splunk for trace.fingerprint.promoted events and patches
-        # the behavioral-baseline ConfigMap so all pods get the updated baseline
-        # on their next baseline_reload_interval tick.
         - name: baseline-sync
           image: python:3.11-alpine
           command: ["python3", "/scripts/baseline-sync-sidecar.py"]
@@ -116,9 +113,9 @@ spec:
             - name: LOOKBACK_SECONDS
               value: "120"
             - name: STALENESS_THRESHOLD_S
-              value: "86400"   # alert if baseline ConfigMap not updated in 24h
+              value: "86400"
             - name: BASELINE_RELOAD_INTERVAL_S
-              value: "60"      # must match fingerprintprocessor baseline_reload_interval
+              value: "60"
           resources:
             limits:
               memory: 64Mi
@@ -128,27 +125,50 @@ spec:
               cpu: 10m
           volumeMounts:
             - name: baseline
-              mountPath: /baseline   # reads promoted baseline files written by collector
+              mountPath: /baseline
             - name: sync-scripts
               mountPath: /scripts
 
       volumes:
         - name: config
           configMap:
-            name: otelcol-fingerprint-config
+            name: otelcol-aggregator-config
         - name: baseline-cm
           configMap:
-            name: behavioral-baseline   # source of truth — updated by sidecar after promotion
+            name: behavioral-baseline
         - name: baseline
-          emptyDir: {}               # writable copy — init container seeds it from baseline-cm
+          emptyDir: {}
         - name: sync-scripts
           configMap:
             name: baseline-sync-scripts
 ---
+# Headless service — loadbalancingexporter resolves individual pod IPs via DNS
+# (A records for each pod) and hashes TraceID → pod index.
+apiVersion: v1
+kind: Service
+metadata:
+  name: otelcol-aggregator
+  namespace: default
+  labels:
+    app: otelcol-aggregator
+spec:
+  clusterIP: None   # headless — DNS returns individual pod IPs
+  selector:
+    app: otelcol-aggregator
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+---
+# ConfigMap for the aggregator — runs fingerprintprocessor with relaxed
+# partial_trace_threshold since traces are now complete (no split-trace).
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: otelcol-fingerprint-config
+  name: otelcol-aggregator-config
   namespace: default
 data:
   config.yaml: |
@@ -167,8 +187,8 @@ data:
     processors:
       memory_limiter:
         check_interval: 1s
-        limit_mib: 400
-        spike_limit_mib: 80
+        limit_mib: 600
+        spike_limit_mib: 100
 
       batch:
         send_batch_size: 1000
@@ -180,26 +200,45 @@ data:
             key: deployment.environment
             value: ${env:WORKSHOP_ENVIRONMENT}
 
-    exporters:
-      # loadbalancingexporter routes spans to the aggregator StatefulSet using
-      # consistent hashing on TraceID. All spans for the same TraceID always
-      # land on the same aggregator pod — solving the split-trace problem.
-      # DNS resolver watches the headless Service and updates the endpoint list
-      # when aggregator pods are added or removed (e.g. scale-up).
-      loadbalancing:
-        routing_key: traceID
-        protocol:
-          otlp:
-            timeout: 5s
-            tls:
-              insecure: true
-        resolver:
-          dns:
-            hostname: otelcol-aggregator.default.svc.cluster.local
-            port: 4317
-            # Re-resolve every 10s to pick up pod membership changes
-            interval: 10s
+      fingerprintprocessor:
+        trace_buffer_timeout: 10s
+        baseline_path: /baseline/baseline.json
+        error_baseline_path: /baseline/error_baseline.json
+        environment: ${env:WORKSHOP_ENVIRONMENT}
+        splunk_ingest_url: ${env:SPLUNK_INGEST_URL}
+        splunk_access_token: ${env:SPLUNK_ACCESS_TOKEN}
+        splunk_api_token: ${env:SPLUNK_API_TOKEN}
+        min_spans: 2
+        min_baseline_occurrences: 2
+        baseline_reload_interval: 60s
+        # Relaxed threshold — traces are complete here (all spans routed to same pod)
+        # Keep a small value (0.1) only as a safety net for genuinely tiny traces.
+        partial_trace_threshold: 0.1
+        span_count_percentile_guard: true
+        promotion_threshold: 10
+        promotion_writeback: true
+        missing_service_check_interval: 45s
+        warmup_duration: 2m
+        error_rate_window: 5m
+        error_rate_spike_multiplier: 5.0
+        latency_anomaly_window: 2m
+        latency_learn_min_samples: 30
+        latency_anomaly_z_score: 3.0
+        error_rate_anomaly_window: 2m
+        error_rate_anomaly_threshold: 0.05
+        min_error_rate_samples: 10
+        throughput_drop_window: 2m
+        throughput_drop_threshold: 0.5
+        throughput_learn_min_samples: 20
+        topology_drift_enabled: true
+        bootstrap_duration: 5m
+        deduplicate_events: true
+        deduplicate_ttl: 2m
+        db_query_latency_window: 5m
+        db_query_learn_min_samples: 10
+        db_query_latency_z_score: 3.0
 
+    exporters:
       otlphttp/splunk:
         traces_endpoint: ${env:SPLUNK_INGEST_URL}/v2/trace/otlp
         headers:
@@ -215,66 +254,9 @@ data:
       pipelines:
         traces:
           receivers: [otlp]
-          # No fingerprintprocessor here — DaemonSet is a pure forwarder.
-          # Fingerprinting happens in the aggregator tier with complete traces.
-          processors: [memory_limiter, resource/add_environment, batch]
-          exporters: [loadbalancing]
+          processors: [memory_limiter, resource/add_environment, fingerprintprocessor, batch]
+          exporters: [otlphttp/splunk]
         metrics:
           receivers: [otlp]
           processors: [memory_limiter, resource/add_environment, batch]
           exporters: [signalfx]
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: otelcol-fingerprint
-  namespace: default
----
-# Role: allow the baseline-sync sidecar to patch the behavioral-baseline ConfigMap
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: otelcol-fingerprint-baseline-sync
-  namespace: default
-rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["behavioral-baseline"]
-    verbs: ["get", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: otelcol-fingerprint-baseline-sync
-  namespace: default
-subjects:
-  - kind: ServiceAccount
-    name: otelcol-fingerprint
-    namespace: default
-roleRef:
-  kind: Role
-  apiGroup: rbac.authorization.k8s.io
-  name: otelcol-fingerprint-baseline-sync
----
-# NOTE: The baseline-sync-scripts ConfigMap is created by deploy.sh, not here,
-# because kubectl --from-file handles the script embedding correctly:
-#   kubectl create configmap baseline-sync-scripts \
-#     --from-file=baseline-sync-sidecar.py=k8s/baseline-sync-sidecar.py \
-#     --dry-run=client -o yaml | kubectl apply -f -
----
-# Service so app pods can reach this collector at otelcol-fingerprint:4317/4318
-apiVersion: v1
-kind: Service
-metadata:
-  name: otelcol-fingerprint
-  namespace: default
-spec:
-  selector:
-    app: otelcol-fingerprint
-  ports:
-    - name: otlp-grpc
-      port: 4317
-      targetPort: 4317
-    - name: otlp-http
-      port: 4318
-      targetPort: 4318

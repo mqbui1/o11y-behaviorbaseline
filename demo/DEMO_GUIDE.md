@@ -88,7 +88,7 @@ k "cd /home/splunk/otel-processor && \
 The OTel Operator's `Instrumentation` CR controls where auto-instrumented app pods send their traces. Patch it to point at `otelcol-fingerprint` so the flow is:
 
 ```
-app pod → otelcol-fingerprint (fingerprint inline) → Splunk APM
+app pod → otelcol-fingerprint DaemonSet (forwarder) → otelcol-aggregator StatefulSet (fingerprintprocessor) → Splunk APM
 ```
 
 No Helm relay patch needed. `deploy.sh` does this automatically in Step 4, but you can also run it manually:
@@ -172,11 +172,12 @@ k "mkdir -p /home/splunk/otel-processor/data && \
 1. Seeds `behavioral-baseline` ConfigMap (baseline + error baseline)
 2. Creates `baseline-sync-scripts` ConfigMap from `k8s/baseline-sync-sidecar.py`
 3. Patches the OTel Instrumentation CR → otelcol-fingerprint
-4. Applies `daemonset.yaml` (DaemonSet, config, RBAC, Service)
-5. Restarts DaemonSet and waits for rollout
-6. Injects baseline directly into running pods (immediate — no 60s reload wait)
+4. Deploys `aggregator.yaml` (StatefulSet + headless Service + ConfigMap) — must be ready before DaemonSet
+5. Applies `daemonset.yaml` (DaemonSet forwarder, config, RBAC, Service)
+6. Restarts DaemonSet and waits for rollout
+7. Injects baseline directly into running pods — both DaemonSet AND aggregator (immediate — no 60s reload wait)
 
-> **Note:** `daemonset.yaml` includes `missing_service_check_interval: 15s` and `warmup_duration: 30s` in the collector config — no manual patching needed.
+> **Note:** `aggregator.yaml` includes `missing_service_check_interval: 45s` and `warmup_duration: 2m` in the collector config — no manual patching needed. Detection events come from the aggregator tier; the DaemonSet is a pure forwarder.
 
 ### Step 7 — Verify (local Mac)
 ```bash
@@ -246,12 +247,12 @@ This writes the tokens into `.env` so all scripts pick them up automatically. Do
 ./demo/check-ready.sh
 ```
 
-This checks all 6 pre-demo conditions in one pass:
+This checks all pre-demo conditions in one pass:
 1. **AWS credentials** — valid STS token (required for Claude/Bedrock triage)
-2. **Cluster pods** — all Running, 3 otelcol-fingerprint pods present
+2. **Cluster pods** — all Running, 3 otelcol-fingerprint (forwarder) + 2 otelcol-aggregator (detector) pods present
 3. **Baseline fingerprints** — ≥10 fingerprints loaded in the OTel processor
 4. **Splunk API** — reachable and authenticated
-5. **0 trace anomalies** — Python watch returns clean baseline
+5. **0 trace anomalies** — aggregator logs show 0 drift events in last 30s
 6. **0 stale OTel events** — no drift events in Splunk in the last 3 minutes
 
 If any check fails, the script prints what to fix and exits 1.
@@ -300,7 +301,7 @@ source .env
 ./demo/demo-between.sh --quick  # local state only, no cluster ops (same as demo-quick-reset.sh)
 ```
 
-`demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state, restores all services to replicas=1, **cycles OTel pods** (clears in-memory `missingEmitted`/`seenCounts` state), waits 35s for warmup + baseline reload, then verifies steady state. Script completes in ~90s with `--db`, ~60s without.
+`demo-between.sh` always: clears alerts.log, wipes error baseline + dedup state, restores all services to replicas=1, **cycles both DaemonSet and aggregator pods** (clears in-memory `missingEmitted`/`seenCounts` state), re-injects baselines into fresh pods, waits 35s for warmup. Script completes in ~90s with `--db`, ~70s without.
 
 > **After `demo-between.sh`:** pod names change — restart `poll_drift_events.py` before the next demo.
 

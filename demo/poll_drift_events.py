@@ -40,7 +40,9 @@ if not EC2_IP or not EC2_PASS:
     print("ERROR: EC2_IP and EC2_PASS (or EC2_PASSWORD) must be set in .env")
     sys.exit(1)
 
-DAEMONSET_LABEL = os.environ.get("OTEL_POD_LABEL", "app=otelcol-fingerprint")
+# In the two-tier topology, the DaemonSet is a pure forwarder — detection events
+# (drift, error signatures, MISSING_SERVICE, latency anomaly) come from the aggregator.
+DAEMONSET_LABEL = os.environ.get("OTEL_POD_LABEL", "app=otelcol-aggregator")
 OTEL_CONTAINER  = os.environ.get("OTEL_CONTAINER", "otelcol")
 _DATA_DIR       = _REPO / "data"
 

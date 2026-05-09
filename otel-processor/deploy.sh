@@ -174,30 +174,43 @@ else
 fi
 echo ""
 
-# ── Step 5: Apply daemonset.yaml ──────────────────────────────────────────────
-echo "--- Step 5: Apply DaemonSet manifests ---"
+# ── Step 5: Deploy aggregator StatefulSet (must be ready before DaemonSet) ────
+echo "--- Step 5: Deploy aggregator StatefulSet ---"
+# Import aggregator image into k3d if needed (same image as DaemonSet)
+if [ -n "$K3D_CLUSTER" ] && [ "$SKIP_BUILD" = "false" ]; then
+  echo "  Image already imported in Step 1 — aggregator uses same image"
+fi
+kubectl apply -f "$K8S_DIR/aggregator.yaml"
+echo "  Waiting for aggregator pods to be ready..."
+kubectl rollout status statefulset/otelcol-aggregator --timeout=120s
+echo ""
+
+# ── Step 6: Apply daemonset.yaml ──────────────────────────────────────────────
+echo "--- Step 6: Apply DaemonSet manifests ---"
 kubectl apply -f "$K8S_DIR/daemonset.yaml"
 echo ""
 
-# ── Step 6: Restart DaemonSet ─────────────────────────────────────────────────
-echo "--- Step 6: Restart DaemonSet ---"
+# ── Step 7: Restart DaemonSet ─────────────────────────────────────────────────
+echo "--- Step 7: Restart DaemonSet ---"
 kubectl rollout restart daemonset/otelcol-fingerprint
 kubectl rollout status daemonset/otelcol-fingerprint --timeout=120s
 echo ""
 
-# ── Step 7: Inject baseline directly into running pods ────────────────────────
-# The init container seeds /baseline from the ConfigMap at pod start. But since
-# we want the baseline active immediately (not after the next 60s reload cycle),
-# we write it directly into each pod's emptyDir volume via kubectl cp.
-# kubectl cp works reliably on both Linux and macOS (no base64 line-wrap issues).
-echo "--- Step 7: Inject baseline into running pods ---"
+# ── Step 8: Inject baseline into all running pods (DaemonSet + aggregator) ────
+echo "--- Step 8: Inject baseline into running pods ---"
 for pod in $(kubectl get pods -l app=otelcol-fingerprint --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
-  echo -n "  $pod: "
+  echo -n "  [daemonset] $pod: "
+  kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol 2>&1 && echo "ok" || echo "skipped (pod not ready)"
+done
+for pod in $(kubectl get pods -l app=otelcol-aggregator --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
+  echo -n "  [aggregator] $pod: "
   kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol 2>&1 && echo "ok" || echo "skipped (pod not ready)"
 done
 echo ""
 
 echo "=== Deploy complete ==="
 echo "  Baseline    : $(python3 -c "import json; d=json.load(open('$BASELINE')); print(len(d['fingerprints']), 'fingerprints')" 2>/dev/null || echo 'unknown')"
+echo "  Topology    : DaemonSet (forwarder) → aggregator StatefulSet (fingerprinter)"
+echo "  TraceID routing: consistent hash — all spans for a trace land on the same aggregator pod"
 echo "  Detection starts immediately — baseline is active in all pods."
 echo "  The baseline-sync sidecar patches the ConfigMap after each auto-promotion."
