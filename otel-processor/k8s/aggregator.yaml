@@ -1,0 +1,262 @@
+# otelcol-aggregator — StatefulSet tier that receives TraceID-routed spans
+# from the DaemonSet loadbalancing exporter and runs the fingerprintprocessor
+# with complete traces (no split-trace problem).
+#
+# Deploy BEFORE updating the DaemonSet — aggregator must be ready to receive
+# before the DaemonSet starts routing to it.
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: otelcol-aggregator
+  namespace: default
+  labels:
+    app: otelcol-aggregator
+spec:
+  serviceName: otelcol-aggregator
+  # 2 replicas: loadbalancingexporter will consistently hash each TraceID to
+  # one of these two pods, ensuring all spans for a trace land on the same pod.
+  # Increase replicas for higher throughput — loadbalancingexporter resolves
+  # backends via DNS on the headless service and rehashes on membership change.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otelcol-aggregator
+  template:
+    metadata:
+      labels:
+        app: otelcol-aggregator
+    spec:
+      serviceAccountName: otelcol-fingerprint  # reuse same SA/RBAC as DaemonSet
+      initContainers:
+        - name: baseline-init
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /baseline-cm/* /baseline/"]
+          volumeMounts:
+            - name: baseline-cm
+              mountPath: /baseline-cm
+              readOnly: true
+            - name: baseline
+              mountPath: /baseline
+      containers:
+        - name: otelcol
+          image: otelcol-fingerprint:latest
+          imagePullPolicy: Never
+          args:
+            - --config=/etc/otelcol/config.yaml
+          env:
+            - name: WORKSHOP_ENVIRONMENT
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: env
+            - name: SPLUNK_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: splunk-otel-collector
+                  key: splunk_observability_access_token
+            - name: SPLUNK_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: splunk-api-token
+                  key: token
+            - name: SPLUNK_INGEST_URL
+              value: "https://ingest.us1.signalfx.com"
+            - name: SPLUNK_API_URL
+              value: "https://api.us1.signalfx.com"
+          ports:
+            - containerPort: 4317   # OTLP gRPC (from DaemonSet loadbalancer)
+            - containerPort: 4318   # OTLP HTTP
+            - containerPort: 13133  # health_check
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            limits:
+              memory: 768Mi
+              cpu: 500m
+            requests:
+              memory: 256Mi
+              cpu: 100m
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+            - name: baseline
+              mountPath: /baseline
+
+        - name: baseline-sync
+          image: python:3.11-alpine
+          command: ["python3", "/scripts/baseline-sync-sidecar.py"]
+          env:
+            - name: WORKSHOP_ENVIRONMENT
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: env
+            - name: SPLUNK_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: splunk-api-token
+                  key: token
+            - name: SPLUNK_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-secret
+                  key: access_token
+            - name: SPLUNK_REALM
+              value: "us1"
+            - name: POLL_INTERVAL
+              value: "30"
+            - name: LOOKBACK_SECONDS
+              value: "120"
+            - name: STALENESS_THRESHOLD_S
+              value: "86400"
+            - name: BASELINE_RELOAD_INTERVAL_S
+              value: "60"
+          resources:
+            limits:
+              memory: 64Mi
+              cpu: 50m
+            requests:
+              memory: 32Mi
+              cpu: 10m
+          volumeMounts:
+            - name: baseline
+              mountPath: /baseline
+            - name: sync-scripts
+              mountPath: /scripts
+
+      volumes:
+        - name: config
+          configMap:
+            name: otelcol-aggregator-config
+        - name: baseline-cm
+          configMap:
+            name: behavioral-baseline
+        - name: baseline
+          emptyDir: {}
+        - name: sync-scripts
+          configMap:
+            name: baseline-sync-scripts
+---
+# Headless service — loadbalancingexporter resolves individual pod IPs via DNS
+# (A records for each pod) and hashes TraceID → pod index.
+apiVersion: v1
+kind: Service
+metadata:
+  name: otelcol-aggregator
+  namespace: default
+  labels:
+    app: otelcol-aggregator
+spec:
+  clusterIP: None   # headless — DNS returns individual pod IPs
+  selector:
+    app: otelcol-aggregator
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+---
+# ConfigMap for the aggregator — runs fingerprintprocessor with relaxed
+# partial_trace_threshold since traces are now complete (no split-trace).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otelcol-aggregator-config
+  namespace: default
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 600
+        spike_limit_mib: 100
+
+      batch:
+        send_batch_size: 1000
+        timeout: 5s
+
+      resource/add_environment:
+        attributes:
+          - action: insert
+            key: deployment.environment
+            value: ${env:WORKSHOP_ENVIRONMENT}
+
+      fingerprintprocessor:
+        trace_buffer_timeout: 10s
+        baseline_path: /baseline/baseline.json
+        error_baseline_path: /baseline/error_baseline.json
+        environment: ${env:WORKSHOP_ENVIRONMENT}
+        splunk_ingest_url: ${env:SPLUNK_INGEST_URL}
+        splunk_access_token: ${env:SPLUNK_ACCESS_TOKEN}
+        splunk_api_token: ${env:SPLUNK_API_TOKEN}
+        min_spans: 2
+        min_baseline_occurrences: 2
+        baseline_reload_interval: 60s
+        # Relaxed threshold — traces are complete here (all spans routed to same pod)
+        # Keep a small value (0.1) only as a safety net for genuinely tiny traces.
+        partial_trace_threshold: 0.1
+        span_count_percentile_guard: true
+        promotion_threshold: 10
+        promotion_writeback: true
+        missing_service_check_interval: 45s
+        warmup_duration: 2m
+        error_rate_window: 5m
+        error_rate_spike_multiplier: 5.0
+        latency_anomaly_window: 2m
+        latency_learn_min_samples: 30
+        latency_anomaly_z_score: 3.0
+        error_rate_anomaly_window: 2m
+        error_rate_anomaly_threshold: 0.05
+        min_error_rate_samples: 10
+        throughput_drop_window: 2m
+        throughput_drop_threshold: 0.5
+        throughput_learn_min_samples: 20
+        topology_drift_enabled: true
+        bootstrap_duration: 5m
+        deduplicate_events: true
+        deduplicate_ttl: 2m
+        db_query_latency_window: 5m
+        db_query_learn_min_samples: 10
+        db_query_latency_z_score: 3.0
+
+    exporters:
+      otlphttp/splunk:
+        traces_endpoint: ${env:SPLUNK_INGEST_URL}/v2/trace/otlp
+        headers:
+          x-sf-token: ${env:SPLUNK_ACCESS_TOKEN}
+
+      signalfx:
+        access_token: ${env:SPLUNK_ACCESS_TOKEN}
+        api_url: ${env:SPLUNK_API_URL}
+        ingest_url: ${env:SPLUNK_INGEST_URL}
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/add_environment, fingerprintprocessor, batch]
+          exporters: [otlphttp/splunk]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/add_environment, batch]
+          exporters: [signalfx]

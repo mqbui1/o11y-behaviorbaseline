@@ -72,8 +72,8 @@ fi
 # Sync auto-promoted hashes from cluster first so they're baked in locally.
 echo "[4] Syncing + injecting clean baselines into OTel pods..."
 
-# Pull auto-promoted hashes from cluster, merge into local baseline
-PROMOTED_JSON=$($K "pod=\$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[0].metadata.name}'); kubectl exec \$pod -c otelcol -- cat /baseline/baseline.json 2>/dev/null" 2>/dev/null | grep -v '▀\|█\|▄' || echo "{}")
+# Pull auto-promoted hashes from cluster — read from aggregator (detection tier has live promotions)
+PROMOTED_JSON=$($K "pod=\$(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[0].metadata.name}'); kubectl exec \$pod -c otelcol -- cat /baseline/baseline.json 2>/dev/null" 2>/dev/null | grep -v '▀\|█\|▄' || echo "{}")
 python3 -c "
 import json, sys, os
 from pathlib import Path
@@ -107,8 +107,9 @@ sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "$_REPO/data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
+# Two-tier topology: inject into both DaemonSet forwarders AND aggregator pods (detection runs there)
 $K "BB64=\$(base64 -w 0 /tmp/baseline.json); EB64=\$(base64 -w 0 /tmp/error_baseline.json); \
-    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do \
+    for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}') \$(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[*].metadata.name}'); do \
       kubectl exec \$pod -c otelcol -- sh -c \"echo '\$BB64' | base64 -d > /baseline/baseline.json && echo '\$EB64' | base64 -d > /baseline/error_baseline.json\" 2>/dev/null \
       && echo \"  injected: \$pod\"; \
     done" 2>/dev/null | grep -v '▀\|█\|▄' || true
@@ -123,15 +124,33 @@ for f in pathlib.Path(f'{repo}/data').glob(f'*dedup*{e}*'):
 " "$_REPO"
 
 # ── Delete OTel pods to clear in-memory state (missingEmitted, seenCounts) ────
-# DaemonSet respawns pods immediately — much faster than rollout restart.
-# warmup_duration: 30s in ConfigMap, so pods are ready to detect in ~30s.
-echo "[5] Cycling OTel pods to clear in-memory state..."
-$K "kubectl delete pods -l app=otelcol-fingerprint --grace-period=0 2>/dev/null && echo '  OTel pods deleted — DaemonSet respawning...'" 2>/dev/null | grep -v '▀\|█\|▄' || true
+# Two-tier topology: cycle both DaemonSet forwarders AND aggregator pods.
+# DaemonSet respawns immediately. StatefulSet respawns sequentially (aggregator-0, aggregator-1).
+# warmup_duration: 2m in aggregator config — wait 35s minimum, but detection may start earlier
+# since aggregator's baseline is injected and traceable within seconds of startup.
+echo "[5] Cycling OTel pods (DaemonSet forwarders + aggregator detectors)..."
+$K "kubectl delete pods -l app=otelcol-fingerprint --grace-period=0 2>/dev/null && echo '  DaemonSet pods deleted — respawning...'" 2>/dev/null | grep -v '▀\|█\|▄' || true
+$K "kubectl delete pods -l app=otelcol-aggregator --grace-period=0 2>/dev/null && echo '  Aggregator pods deleted — StatefulSet respawning...'" 2>/dev/null | grep -v '▀\|█\|▄' || true
 
-# ── Wait for warmup (30s) + baseline reload (10s) — total ~35s ────────────────
-echo "[6] Waiting 35s for OTel warmup + baseline reload..."
+# ── Wait for warmup (30s) + baseline reload (60s) — total ~35s minimum ────────
+# aggregator warmup_duration: 2m (120s) — drift events suppressed during warmup.
+# Inject baselines again after pods restart so they reload immediately.
+echo "[6] Waiting 35s for pods to restart, then re-injecting baselines..."
 sleep 35
-DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=10s 2>/dev/null; done" 2>/dev/null \
+# Re-inject baselines into freshly started aggregator pods (they may have loaded empty baseline from ConfigMap)
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
+  "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/baseline.json" 2>/dev/null
+sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
+  "$_REPO/data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
+$K "BB64=\$(base64 -w 0 /tmp/baseline.json); EB64=\$(base64 -w 0 /tmp/error_baseline.json); \
+    for pod in \$(kubectl get pods -l app=otelcol-fingerprint --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}') \$(kubectl get pods -l app=otelcol-aggregator --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do \
+      kubectl exec \$pod -c otelcol -- sh -c \"echo '\$BB64' | base64 -d > /baseline/baseline.json && echo '\$EB64' | base64 -d > /baseline/error_baseline.json\" 2>/dev/null \
+      && echo \"  re-injected: \$pod\"; \
+    done" 2>/dev/null | grep -v '▀\|█\|▄' || true
+echo "  Baselines re-injected into fresh pods."
+
+# Check drift in aggregator logs (detection tier)
+DRIFT_COUNT=$($K "for p in \$(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[*].metadata.name}'); do kubectl logs \$p -c otelcol --since=10s 2>/dev/null; done" 2>/dev/null \
     | grep -cE 'trace drift detected|new trace fingerprint|new error signature|missing service' || echo "0")
 DRIFT_COUNT=$(echo "$DRIFT_COUNT" | tr -d ' \n')
 if [ "${DRIFT_COUNT:-0}" -eq 0 ] 2>/dev/null; then

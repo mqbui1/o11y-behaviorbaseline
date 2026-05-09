@@ -29,3 +29,4 @@ exporters:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/signalfxexporter v0.104.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sapmexporter v0.104.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/splunkhecexporter v0.104.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/loadbalancingexporter v0.104.0
