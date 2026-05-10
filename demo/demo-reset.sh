@@ -53,8 +53,6 @@ print(f'  Error baseline wiped (data/error_baseline.{e}.json)')
 # Stage error baseline on cluster (ConfigMap+inject happens after step 6)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "$_REPO/data/error_baseline.$ENV.json" "splunk@$EC2_IP:/tmp/error_baseline.json" 2>/dev/null
-# NOTE: /tmp/otel_baseline.json on EC2 is the OTel-format baseline (31 fingerprints, no_missing_service flags).
-# It is managed separately and must NOT be overwritten by this script.
 # Also wipe OTel in-memory error baseline on each pod so demo error signatures fire fresh
 # Two-tier topology: wipe both DaemonSet forwarders AND aggregator pods (detection runs there)
 $K "for pod in \$(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}') \$(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[*].metadata.name}'); do \
@@ -97,19 +95,15 @@ p.write_text(json.dumps(d, indent=2))
 print(f'  Trace baseline: {before} -> {len(d[\"fingerprints\"])} fingerprints')
 " "$_REPO"
 # Push both baselines to cluster (single ConfigMap update after all local cleanup)
-# Python trace baseline → /tmp/python_baseline.json (avoids clobbering OTel baseline)
 sshpass -p "$EC2_PASSWORD" scp -P 2222 -o StrictHostKeyChecking=no \
   "$_REPO/data/baseline.$ENV.json" "splunk@$EC2_IP:/tmp/python_baseline.json" 2>/dev/null
-# OTel baseline lives at /tmp/otel_baseline.json — always prefer it over the Python baseline.
-# Write a remote helper script to avoid quoting issues with inline SSH commands.
 sshpass -p "$EC2_PASSWORD" ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@$EC2_IP \
   'bash -s' 2>/dev/null <<'REMOTE'
-if [ -f /tmp/otel_baseline.json ]; then OTL=/tmp/otel_baseline.json; else OTL=/tmp/python_baseline.json; fi
 kubectl delete configmap behavioral-baseline --ignore-not-found
 kubectl create configmap behavioral-baseline \
-  --from-file=baseline.json="$OTL" \
+  --from-file=baseline.json=/tmp/python_baseline.json \
   --from-file=error_baseline.json=/tmp/error_baseline.json
-BB64=$(base64 -w 0 "$OTL")
+BB64=$(base64 -w 0 /tmp/python_baseline.json)
 EB64=$(base64 -w 0 /tmp/error_baseline.json)
 # Two-tier topology: inject into both DaemonSet forwarders AND aggregator pods
 for pod in $(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}') \

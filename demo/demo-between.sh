@@ -62,7 +62,7 @@ if [ "$DB_WAIT" = "true" ]; then
     echo "[3] Waiting 30s for DB reconnect..."
     $K "kubectl rollout status deployment/petclinic-db --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
     sleep 30
-    $K "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-gateway:82/api/vet/vets --max-time 8 | head -c 50" 2>/dev/null | grep -v '▀\|█\|▄' || true
+    $K "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-gateway:80/api/vet/vets --max-time 8 | head -c 50" 2>/dev/null | grep -v '▀\|█\|▄' || true
     echo "  (check above for JSON vets data)"
 fi
 
