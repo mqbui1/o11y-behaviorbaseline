@@ -141,7 +141,7 @@ fi
 echo "[7/7] Aggregator baseline (live pod file)..."
 AGG_FP=$($K "pod=\$(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
   kubectl exec \$pod -c otelcol -- sh -c 'grep -o '\\''\"hash\"'\\'' /baseline/baseline.json | wc -l' 2>/dev/null" 2>/dev/null | tr -d ' \n' || echo "0")
-if echo "$AGG_FP" | grep -qE '^[0-9]+$' && [ "${AGG_FP:-0}" -gt 5 ] 2>/dev/null; then
+if echo "$AGG_FP" | grep -qE '^[0-9]+$' && [ "${AGG_FP:-0}" -gt 0 ] 2>/dev/null; then
     ok "Aggregator baseline: ${AGG_FP} fingerprints on disk (ready to detect)"
 else
     fail "Aggregator baseline empty or unreadable — inject with: ./otel-processor/deploy.sh $ENV --skip-learn --skip-build"

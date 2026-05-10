@@ -28,10 +28,11 @@
 #   2. Seed the behavioral-baseline ConfigMap (delete+create, never apply)
 #   3. Create/update the baseline-sync-scripts ConfigMap
 #   4. Patch the OTel Operator Instrumentation CR so app pods send traces
-#      directly to otelcol-fingerprint (no Helm relay patch needed)
-#   5. Apply daemonset.yaml (DaemonSet, collector config, RBAC)
-#   6. Restart the DaemonSet so pods pick up all changes
-#   7. Inject baseline directly into running pods (no need to wait 60s reload)
+#      directly to otelcol-fingerprint; clean up stale direct env vars; restart apps
+#   5. Create otelcol-fingerprint ServiceAccount + deploy aggregator StatefulSet
+#   6. Apply daemonset.yaml (DaemonSet, collector config, RBAC)
+#   7. Restart the DaemonSet so pods pick up all changes
+#   8. Inject baseline directly into running pods (DaemonSet + aggregator)
 
 set -euo pipefail
 
@@ -155,31 +156,44 @@ else
   FP_HTTP="http://otelcol-fingerprint.default.svc.cluster.local:4318"
   CURRENT=$(kubectl get instrumentation "$INSTR_NAME" \
     -o jsonpath='{.spec.exporter.endpoint}' 2>/dev/null || echo "")
-  if [ "$CURRENT" = "$FP_GRPC" ]; then
-    echo "  Instrumentation CR '$INSTR_NAME' already points to otelcol-fingerprint — skipping"
-  else
+  if [ "$CURRENT" != "$FP_GRPC" ]; then
     kubectl patch instrumentation "$INSTR_NAME" --type=merge -p \
       "{\"spec\":{\"exporter\":{\"endpoint\":\"$FP_GRPC\"},\"java\":{\"env\":[{\"name\":\"OTEL_EXPORTER_OTLP_ENDPOINT\",\"value\":\"$FP_HTTP\"}]}}}"
     echo "  Patched '$INSTR_NAME': exporter → otelcol-fingerprint"
-    echo ""
-    echo "  NOTE: If the OTel Operator reconciles and resets the CR patch, use"
-    echo "  kubectl set env directly on each deployment instead (survives reconciliation):"
-    echo "    for svc in api-gateway customers-service vets-service visits-service admin-server; do"
-    echo "      kubectl set env deployment/\$svc OTEL_EXPORTER_OTLP_ENDPOINT=$FP_HTTP"
-    echo "    done"
-    echo ""
-    echo "  Restart app deployments to pick up the new endpoint:"
-    echo "    kubectl rollout restart deployment/<your-app-deployments>"
+  else
+    echo "  Instrumentation CR '$INSTR_NAME' already points to otelcol-fingerprint"
+  fi
+  # Always clean up any stale direct OTEL_EXPORTER_OTLP_ENDPOINT env vars on app deployments.
+  # If this var is set directly on the Deployment spec, the OTel operator treats the pod as
+  # "already instrumented" and skips init container injection regardless of the CR endpoint.
+  APP_DEPLOYMENTS=$(kubectl get deployments -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
+    | tr ' ' '\n' | grep -vE 'otelcol|splunk|config-server|discovery-server|petclinic-db|petclinic-load' || true)
+  if [ -n "$APP_DEPLOYMENTS" ]; then
+    NEEDS_RESTART=false
+    for svc in $APP_DEPLOYMENTS; do
+      HAS_VAR=$(kubectl get deployment "$svc" -o jsonpath='{.spec.template.spec.containers[*].env[*].name}' 2>/dev/null | tr ' ' '\n' | grep -c OTEL_EXPORTER_OTLP_ENDPOINT || true)
+      if [ "${HAS_VAR:-0}" -gt 0 ]; then
+        kubectl set env deployment/"$svc" OTEL_EXPORTER_OTLP_ENDPOINT- 2>/dev/null || true
+        echo "  Removed stale OTEL_EXPORTER_OTLP_ENDPOINT from $svc"
+        NEEDS_RESTART=true
+      fi
+    done
+    if [ "$NEEDS_RESTART" = "true" ]; then
+      echo "  Restarting app deployments so OTel operator re-injects..."
+      for svc in $APP_DEPLOYMENTS; do
+        kubectl rollout restart deployment/"$svc" 2>/dev/null || true
+      done
+    fi
   fi
 fi
 echo ""
 
 # ── Step 5: Deploy aggregator StatefulSet (must be ready before DaemonSet) ────
 echo "--- Step 5: Deploy aggregator StatefulSet ---"
-# Import aggregator image into k3d if needed (same image as DaemonSet)
-if [ -n "$K3D_CLUSTER" ] && [ "$SKIP_BUILD" = "false" ]; then
-  echo "  Image already imported in Step 1 — aggregator uses same image"
-fi
+# The aggregator StatefulSet uses serviceAccountName: otelcol-fingerprint.
+# That SA is defined in daemonset.yaml but we need it BEFORE applying aggregator.
+# Create it idempotently here so the StatefulSet controller can start pods.
+kubectl create serviceaccount otelcol-fingerprint --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f "$K8S_DIR/aggregator.yaml"
 echo "  Waiting for aggregator pods to be ready..."
 kubectl rollout status statefulset/otelcol-aggregator --timeout=120s
