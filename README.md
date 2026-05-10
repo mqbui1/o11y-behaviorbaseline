@@ -17,7 +17,12 @@ Fully generic — no hardcoded service names. Everything is auto-discovered from
 flowchart TD
     APP["🖥️  Your Application\nservice-a · service-b · service-c · ..."]
 
-    subgraph DAEMONSET["OTel Collector DaemonSet  (one pod per node)"]
+    subgraph DAEMONSET["OTel Collector DaemonSet  (one pod per node — pure forwarder)"]
+        direction TB
+        LB["⚖️  loadbalancingexporter\n────────────────────────────────\nRoutes spans by TraceID consistent hash\nto aggregator StatefulSet pods.\nEnsures all spans for a trace land on\nthe same aggregator pod (no split-trace).\nRe-resolves DNS every 10s."]
+    end
+
+    subgraph AGGREGATOR["OTel Collector StatefulSet  (aggregator — 2 replicas)"]
         direction TB
         FP["⚙️  fingerprintprocessor  (Go)\n─────────────────────────────\n1. Buffer spans per traceId · 10s window\n2. Build trace fingerprint  (edge hash)\n   Build error signatures  (service+type+op hash)\n3. Compare against baseline\n\nMATCH → silent pass-through\nDRIFT → emit event  (~10s latency)\nNEW × 10 → auto-promote into baseline"]
         SIDECAR["🔄  baseline-sync sidecar\n─────────────────────\npoll SignalFlow every 30s\non trace.fingerprint.promoted:\n  PATCH behavioral-baseline\n  ConfigMap via K8s API"]
@@ -37,7 +42,7 @@ flowchart TD
 
     subgraph AGENTS["Python Agents  (Kubernetes Deployments)"]
         direction LR
-        BA["🧠  baseline-agent\n───────────────────\nevery 2h: learn + promote\nevery 6h: onboard new envs\nevery 2m: anomaly rate poll\n\npost-learn:\nnoise pruning · coverage audit\nadaptive thresholds · runbook gen\nself-healing baseline\n\npushes to ConfigMap +\ninjects into DaemonSet pods"]
+        BA["🧠  baseline-agent\n───────────────────\nevery 2h: learn + promote\nevery 6h: onboard new envs\nevery 2m: anomaly rate poll\n\npost-learn:\nnoise pruning · coverage audit\nadaptive thresholds · runbook gen\nself-healing baseline\n\npushes to ConfigMap +\ninjects into all pods"]
         TA["🚨  triage-agent\n───────────────────\npolls every 60s\ninline correlate.py\n  Tier 1 + 2 + 3 join\nrecovery detection\ndedup  (30m suppression)\nLLM triage via Claude\n  (AWS Bedrock)"]
     end
 
@@ -46,7 +51,8 @@ flowchart TD
     OUT3["📈  Splunk Dashboard"]
 
     APP -- "OTLP spans" --> DAEMONSET
-    DAEMONSET -- "all spans forwarded" --> APM
+    DAEMONSET -- "TraceID-routed spans\n(consistent hash)" --> AGGREGATOR
+    AGGREGATOR -- "all spans forwarded" --> APM
     FP -- "trace.path.drift\nerror.signature.drift" --> EVENTS
     SIDECAR -- "ConfigMap patch" --> CM
     CM -- "seeded by" --> BA
@@ -501,11 +507,20 @@ The custom OTel Collector processor in `otel-processor/` is the detection layer 
 App emits spans
       │
       ▼
-otelcol-fingerprint (DaemonSet)
+otelcol-fingerprint (DaemonSet — one pod per node, pure forwarder)
+      │
+      ├── loadbalancingexporter
+      │     ├── routes spans by TraceID consistent hash
+      │     ├── resolves aggregator backends via headless Service DNS
+      │     └── all spans for a trace land on the same aggregator pod
+      │
+      ▼
+otelcol-aggregator (StatefulSet — 2 replicas)
       │
       ├── fingerprintprocessor (custom Go processor)
       │     ├── buffers spans per traceId (10s tail window)
       │     ├── on flush: compute trace fingerprint + error signatures
+      │     │     (receives COMPLETE trace — no split-trace problem)
       │     ├── compare against baseline (ConfigMap-mounted JSON)
       │     ├── MATCH  → silent, pass through
       │     └── DRIFT  → emit event to Splunk ingest immediately (~10s latency)
@@ -623,76 +638,73 @@ otel-processor/
 ├── collector-builder/
 │   └── manifest.yaml         ← ocb manifest (compiles custom collector binary)
 ├── k8s/
-│   ├── daemonset.yaml        ← DaemonSet + ConfigMap + Service + ServiceAccount + RBAC
+│   ├── daemonset.yaml        ← DaemonSet (forwarder) + ConfigMap + Service + ServiceAccount + RBAC
+│   ├── aggregator.yaml       ← StatefulSet (fingerprintprocessor) + headless Service + ConfigMap
 │   ├── baseline-sync-sidecar.py  ← sidecar script (embedded into baseline-sync-scripts ConfigMap)
 │   └── otelcol-config.yaml   ← collector pipeline config (reference)
 ├── Dockerfile                ← multi-stage: ocb build + alpine runtime
+├── deploy.sh                 ← full deploy (build → ConfigMap → aggregator → DaemonSet → inject)
 └── sync-baseline.sh          ← push local baseline JSON files into behavioral-baseline ConfigMap
 ```
 
+### Two-tier topology
+
+The processor runs in a two-tier topology to solve the **split-trace problem**: in a DaemonSet deployment, spans for the same trace can arrive at different collector pods. Fingerprinting an incomplete span set produces a wrong hash and false-positive alerts.
+
+```
+App pods  →  otelcol-fingerprint DaemonSet  →  otelcol-aggregator StatefulSet  →  Splunk APM
+              (one per node, pure forwarder)     (2 replicas, runs fingerprintprocessor)
+              loadbalancingexporter routes        receives COMPLETE traces per pod
+              by TraceID consistent hash          (no split-trace problem)
+```
+
+The DaemonSet is a **pure forwarder** — it receives spans from app pods on the same node and routes them to the aggregator via `loadbalancingexporter` using consistent TraceID hashing. The aggregator StatefulSet runs the `fingerprintprocessor` and sees complete traces.
+
 ### Deploy
 
-**Prerequisites:** Docker, kubectl, a k8s cluster with a local or remote registry.
+**Prerequisites:** Docker, kubectl pointing at the cluster, `sshpass` for remote operations.
 
-**Step 1 — Learn baseline**
-
-```bash
-# Standard (cluster with 30+ min of traffic):
-python3 core/trace_fingerprint.py --environment <env> learn --window-minutes 30
-python3 core/error_fingerprint.py --environment <env> learn --window-minutes 30
-
-# Cold-start (fresh cluster, <30 min of traffic):
-python3 core/trace_fingerprint.py --environment <env> learn --bootstrap --window-minutes 30
-```
-
-**Step 2 — Build and push the image (on the cluster node)**
+**Recommended: run `deploy.sh` on the EC2/cluster node**
 
 ```bash
-# Copy source to EC2 and build
-scp -P 2222 -r otel-processor/ splunk@<ec2-ip>:/home/splunk/
-ssh -p 2222 splunk@<ec2-ip> "cd /home/splunk/otel-processor && \
-  docker build -t localhost:9999/otelcol-fingerprint:latest . && \
-  docker push localhost:9999/otelcol-fingerprint:latest"
+# Copy repo to EC2 (first time only)
+scp -P 2222 -r . splunk@<ec2-ip>:~/o11y-behaviorbaseline/
+
+# SSH to EC2 and deploy
+ssh -p 2222 splunk@<ec2-ip>
+cd ~/o11y-behaviorbaseline
+
+# k3d cluster (no registry — uses k3d image import):
+K3D_CLUSTER=<cluster-name> ./otel-processor/deploy.sh <environment>
+
+# Cluster with a registry:
+REGISTRY=localhost:9999 ./otel-processor/deploy.sh <environment>
+
+# Skip baseline learn (use existing data/baseline.<env>.json):
+K3D_CLUSTER=<cluster-name> ./otel-processor/deploy.sh <environment> --skip-learn
+
+# Skip image build (redeploy config changes only):
+K3D_CLUSTER=<cluster-name> ./otel-processor/deploy.sh <environment> --skip-build
 ```
 
-**Step 3 — Seed ConfigMap and deploy**
+`deploy.sh` handles all steps automatically:
+1. Learn + promote baseline from live APM traffic
+2. Build the `otelcol-fingerprint` image; import into k3d or push to registry
+3. Create/update the `behavioral-baseline` ConfigMap (delete+create, not apply)
+4. Create/update the `baseline-sync-scripts` ConfigMap
+5. Create the `otelcol-fingerprint` ServiceAccount (idempotent — needed by aggregator before DaemonSet exists)
+6. Deploy the `otelcol-aggregator` StatefulSet and wait for it to be ready
+7. Apply `daemonset.yaml` (DaemonSet + Service + RBAC)
+8. Restart the DaemonSet pods
+9. Patch the OTel Operator `Instrumentation` CR to point at `otelcol-fingerprint`; restart app deployments so the Java agent re-injects with the new endpoint
+10. Inject the baseline directly into all running pods (active immediately, no 60s ConfigMap reload wait)
 
-```bash
-# Push baseline files to EC2
-scp -P 2222 data/baseline.<env>.json splunk@<ec2-ip>:/tmp/baseline.json
-scp -P 2222 data/error_baseline.<env>.json splunk@<ec2-ip>:/tmp/error_baseline.json
+**Key gotchas fixed in deploy.sh (manual steps that were previously easy to miss):**
 
-# Create ConfigMap (delete+create, not apply — apply ignores data updates)
-kubectl delete configmap behavioral-baseline --ignore-not-found
-kubectl create configmap behavioral-baseline \
-  --from-file=baseline.json=/tmp/baseline.json \
-  --from-file=error_baseline.json=/tmp/error_baseline.json
-
-kubectl apply -f otel-processor/k8s/daemonset.yaml
-kubectl rollout restart daemonset/otelcol-fingerprint
-
-# Inject baseline directly into running pods (active immediately, no 60s wait)
-B64=$(base64 -w 0 /tmp/baseline.json)
-for pod in $(kubectl get pods -l app=otelcol-fingerprint -o jsonpath='{.items[*].metadata.name}'); do
-  kubectl exec $pod -c otelcol -- sh -c "echo '$B64' | base64 -d > /baseline/baseline.json"
-done
-```
-
-**Step 4 — Point app traces at the processor (via OTel Operator)**
-
-The OTel Operator's `Instrumentation` CR controls where auto-instrumented app pods send traces. Patch it to point at `otelcol-fingerprint` so traces flow directly through the fingerprint processor before reaching Splunk APM — no Helm relay patch needed:
-
-```bash
-kubectl patch instrumentation splunk-otel-collector --type=merge -p \
-  '{"spec":{"exporter":{"endpoint":"http://otelcol-fingerprint.default.svc.cluster.local:4317"},
-    "java":{"env":[{"name":"OTEL_EXPORTER_OTLP_ENDPOINT",
-      "value":"http://otelcol-fingerprint.default.svc.cluster.local:4318"}]}}}'
-
-# Restart app pods so the webhook re-injects with the updated endpoint
-kubectl rollout restart deployment/<your-app-deployments>
-```
-
-`deploy.sh` does this automatically. If the cluster uses a different auto-instrumentation mechanism (e.g. manual `OTEL_EXPORTER_OTLP_ENDPOINT` env vars on deployments), set those to point at `otelcol-fingerprint:4317` (gRPC) or `:4318` (HTTP) instead.
+- `kubectl create serviceaccount otelcol-fingerprint` must run **before** `kubectl apply -f aggregator.yaml`. The aggregator StatefulSet uses this SA; if it doesn't exist the StatefulSet controller cannot create pods and will silently retry forever.
+- Use `kubectl delete + create` for ConfigMaps, never `kubectl apply` — apply uses the last-applied-configuration annotation and silently ignores data updates.
+- After patching the Instrumentation CR, remove any `OTEL_EXPORTER_OTLP_ENDPOINT` env vars set directly on deployments before restarting. If the env var exists on the deployment spec, the OTel operator treats the pod as "already instrumented" and skips init container injection.
+- For k3d clusters: build the image without a registry prefix (`otelcol-fingerprint:latest`, not `localhost:9999/...`) and use `imagePullPolicy: Never` — k3d has no local registry by default.
 
 ### Keeping the baseline in sync
 
