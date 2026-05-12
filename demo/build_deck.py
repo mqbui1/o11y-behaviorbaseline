@@ -193,7 +193,7 @@ def slide_problem(prs):
     add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
 
     add_textbox(s, Inches(0.45), Inches(1.0), Inches(9.2), Inches(0.45),
-                "APM AutoDetect covers error rate, latency, and request rate. But some failures leave no metric fingerprint.",
+                "Standard metric alerting covers error rate, latency, and request rate. But some failures leave no metric fingerprint.",
                 font_size=13, color=RGBColor(0xCC, 0xDD, 0xEE))
 
     # 6 problem boxes (2 rows × 3)
@@ -335,8 +335,8 @@ def slide_solution_overview(prs):
     add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
 
     add_textbox(s, Inches(0.45), Inches(1.0), Inches(9.2), Inches(0.42),
-                "Augments Splunk APM AutoDetect with a structural/behavioral detection layer. "
-                "No YAML. No alert rules. No thresholds to configure.",
+                "An independent behavioral detection layer that runs inside the OTel Collector — "
+                "no alert rules, no thresholds, no YAML.",
                 font_size=13, color=RGBColor(0xCC, 0xDD, 0xEE))
 
     # Left column — what it learns
@@ -424,61 +424,72 @@ def slide_architecture(prs):
 
     # Bottom note
     add_textbox(s, Inches(0.45), Inches(4.72), Inches(9.2), Inches(0.35),
-                "Splunk APM AutoDetect covers Tier 1b/3/4 (error rate, latency, request rate) natively "
-                "for all APM environments — no provisioning needed.",
+                "The OTel processor owns all behavioral signals — structural, metric, and error. "
+                "Splunk APM receives the forwarded spans and provides the UI, dashboards, and storage.",
                 font_size=10, color=RGBColor(0x99, 0xBB, 0xCC))
 
     footer(s)
     return s
 
 
-def slide_autodetect_relationship(prs):
-    """Slide 5 — Relationship with APM AutoDetect."""
+def slide_detection_layers(prs):
+    """Slide 5 — Two detection layers: OTel processor vs. Splunk APM."""
     s = blank_slide(prs)
     fill_bg(s, NAVY)
     add_rect(s, Inches(0), Inches(0), Inches(0.18), H, CYAN)
 
     add_textbox(s, Inches(0.45), Inches(0.25), Inches(9), Inches(0.55),
-                "Built on Top of APM AutoDetect",
+                "Two Independent Detection Layers",
                 font_size=26, bold=True, color=CYAN)
     add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
 
-    # Two columns
-    # Left: AutoDetect (what it already covers)
-    add_rect(s, Inches(0.45), Inches(1.05), Inches(4.3), Inches(3.85), DKGRAY)
-    add_rect(s, Inches(0.45), Inches(1.05), Inches(4.3), Inches(0.06), MGRAY)
-    add_textbox(s, Inches(0.57), Inches(1.13), Inches(4.05), Inches(0.45),
-                "Splunk APM AutoDetect  (always on, built-in)",
-                font_size=13, bold=True, color=RGBColor(0xCC, 0xDD, 0xEE))
-    ad_items = [
-        "  \u2022  Error rate spike per service",
-        "  \u2022  p99 latency drift per service",
-        "  \u2022  Request rate anomaly on ingress",
-        "",
-        "  Fires automatically for every APM environment.",
-        "  No provisioning, no configuration required.",
-    ]
-    add_bullet_box(s, Inches(0.57), Inches(1.65), Inches(4.05), Inches(3.0),
-                   ad_items, font_size=12, color=RGBColor(0xBB, 0xCC, 0xDD))
+    add_textbox(s, Inches(0.45), Inches(0.97), Inches(9.2), Inches(0.38),
+                "The OTel processor detects everything locally — structural, metric, and error signals — in ~10s. "
+                "Splunk APM is the telemetry backend: it receives forwarded spans, stores traces, and provides the UI.",
+                font_size=11.5, color=RGBColor(0xCC, 0xDD, 0xEE))
 
-    # Right: Behavioral Baseline (what it adds)
-    add_rect(s, Inches(4.9), Inches(1.05), Inches(4.75), Inches(3.85), DKGRAY)
-    add_rect(s, Inches(4.9), Inches(1.05), Inches(4.75), Inches(0.06), CYAN)
-    add_textbox(s, Inches(5.02), Inches(1.13), Inches(4.5), Inches(0.45),
-                "Behavioral Anomaly Detection adds on top",
+    # Left: OTel Processor (this framework — owns all detection)
+    add_rect(s, Inches(0.45), Inches(1.42), Inches(4.55), Inches(3.65), DKGRAY)
+    add_rect(s, Inches(0.45), Inches(1.42), Inches(4.55), Inches(0.06), CYAN)
+    add_textbox(s, Inches(0.57), Inches(1.5), Inches(4.3), Inches(0.45),
+                "OTel Collector Processor  (this framework)",
                 font_size=13, bold=True, color=CYAN)
-    bb_items = [
-        "  \u2022  Structural trace path drift",
-        "  \u2022  Service missing from traces",
-        "  \u2022  New error signature, first occurrence",
-        "  \u2022  Cross-tier correlation (Tier 1 + 2 + 3)",
-        "  \u2022  Deployment-aware severity downgrade",
-        "  \u2022  Auto-promotion of new patterns",
-        "  \u2022  Self-healing baseline after incidents",
-        "  \u2022  Claude-generated triage + runbook",
+    otel_items = [
+        "  \u2022  MISSING_SERVICE — service absent from traces",
+        "  \u2022  NEW_FINGERPRINT — unknown call path",
+        "  \u2022  NEW_ERROR_SIGNATURE — first occurrence",
+        "  \u2022  LATENCY_ANOMALY — z-score vs per-op baseline",
+        "  \u2022  ERROR_RATE_ANOMALY — rate spike vs baseline",
+        "  \u2022  SPAN_COUNT_DROP — silent failure / short-circuit",
+        "  \u2022  SPAN_COUNT_SPIKE — retry storm / fan-out",
+        "  \u2022  DB query: new template or slow query (z-score)",
+        "",
+        "  Fires in ~10s — no poll cycle, no indexing wait.",
+        "  All baselines learned from live traffic.",
     ]
-    add_bullet_box(s, Inches(5.02), Inches(1.65), Inches(4.5), Inches(3.0),
-                   bb_items, font_size=12, color=WHITE)
+    add_bullet_box(s, Inches(0.57), Inches(2.02), Inches(4.3), Inches(2.9),
+                   otel_items, font_size=11, color=WHITE)
+
+    # Right: Splunk APM (telemetry backend + UI)
+    add_rect(s, Inches(5.12), Inches(1.42), Inches(4.53), Inches(3.65), DKGRAY)
+    add_rect(s, Inches(5.12), Inches(1.42), Inches(4.53), Inches(0.06), MGRAY)
+    add_textbox(s, Inches(5.24), Inches(1.5), Inches(4.28), Inches(0.45),
+                "Splunk Observability Cloud  (backend + UI)",
+                font_size=13, bold=True, color=RGBColor(0xCC, 0xDD, 0xEE))
+    splunk_items = [
+        "  \u2022  Receives all forwarded spans (unchanged)",
+        "  \u2022  Trace storage, search, and UI",
+        "  \u2022  Service Map topology graph",
+        "  \u2022  Dashboards and detector alerts",
+        "  \u2022  Custom events from the processor",
+        "       (trace.path.drift, error.signature.drift)",
+        "",
+        "  The framework does NOT depend on APM\n"
+        "  AutoDetect to fire — it owns its own\n"
+        "  metric and structural detection.",
+    ]
+    add_bullet_box(s, Inches(5.24), Inches(2.02), Inches(4.28), Inches(2.9),
+                   splunk_items, font_size=11, color=RGBColor(0xBB, 0xCC, 0xDD))
 
     footer(s)
     return s
@@ -496,28 +507,28 @@ def slide_tiers(prs):
     add_rect(s, Inches(0.45), Inches(0.88), Inches(9.2), Inches(0.04), CYAN)
 
     add_textbox(s, Inches(0.45), Inches(1.0), Inches(9.2), Inches(0.38),
-                "Every anomaly event is tagged with the tier that fired it. When two or more tiers fire on the same service, "
-                "correlate.py emits a single high-confidence correlated event.",
+                "All detection runs inside the OTel Collector processor — structural, metric, and error signals in ~10s. "
+                "correlate.py joins multi-tier signals into high-confidence correlated alerts.",
                 font_size=12, color=RGBColor(0xCC, 0xDD, 0xEE))
 
     # Tier boxes
     tiers = [
-        ("Tier 1b / 3 / 4",
-         "APM AutoDetect\n(built-in, always on)",
-         "Error rate spike\np99 latency drift\nRequest rate anomaly\n\nFires on metrics.\nNo config required.",
-         RGBColor(0x55, 0x77, 0x99),   # muted — not this framework
-         RGBColor(0xAA, 0xBB, 0xCC)),
+        ("Tier 1",
+         "Performance Anomalies\n(OTel processor — metric)",
+         "LATENCY_ANOMALY\n  \u2192 z-score vs per-op baseline\n\nERROR_RATE_ANOMALY\n  \u2192 rate spike vs baseline\n\nSPAN_COUNT_DROP\n  \u2192 silent failure, short-circuit\n\nSPAN_COUNT_SPIKE\n  \u2192 retry storm, fan-out",
+         RGBColor(0x00, 0x8C, 0xB0),   # teal — OTel metric signals
+         WHITE),
         ("Tier 2",
-         "Trace Path + Span Count + DB\n(trace_fingerprint.py)",
-         "MISSING_SERVICE\n  \u2192 expected service absent from traces\n\nNEW_FINGERPRINT\n  \u2192 unknown call path appeared\n\nSPAN_COUNT_DROP\n  \u2192 silent failure, pipeline collapse\n\nSPAN_COUNT_SPIKE\n  \u2192 retry storm, fan-out explosion\n\nDB: new template or slow query",
+         "Structural Drift\n(OTel processor — structural)",
+         "MISSING_SERVICE\n  \u2192 expected service absent\n\nNEW_FINGERPRINT\n  \u2192 unknown call path appeared\n\nDB: new template or\n  slow query (z-score)",
          CYAN, WHITE),
         ("Tier 3",
-         "Error Signature Drift\n(error_fingerprint.py)",
+         "Error Signature Drift\n(OTel processor — error)",
          "NEW_ERROR_SIGNATURE\n  \u2192 first-ever occurrence of\n     a new exception type\n\nSIGNATURE_VANISHED\n  \u2192 known error pattern gone\n     (service may be silent)",
          CYAN, WHITE),
         ("Correlation",
          "Cross-Tier Join\n(correlate.py)",
-         "TIER2_TIER3  \u2192 Major\n  trace + error on same service\n\nTIER1_TIER2 / TIER1_TIER3\n  \u2192 Major\n\nMULTI_TIER  \u2192 Critical\n  all 3 tiers on same service\n  = highest confidence",
+         "TIER1_TIER2  \u2192 Major\n  metric + structural\n\nTIER2_TIER3  \u2192 Major\n  structural + error\n\nMULTI_TIER  \u2192 Critical\n  all 3 tiers on same service\n  = highest confidence",
          RGBColor(0xFF, 0xA5, 0x00), WHITE),  # amber — the output
     ]
 
@@ -789,8 +800,8 @@ def slide_next_steps(prs):
     steps = [
         ("Native Platform Integration",
          "Behavioral baseline learning built into\nAPM onboarding — a toggle, not a script.\n\n"
-         "  \u2022  Detections surface alongside AutoDetect\n"
-         "       alerts in the Splunk UI\n"
+         "  \u2022  Detections surface natively in the\n"
+         "       Splunk Observability UI\n"
          "  \u2022  Same notification routing (Splunk On-Call,\n"
          "       Slack, webhook)\n"
          "  \u2022  Same muting, SLO wiring, and RBAC\n"
@@ -804,10 +815,9 @@ def slide_next_steps(prs):
          "  \u2022  Generated runbook linked from the\n"
          "       alert detail view"),
         ("Platform Differentiation",
-         "AutoDetect covers the metric layer.\n"
-         "Every vendor covers the metric layer.\n\n"
-         "  \u2022  Structural + behavioral detection catches\n"
-         "       failures that leave no metric fingerprint\n"
+         "Every APM vendor covers error rate, latency,\nand request rate. That\u2019s table stakes.\n\n"
+         "  \u2022  Structural drift + silent failure detection\n"
+         "       catches what metrics cannot surface\n"
          "  \u2022  First-occurrence detection — no threshold\n"
          "       to tune, fires on first event\n"
          "  \u2022  Self-healing baseline — zero ops overhead\n"
@@ -859,7 +869,7 @@ def build():
     slide_tiers(prs)
     slide_solution_overview(prs)
     slide_architecture(prs)
-    slide_autodetect_relationship(prs)
+    slide_detection_layers(prs)
     slide_key_capabilities(prs)
     slide_petclinic_topology(prs)
     slide_demo_overview(prs)
