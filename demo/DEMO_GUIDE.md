@@ -14,6 +14,8 @@ The framework emits four distinct anomaly signals. Each demo triggers one or mor
 | `AUTODETECT_TIER1` | Splunk APM's built-in AutoDetect fired a metric-based alert (error rate spike, latency spike, request drop). This is the **native APM signal** — the framework correlates it with its own structural signals. | Demo 5 (when AutoDetect catches up) |
 | `LATENCY_ANOMALY` | Mean latency for a service/operation exceeded 3 standard deviations above its learned baseline. Fires without any threshold configuration — baseline is learned from the first 30 traces. Baseline adapts per hour-of-day × day-of-week (168 seasonal slots). | Demo 6, 9, 10 |
 | `ERROR_RATE_ANOMALY` | The fraction of error spans for a service/operation exceeded 5% over a rolling window. Complements NEW_ERROR_SIGNATURE — fires on sustained rate, not just first occurrence. | Demo 7, 8 |
+| `SPAN_COUNT_DROP` | A trace has **far fewer spans** than the learned baseline range — DB calls, downstream hops, or method instrumentation silently absent. Catches silent failures that produce no error signal: connection pool exhaustion short-circuiting retries, pipeline collapse, work items dropped without exception. | Demo 11 |
+| `SPAN_COUNT_SPIKE` | A trace has **far more spans** than the learned baseline max — retry storm, fan-out explosion, or loop that shouldn't run. Catches retry patterns that don't change the call graph structure and produce no new error type. | Demo 12 |
 | `INFRA_EVENT` | Pod-level Kubernetes warning event (OOMKilling, CrashLoopBackOff, BackOff, Evicted) correlated to a service by pod name. Surfaced in the topology UI alongside trace anomalies. Not a Splunk signal — sourced directly from `kubectl get events`. | Demo 10 (topology UI) |
 
 ### Correlation types
@@ -1375,8 +1377,62 @@ The service is still listed in the panel — it's dimmed, not hidden — with a 
 | 7 Error rate | `error-rate-spike` | ERROR_RATE_ANOMALY + NEW_ERROR_SIGNATURE | User impact, red-orange node state, INCIDENT badge |
 | 8 Combined | `combined-metric` | MISSING_SERVICE + NEW_ERROR_SIGNATURE + ERROR_RATE_ANOMALY | All features together |
 | 9 Slow DB | `slow-db` | LATENCY_ANOMALY × 4 (shared dep) | Root cause confidence (topology-based, no structural drift) |
-| 10 DB crash | `oom-crash` | LATENCY_ANOMALY → MISSING_SERVICE → NEW_ERROR_SIGNATURE | Time-ordered causality, degradation before crash |
+| 10 OOM crash | `oom-crash` | LATENCY_ANOMALY → MISSING_SERVICE → NEW_ERROR_SIGNATURE | Time-ordered causality, degradation before crash |
+| 11 Span drop | `span-count-drop` | SPAN_COUNT_DROP | Silent failure — no errors, no latency change, span count drops 4× below baseline |
+| 12 Span spike | `span-count-spike` | SPAN_COUNT_SPIKE | Retry storm — no new error type, span count 4.8× above baseline max |
 | — (inject) | `oom-latency` | LATENCY_ANOMALY | Infra event correlation (OOMKill + latency on same node) |
+
+---
+
+### Feature 7: Span Count Distribution Anomaly
+
+**Demo 11 — Span Drop (button `11 Span drop`):** visits-service normally produces 12–18 spans per trace (HTTP handler + DB queries + method instrumentation). A connection pool exhaustion event causes DB calls to short-circuit — each trace completes with only 3 spans. No error is thrown (the pool timeout is silently caught), no latency change (the path exits faster), no MISSING_SERVICE (the service is still reachable). The framework fires `SPAN_COUNT_DROP` because 3 < baseline_min × 0.5.
+
+**Demo 12 — Span Spike (button `12 Span spike`):** customers-service normally produces 8–12 spans per trace. A `ConectTimeout` causes the HTTP client to retry 7 times before succeeding — each trace now contains 58 spans. No new error type (same timeout the baseline has seen), no MISSING_SERVICE. `SPAN_COUNT_SPIKE` fires because 58 > baseline_max × 2.
+
+**Story for both:**
+> *"Two failure modes that defeat every other signal. The span drop: DB calls vanish from traces but the service is healthy from APM's perspective — no errors, no latency spike. The span spike: a retry storm that produces no new error signature because the error type was already in the baseline. The only signal is span count — learned from live traffic, no threshold configuration."*
+
+**How the baseline is built:**
+- During `learn`, the framework records `span_count_min` and `span_count_max` per fingerprint and aggregates them per root operation.
+- DROP fires when `current_span_count < root_op_min × SPAN_COUNT_DROP_THRESHOLD` (default 0.5) — require at least `SPAN_COUNT_DROP_MIN_BASELINE` (default 4) occurrences before trusting the min.
+- SPIKE fires when `current_span_count > root_op_max × SPAN_COUNT_SPIKE_MULTIPLIER` (default 2.0).
+- Both thresholds adapt automatically via `adaptive_thresholds.py` if false positive rate is high.
+
+**Key talking points:**
+- *"This is the silent failure pattern — no error thrown, no timeout logged, no metric threshold crossed. The only observable difference is span count. That requires a distribution baseline, not a point threshold."*
+- *"And the retry storm: the error type was already known so NEW_ERROR_SIGNATURE doesn't fire. The only signal is '7 retries per request instead of 1'. Span count catches it."*
+- *"Both thresholds adapt. If visits-service legitimately varies between 3 and 18 spans depending on whether a pet has visits, the framework learns that range and doesn't fire on the low end."*
+
+**Inject via CLI** (no topology UI needed):
+```bash
+# Span count drop — visits-service
+curl -s -X POST http://localhost:8080/api/inject \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "anomaly_type": "SPAN_COUNT_DROP",
+    "service": "visits-service",
+    "root_op": "api-gateway:GET /owners/{ownerId}/pets/{petId}/visits",
+    "span_count": 3,
+    "span_count_baseline_min": 12,
+    "span_count_baseline_max": 18,
+    "message": "Span count drop: 3 spans (baseline min 12) — DB calls silently missing"
+  }'
+
+# Span count spike — customers-service
+curl -s -X POST http://localhost:8080/api/inject \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "anomaly_type": "SPAN_COUNT_SPIKE",
+    "service": "customers-service",
+    "root_op": "api-gateway:GET /owners",
+    "span_count": 58,
+    "span_count_baseline_max": 12,
+    "message": "Span count spike: 58 spans (baseline max 12, ×4.8) — retry storm"
+  }'
+```
+
+---
 
 **Inject infra events manually** (no cluster needed — combine with any scenario button):
 ```bash

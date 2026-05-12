@@ -117,6 +117,7 @@ Anomaly type meanings:
                            Could be a new code path, a deployment, or a transient issue.
   NEW_SERVICE            — a new service appeared in traces that wasn't there at baseline time.
   SPAN_COUNT_SPIKE       — a trace has far more spans than usual (extra hops, retry storms).
+  SPAN_COUNT_DROP        — a trace has far fewer spans than usual (pipeline collapse, silent failure, short-circuit).
   NEW_ERROR_SIGNATURE    — an error type/operation combination never seen before just appeared.
                            Most likely cause: a new failure mode — downstream outage, bad deploy, or new code path throwing.
   SIGNATURE_VANISHED     — a previously dominant error signature disappeared entirely.

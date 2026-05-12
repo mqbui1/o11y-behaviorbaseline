@@ -270,7 +270,9 @@ _ANOMALY_WEIGHTS = {
     "MISSING_SERVICE":    1.0,
     "ERROR_RATE_ANOMALY": 0.85,
     "NEW_ERROR_SIGNATURE":0.7,
+    "SPAN_COUNT_DROP":    0.65,
     "LATENCY_ANOMALY":    0.5,
+    "SPAN_COUNT_SPIKE":   0.45,
     "NEW_FINGERPRINT":    0.3,
 }
 
@@ -1093,6 +1095,82 @@ def _make_app(environment: str):
     async def _get_problems():
         return JSONResponse({"problems": list(_problems.values())})
 
+    @app.post("/api/rca")
+    async def _rca():
+        """Run Claude/Bedrock RCA against current active anomalies.
+
+        Builds a watch_result dict from _active_anomalies and calls agent.reason()
+        directly (bypasses stdin/stdout, reuses hypothesis engine + topology context).
+        Returns the structured triage plan as JSON.
+        """
+        import asyncio
+        from fastapi import HTTPException
+
+        affected = {k: v for k, v in _active_anomalies.items() if v}
+        if not affected:
+            return JSONResponse({"ok": False, "error": "No active anomalies to triage"}, status_code=400)
+
+        # Build anomaly list deduped by hash
+        anomalies = []
+        seen_hashes: set[str] = set()
+        for svc, anom_list in affected.items():
+            for a in anom_list:
+                h = a.get("hash", f"{a.get('anomaly_type')}:{svc}")
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+                anomalies.append(a)
+
+        watch_result = {
+            "anomalies":   anomalies,
+            "environment": environment,
+            "window":      {"minutes": 5},
+            "summary":     {"total": len(anomalies), "services": list(affected.keys())},
+        }
+
+        # Import agent lazily (adds repo root to sys.path so its deps resolve)
+        import importlib
+        if str(_REPO) not in sys.path:
+            sys.path.insert(0, str(_REPO))
+        try:
+            agent = importlib.import_module("agent")
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": f"Cannot import agent.py: {e}"}, status_code=500)
+
+        # Inject topology context (mirrors what agent.main() does)
+        try:
+            topo_ctx = agent._build_topology_context(environment)
+            if topo_ctx:
+                watch_result["topology_context"] = topo_ctx
+        except Exception:
+            pass
+
+        # Inject hypothesis context
+        try:
+            hyp_ctx = agent._build_hypothesis_context(anomalies, environment)
+            if hyp_ctx:
+                watch_result["hypothesis_context"] = hyp_ctx
+        except Exception:
+            pass
+
+        # Call Claude in a thread (boto3 is synchronous)
+        loop = asyncio.get_event_loop()
+        try:
+            plan = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: agent.reason(watch_result, env=environment)),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse({"ok": False, "error": "Claude triage timed out (60s)"}, status_code=504)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": f"Claude call failed: {e}"}, status_code=502)
+
+        return JSONResponse({
+            "ok":        True,
+            "plan":      plan,
+            "anomalies": len(anomalies),
+        })
+
     def _broadcast_event(event: dict) -> None:
         """Insert a synthetic event into the active state and broadcast to SSE subscribers."""
         global _new_nodes, _new_edges
@@ -1188,7 +1266,8 @@ def _make_app(environment: str):
         """
         from fastapi import HTTPException
         valid_types = {"MISSING_SERVICE", "NEW_ERROR_SIGNATURE", "NEW_FINGERPRINT",
-                       "LATENCY_ANOMALY", "ERROR_RATE_ANOMALY"}
+                       "LATENCY_ANOMALY", "ERROR_RATE_ANOMALY",
+                       "SPAN_COUNT_DROP", "SPAN_COUNT_SPIKE"}
         atype = body.get("anomaly_type", "")
         if atype not in valid_types:
             raise HTTPException(400, f"anomaly_type must be one of {valid_types}")
@@ -1215,6 +1294,13 @@ def _make_app(environment: str):
             event["error_pct"]    = body.get("error_pct", "?")
             event["error_count"]  = body.get("error_count", 0)
             event["total_count"]  = body.get("total_count", 0)
+        if atype == "SPAN_COUNT_DROP":
+            event["span_count"]                = body.get("span_count", "?")
+            event["span_count_baseline_min"]   = body.get("span_count_baseline_min", "?")
+            event["span_count_baseline_max"]   = body.get("span_count_baseline_max", "?")
+        if atype == "SPAN_COUNT_SPIKE":
+            event["span_count"]                = body.get("span_count", "?")
+            event["span_count_baseline_max"]   = body.get("span_count_baseline_max", "?")
         _broadcast_event(event)
         return JSONResponse({"ok": True, "event": event})
 
@@ -1520,6 +1606,43 @@ def _make_app(environment: str):
                 "message":      "Latency spike: visits-service 4290ms (baseline 22ms, z=15.7)",
                 "hash":         "synthetic:latency:visits-slow",
                 "_delay_ms":    500,
+            },
+        ],
+
+        # Span count drop: visits-service normally produces 12–18 spans per trace
+        # (includes DB calls, method instrumentation).  A silent failure — connection
+        # pool exhaustion short-circuits DB calls — causes each trace to complete with
+        # only 3 spans (just the HTTP layer, no DB fan-out).
+        # Story: framework fires SPAN_COUNT_DROP immediately; no error signal, no MISSING,
+        # no latency change.  Invisible to threshold-based alerting.
+        "span-count-drop": [
+            {
+                "anomaly_type": "SPAN_COUNT_DROP",
+                "service":      "visits-service",
+                "root_op":      "api-gateway:GET /owners/{ownerId}/pets/{petId}/visits",
+                "message":      "Span count drop: visits-service 3 spans (baseline min 12) — DB calls silently missing",
+                "hash":         "synthetic:spandrop:visits-service",
+                "span_count":   3,
+                "span_count_baseline_min": 12,
+                "span_count_baseline_max": 18,
+                "_delay_ms":    0,
+            },
+        ],
+
+        # Span count spike: customers-service normally produces 8–12 spans per trace.
+        # A retry storm (connection timeout → retry × 7) inflates each trace to 58 spans —
+        # 7× the baseline max.  No new error signature (same exception, already known),
+        # no MISSING_SERVICE.  SPAN_COUNT_SPIKE catches the retry-storm pattern.
+        "span-count-spike": [
+            {
+                "anomaly_type": "SPAN_COUNT_SPIKE",
+                "service":      "customers-service",
+                "root_op":      "api-gateway:GET /owners",
+                "message":      "Span count spike: customers-service 58 spans (baseline max 12, ×4.8) — retry storm",
+                "hash":         "synthetic:spanspike:customers-service",
+                "span_count":   58,
+                "span_count_baseline_max": 12,
+                "_delay_ms":    0,
             },
         ],
 
