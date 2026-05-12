@@ -196,7 +196,7 @@ def slide_problem(prs):
                 "APM AutoDetect covers error rate, latency, and request rate. But some failures leave no metric fingerprint.",
                 font_size=13, color=RGBColor(0xCC, 0xDD, 0xEE))
 
-    # 4 problem boxes
+    # 6 problem boxes (2 rows × 3)
     problems = [
         ("Service Disappears",
          "A service that always appeared in traces\nsuddenly vanishes — no error rate increase,\nno latency spike. Pure structural silence."),
@@ -206,21 +206,29 @@ def slide_problem(prs):
          "A request now flows through a new service\nit never touched before. Could be a mis-deploy\nor a new dependency silently added."),
         ("DB Caller Goes Silent",
          "A service that always called the database\nstops doing so. No error, no latency —\njust behavioral silence."),
+        ("Silent Span Collapse",
+         "A service handles far fewer internal spans\nthan normal. No errors thrown, no latency\nchange — pipeline silently short-circuiting."),
+        ("Span Count Explosion",
+         "A service produces 10\u00d7 more spans than\nnormal — a retry storm or fan-out cascade\nthat errors won\u2019t surface on their own."),
     ]
 
-    box_w = Inches(2.15)
-    box_h = Inches(2.8)
+    box_w = Inches(2.88)
+    box_h = Inches(1.6)
     gap   = Inches(0.12)
     start = Inches(0.45)
 
+    row_ys = [Inches(1.48), Inches(3.2)]
     for i, (title, body) in enumerate(problems):
-        x = start + i * (box_w + gap)
-        add_rect(s, x, Inches(1.55), box_w, box_h, DKGRAY)
-        add_rect(s, x, Inches(1.55), box_w, Inches(0.06), CYAN)
-        add_textbox(s, x + Inches(0.12), Inches(1.68), box_w - Inches(0.2), Inches(0.45),
-                    title, font_size=13, bold=True, color=CYAN)
-        add_textbox(s, x + Inches(0.12), Inches(2.18), box_w - Inches(0.2), Inches(2.0),
-                    body, font_size=11, color=WHITE)
+        col = i % 3
+        row = i // 3
+        x = start + col * (box_w + gap)
+        y = row_ys[row]
+        add_rect(s, x, y, box_w, box_h, DKGRAY)
+        add_rect(s, x, y, box_w, Inches(0.06), CYAN)
+        add_textbox(s, x + Inches(0.12), y + Inches(0.1), box_w - Inches(0.2), Inches(0.42),
+                    title, font_size=12, bold=True, color=CYAN)
+        add_textbox(s, x + Inches(0.12), y + Inches(0.56), box_w - Inches(0.2), Inches(0.95),
+                    body, font_size=10, color=WHITE)
 
     footer(s)
     return s
@@ -357,6 +365,8 @@ def slide_solution_overview(prs):
         "  \u2022  Unknown call path appeared (NEW_FINGERPRINT)",
         "  \u2022  Brand new error type, first occurrence fires",
         "  \u2022  New DB query template or slow query (z-score)",
+        "  \u2022  Span count drop — silent failure, short-circuit",
+        "  \u2022  Span count spike — retry storm, fan-out explosion",
         "  \u2022  Fires in ~10s — no poll interval, no Splunk wait",
         "  \u2022  2+ tiers on same service \u2192 correlated alert ([Critical] MULTI_TIER)",
         "  \u2022  Anomaly correlated to a recent deploy \u2192 severity downgrade",
@@ -498,8 +508,8 @@ def slide_tiers(prs):
          RGBColor(0x55, 0x77, 0x99),   # muted — not this framework
          RGBColor(0xAA, 0xBB, 0xCC)),
         ("Tier 2",
-         "Trace Path + DB Drift\n(trace_fingerprint.py)",
-         "MISSING_SERVICE\n  \u2192 expected service absent from traces\n\nNEW_FINGERPRINT\n  \u2192 unknown call path appeared\n\nDB query: new template or slow query\n  \u2192 z-score above baseline mean",
+         "Trace Path + Span Count + DB\n(trace_fingerprint.py)",
+         "MISSING_SERVICE\n  \u2192 expected service absent from traces\n\nNEW_FINGERPRINT\n  \u2192 unknown call path appeared\n\nSPAN_COUNT_DROP\n  \u2192 silent failure, pipeline collapse\n\nSPAN_COUNT_SPIKE\n  \u2192 retry storm, fan-out explosion\n\nDB: new template or slow query",
          CYAN, WHITE),
         ("Tier 3",
          "Error Signature Drift\n(error_fingerprint.py)",
@@ -652,6 +662,10 @@ def slide_demo_overview(prs):
          "DB overloaded — all callers get correlated LATENCY_ANOMALY spikes. Root cause: mysql:petclinic (shared dep, no structural drift)."),
         ("Demo 0b", "Auto-Onboarding",
          "New environment discovered. Baselines built, dashboard created, Claude runbook generated \u2014 in ~60 seconds."),
+        ("Demo 11", "Span Count Drop (Topology UI)",
+         "Connection pool exhaustion short-circuits DB calls on visits-service. No errors, no latency change. SPAN_COUNT_DROP fires in the UI (3 spans vs baseline 12\u201318). One-click Triage \u25b6 calls Claude."),
+        ("Demo 12", "Span Count Spike (Topology UI)",
+         "Retry storm on customers-service — 58 spans vs baseline max 12. SPAN_COUNT_SPIKE fires in the UI. Claude identifies fan-out cascade root cause."),
     ]
 
     col1_x = Inches(0.45)
@@ -702,13 +716,13 @@ def slide_key_capabilities(prs):
         ("Zero Configuration",
          "No alert rules, no thresholds, no YAML.\nThe framework learns normal from live traffic\nand is ready in one command."),
         ("First-Occurrence Detection",
-         "Fires the moment a new error signature or\nnew trace path appears — before any baseline\nrate exists to threshold against."),
+         "Fires the moment a new error signature or\nnew trace path appears — before any baseline\nrate exists to threshold against.\n\nAlso detects span count collapse and explosion\n— silent failures with no error or latency signal."),
         ("Claude-Powered Triage",
          "AWS Bedrock (Claude) synthesizes all signals\ninto a plain-English verdict: severity, root cause,\naffected services, recommended action."),
         ("Deployment-Aware",
          "Integrates with CI/CD via a one-line hook.\nAnomalies within 60 min of a deploy are\nauto-annotated and severity-downgraded."),
-        ("DB Query Fingerprinting",
-         "Normalises every SQL query template and\ntracks latency vs baseline (Welford z-score).\nFires on new query plans or slowdowns in ~10s."),
+        ("Live Topology UI + RCA",
+         "Real-time service graph with anomaly overlays\n(color-coded by signal type) and a one-click\nTriage \u25b6 button.\n\nClaude RCA panel synthesizes all active anomalies\ninto a structured root-cause assessment inline."),
         ("Self-Healing",
          "New patterns after deploys auto-promote after\n2 clean runs. Baselines re-learn autonomously\nafter an incident resolves."),
     ]
