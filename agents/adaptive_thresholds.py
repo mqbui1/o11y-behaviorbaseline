@@ -107,6 +107,12 @@ SPAN_SPIKE_MIN  = 1.5
 SPAN_SPIKE_MAX  = 5.0
 SPAN_SPIKE_DEFAULT = 2.0
 
+# Span count drop threshold: fraction of baseline min below which SPAN_COUNT_DROP fires.
+# Lower = less sensitive (fires only on bigger drops).
+SPAN_DROP_MIN  = 0.1
+SPAN_DROP_MAX  = 0.9
+SPAN_DROP_DEFAULT = 0.5
+
 # Error signature spike multiplier.
 # Higher = less sensitive.
 ERROR_SPIKE_MIN  = 2.0
@@ -116,6 +122,7 @@ ERROR_SPIKE_DEFAULT = 3.0
 # Tuning step sizes per adjustment cycle
 DOMINANCE_STEP  = 0.05
 SPAN_SPIKE_STEP = 0.25
+SPAN_DROP_STEP  = 0.05
 ERROR_SPIKE_STEP = 0.5
 
 # fp_rate above this → loosen (service is noisy)
@@ -363,6 +370,29 @@ def compute_new_thresholds(service: str, stats: dict,
                     f"(tighten — low FP rate on SPAN_COUNT_SPIKE)"
                 )
                 new["span_count_spike_multiplier"] = round(new_span, 2)
+
+    # ── SPAN_COUNT_DROP threshold ──────────────────────────────────────────────
+    has_span_drops = stats["anomaly_types"].get("SPAN_COUNT_DROP", 0) > 0
+    if has_span_drops:
+        cur_drop = current.get("span_count_drop_threshold", SPAN_DROP_DEFAULT)
+        if fp_rate >= HIGH_FP_RATE:
+            # Too many drop alerts → lower the threshold (require a bigger drop to fire)
+            new_drop = _clamp(cur_drop - SPAN_DROP_STEP, SPAN_DROP_MIN, SPAN_DROP_MAX)
+            if new_drop != cur_drop:
+                changes.append(
+                    f"span_count_drop_threshold: {cur_drop:.2f} → {new_drop:.2f} "
+                    f"(loosen — high FP rate on SPAN_COUNT_DROP)"
+                )
+                new["span_count_drop_threshold"] = round(new_drop, 2)
+        elif fp_rate <= LOW_FP_RATE:
+            # Few drop alerts → raise the threshold (fire on smaller drops too)
+            new_drop = _clamp(cur_drop + SPAN_DROP_STEP, SPAN_DROP_MIN, SPAN_DROP_MAX)
+            if new_drop != cur_drop:
+                changes.append(
+                    f"span_count_drop_threshold: {cur_drop:.2f} → {new_drop:.2f} "
+                    f"(tighten — low FP rate on SPAN_COUNT_DROP)"
+                )
+                new["span_count_drop_threshold"] = round(new_drop, 2)
 
     # ── ERROR_SPIKE multiplier ─────────────────────────────────────────────────
     has_error_spikes = stats["anomaly_types"].get("SIGNATURE_SPIKE", 0) > 0
