@@ -312,7 +312,7 @@ def generate_recommendations(environment: str | None, topology: dict,
         "learn_window_minutes":   120,
         "correlate_window_minutes": 15,
         "enabled_anomaly_types":  [
-            "NEW_FINGERPRINT", "MISSING_SERVICE", "SPAN_COUNT_SPIKE",
+            "NEW_FINGERPRINT", "MISSING_SERVICE", "SPAN_COUNT_SPIKE", "SPAN_COUNT_DROP",
             "NEW_ERROR_SIGNATURE", "SIGNATURE_SPIKE", "SIGNATURE_VANISHED",
         ],
         "per_service_overrides":  {},
@@ -434,7 +434,8 @@ def generate_recommendations(environment: str | None, topology: dict,
     if profile["db_node_count"] > 3:
         rec["caveats"].append(
             f"{profile['db_node_count']} inferred DB/infra nodes detected. "
-            "SPAN_COUNT_SPIKE thresholds have been tightened on these nodes."
+            "SPAN_COUNT_SPIKE thresholds have been tightened on these nodes. "
+            "Consider also tuning span_count_drop_threshold if DB fan-out varies widely."
         )
 
     return rec
@@ -471,7 +472,7 @@ def print_report(environment: str | None, topology: dict,
     print(f"  Learn window:    {rec['learn_window_minutes']} min")
     print(f"  Correlate window: {rec['correlate_window_minutes']} min")
     enabled = rec["enabled_anomaly_types"]
-    all_types = ["NEW_FINGERPRINT", "MISSING_SERVICE", "SPAN_COUNT_SPIKE",
+    all_types = ["NEW_FINGERPRINT", "MISSING_SERVICE", "SPAN_COUNT_SPIKE", "SPAN_COUNT_DROP",
                  "NEW_ERROR_SIGNATURE", "SIGNATURE_SPIKE", "SIGNATURE_VANISHED"]
     disabled  = [t for t in all_types if t not in enabled]
     print(f"  Enabled types:   {', '.join(enabled)}")
