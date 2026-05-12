@@ -114,6 +114,14 @@ MIN_BASELINE_OCCURRENCES = 3
 # Span count must exceed this multiple of baseline max to fire SPAN_COUNT_SPIKE
 SPAN_COUNT_SPIKE_MULTIPLIER = 2
 
+# Span count must fall below this fraction of baseline min to fire SPAN_COUNT_DROP
+# e.g. 0.5 means fewer than half the minimum ever seen → alert
+SPAN_COUNT_DROP_THRESHOLD = float(os.environ.get("SPAN_COUNT_DROP_THRESHOLD", "0.5"))
+
+# Minimum baseline min span count before DROP detection activates.
+# Avoids false positives on very simple traces (1-2 spans) where halving is meaningless.
+SPAN_COUNT_DROP_MIN_BASELINE = int(os.environ.get("SPAN_COUNT_DROP_MIN_BASELINE", "4"))
+
 # MISSING_SERVICE fires when a service is present in this fraction of baseline
 # patterns for the same root_op (e.g. 0.6 = present in ≥60% of variants).
 MISSING_SERVICE_DOMINANCE_THRESHOLD = float(
@@ -671,20 +679,50 @@ def classify_anomaly(fp: dict, baseline: dict,
             "fp":      fp,
         }
 
-    # SPAN_COUNT_SPIKE — checked for ALL hashes (known or unknown) so it fires
-    # even when the trace path hash matches a baseline entry exactly.
-    baseline_max = max(
-        (info.get("span_count", 0) for info in baseline_for_root.values()),
+    # SPAN_COUNT_SPIKE / SPAN_COUNT_DROP — use per-fingerprint min/max if available,
+    # falling back to span_count for older baseline entries that pre-date this field.
+    # Aggregate across all fingerprints for this root_op so that the range reflects
+    # the full observed distribution, not just a single structural variant.
+    root_span_max = max(
+        (info.get("span_count_max") or info.get("span_count", 0)
+         for info in baseline_for_root.values()),
         default=0,
     )
+    root_span_min = min(
+        (info.get("span_count_min") or info.get("span_count", 0)
+         for info in baseline_for_root.values()
+         if (info.get("span_count_min") or info.get("span_count", 0)) > 0),
+        default=0,
+    )
+
     span_multiplier = _svc_threshold(
         root_svc, "span_count_spike_multiplier", SPAN_COUNT_SPIKE_MULTIPLIER
     )
-    if baseline_max > 0 and fp["span_count"] > baseline_max * span_multiplier:
+    if root_span_max > 0 and fp["span_count"] > root_span_max * span_multiplier:
         return {
             "type":    "SPAN_COUNT_SPIKE",
             "message": (f"Span count spike for '{root_op}': "
-                        f"{fp['span_count']} vs baseline max {baseline_max}"),
+                        f"{fp['span_count']} spans vs baseline max {root_span_max}"),
+            "detail":  f"Path: {fp['path']}",
+            "fp":      fp,
+        }
+
+    # SPAN_COUNT_DROP — fire when span count is suspiciously low vs baseline min.
+    # Catches cases like a retry loop that normally runs 5× completing in just 1×,
+    # or a pipeline that normally fans out to multiple services collapsing to one.
+    # Only fires on established hashes (known paths) to avoid noise from new variants.
+    drop_threshold = _svc_threshold(
+        root_svc, "span_count_drop_threshold", SPAN_COUNT_DROP_THRESHOLD
+    )
+    drop_min_baseline = int(_svc_threshold(
+        root_svc, "span_count_drop_min_baseline", SPAN_COUNT_DROP_MIN_BASELINE
+    ))
+    if (stored and root_span_min >= drop_min_baseline
+            and fp["span_count"] < root_span_min * drop_threshold):
+        return {
+            "type":    "SPAN_COUNT_DROP",
+            "message": (f"Span count drop for '{root_op}': "
+                        f"{fp['span_count']} spans vs baseline min {root_span_min}"),
             "detail":  f"Path: {fp['path']}",
             "fp":      fp,
         }
@@ -1147,17 +1185,24 @@ def cmd_learn(window_minutes: int = 120,
                 # Already established — increment occurrence count and refresh last_seen
                 fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
                 fingerprints[h]["last_seen"] = datetime.now(timezone.utc).isoformat()
+                # Update running min/max span counts across observations
+                sc = fp["span_count"]
+                fingerprints[h]["span_count_min"] = min(fingerprints[h].get("span_count_min", sc), sc)
+                fingerprints[h]["span_count_max"] = max(fingerprints[h].get("span_count_max", sc), sc)
                 updated_count += 1
             else:
                 # Stage until seen MIN_BASELINE_OCCURRENCES times this window
                 if h not in staged:
                     now_iso = datetime.now(timezone.utc).isoformat()
+                    sc = fp["span_count"]
                     staged[h] = {
                         "hash":          h,
                         "path":          fp["path"],
                         "root_op":       fp["root_op"],
                         "services":      fp["services"],
-                        "span_count":    fp["span_count"],
+                        "span_count":    sc,
+                        "span_count_min": sc,
+                        "span_count_max": sc,
                         "edge_count":    fp["edge_count"],
                         "occurrences":   0,
                         "watch_hits":    0,
@@ -1166,6 +1211,10 @@ def cmd_learn(window_minutes: int = 120,
                         "first_seen":    now_iso,
                         "last_seen":     now_iso,
                     }
+                else:
+                    sc = fp["span_count"]
+                    staged[h]["span_count_min"] = min(staged[h].get("span_count_min", sc), sc)
+                    staged[h]["span_count_max"] = max(staged[h].get("span_count_max", sc), sc)
                 staged[h]["occurrences"] += 1
                 if staged[h]["occurrences"] >= effective_min_occurrences:
                     fingerprints[h] = staged[h]

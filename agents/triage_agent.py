@@ -551,6 +551,7 @@ Anomaly types:
 - NEW_FINGERPRINT: trace took a path never seen before (new code path, retry logic, fallback)
 - MISSING_SERVICE: expected downstream service not appearing in traces (service down, network issue)
 - SPAN_COUNT_SPIKE: far more spans than normal (cascading retries, fan-out explosion)
+- SPAN_COUNT_DROP: far fewer spans than normal (retry loop short-circuiting, pipeline collapse, silent failure dropping work items)
 - NEW_SIGNATURE: new error pattern never seen in baseline (new bug, unhandled edge case)
 - SIGNATURE_VANISHED: error that was common is now gone (possible fix, or service completely down)
 - SLOW_QUERY: a DB query whose latency z-score has spiked above baseline (missing index, lock contention, data volume)

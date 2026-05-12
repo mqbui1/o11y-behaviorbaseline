@@ -273,6 +273,53 @@
     border-bottom: 1px solid #21262D;
   }
 
+  /* ── RCA panel ── */
+  #rca-btn {
+    background: none;
+    border: 1px solid #00BCEB;
+    color: #00BCEB;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 10px;
+    font-family: inherit;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: background 0.15s;
+  }
+  #rca-btn:hover   { background: #0D2233; }
+  #rca-btn:disabled { opacity: 0.4; cursor: default; }
+
+  .rca-severity-INCIDENT { color: #F85149; font-weight: 600; }
+  .rca-severity-DEGRADED { color: #E07B39; font-weight: 600; }
+  .rca-severity-OK        { color: #3FB950; font-weight: 600; }
+
+  .rca-block {
+    background: #0D1117;
+    border: 1px solid #21262D;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .rca-row { margin-bottom: 6px; }
+  .rca-label { color: #8B949E; margin-right: 4px; }
+  .rca-narrative {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #21262D;
+    color: #C9D1D9;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .rca-action-PAGE_ONCALL  { color: #F85149; }
+  .rca-action-RELEARN_BASELINE { color: #D29922; }
+  .rca-action-NO_ACTION    { color: #8B949E; }
+  .rca-spinner {
+    color: #8B949E;
+    font-size: 11px;
+    padding: 8px 0;
+  }
+
   .service-card {
     background: #0D1117;
     border: 1px solid #21262D;
@@ -308,6 +355,8 @@
   .badge-rootcause { background: #1C1040; color: #BF5AF2; border: 1px solid #7F3FBF; }
   .badge-latency   { background: #2A1C0D; color: #E07B39; border: 1px solid #9E5A1A; }
   .badge-errorrate { background: #2A0D0D; color: #FF6B35; border: 1px solid #8B2010; }
+  .badge-spandrop  { background: #0D1E2A; color: #39C0E0; border: 1px solid #1A6B8A; }
+  .badge-spanspike { background: #1A0D2A; color: #BF5AF2; border: 1px solid #7F3FBF; }
 
   .anomaly-item {
     font-size: 11px;
@@ -542,6 +591,13 @@
         <h3>Affected Services</h3>
         <div id="affected-list"></div>
       </div>
+      <div id="panel-rca" class="panel-section" style="display:none">
+        <h3 style="display:flex;justify-content:space-between;align-items:center">
+          <span>Claude RCA</span>
+          <button id="rca-btn" onclick="runRCA()" title="Run root cause analysis with Claude via AWS Bedrock">Triage ▶</button>
+        </h3>
+        <div id="rca-content"></div>
+      </div>
     </div>
     <div id="event-log">
       <div class="log-header">Live Event Stream</div>
@@ -577,6 +633,8 @@
   <button class="btn-scenario" onclick="runScenario('combined-metric')" title="vets-service killed (structural) + customers-service error rate spikes (metric) — Claude correlates all three tiers" style="border-color:#7F3FBF;color:#BF5AF2">8 Combined</button>
   <button class="btn-scenario" onclick="runScenario('slow-db')"        title="DB overloaded — all callers get correlated LATENCY spikes simultaneously, no structural drift" style="border-color:#9E5A1A;color:#E07B39">9 Slow DB</button>
   <button class="btn-scenario" onclick="runScenario('oom-crash')"      title="customers-service: LATENCY spike (GC pressure) → MISSING (OOM crash) → api-gateway errors, 4s apart" style="border-color:#8B2010;color:#FF6B35">10 OOM crash</button>
+  <button class="btn-scenario" onclick="runScenario('span-count-drop')" title="visits-service: DB calls silently missing — span count drops from 12–18 to 3, no errors, no latency change" style="border-color:#1A6B8A;color:#39C0E0">11 Span drop</button>
+  <button class="btn-scenario" onclick="runScenario('span-count-spike')" title="customers-service: retry storm inflates span count 4.8× baseline max — no new error type, invisible to error alerting" style="border-color:#7F3FBF;color:#BF5AF2">12 Span spike</button>
 </div>
 
 <script>
@@ -638,9 +696,11 @@ function nodeState(id) {
     return "healthy";
   }
   const types = new Set(anoms.map(a => a.anomaly_type));
-  // Determine base state from anomaly type (priority order: missing > error > errorrate > latency > drift)
+  // Determine base state from anomaly type (priority order: missing > error > errorrate > span-drop > latency > span-spike > drift)
   let base = "drift";
+  if (types.has("SPAN_COUNT_SPIKE"))    base = "latency";
   if (types.has("LATENCY_ANOMALY"))     base = "latency";
+  if (types.has("SPAN_COUNT_DROP"))     base = "errorrate";
   if (types.has("ERROR_RATE_ANOMALY"))  base = "errorrate";
   if (types.has("MISSING_SERVICE"))     base = "missing";
   if (types.has("NEW_ERROR_SIGNATURE")) base = "error";
@@ -902,6 +962,13 @@ function updatePanel() {
   document.getElementById("panel-empty").style.display     = (anyActive || anyInfra) ? "none" : "block";
   document.getElementById("panel-causality").style.display = anyActive && causalityChain.length ? "block" : "none";
   document.getElementById("panel-affected").style.display  = anyActive ? "block" : "none";
+  document.getElementById("panel-rca").style.display       = anyActive ? "block" : "none";
+  // Reset RCA panel when anomalies clear
+  if (!anyActive) {
+    document.getElementById("rca-content").innerHTML = "";
+    const btn = document.getElementById("rca-btn");
+    if (btn) { btn.disabled = false; btn.textContent = "Triage ▶"; }
+  }
 
   // Causality chain with confidence score
   if (causalityChain.length) {
@@ -936,7 +1003,8 @@ function updatePanel() {
     // If this service has stronger signals (ERROR/MISSING/metric), drop pure DRIFT entries
     const hasStrong = anoms.some(a =>
       a.anomaly_type === "NEW_ERROR_SIGNATURE" || a.anomaly_type === "MISSING_SERVICE" ||
-      a.anomaly_type === "LATENCY_ANOMALY"     || a.anomaly_type === "ERROR_RATE_ANOMALY");
+      a.anomaly_type === "LATENCY_ANOMALY"     || a.anomaly_type === "ERROR_RATE_ANOMALY" ||
+      a.anomaly_type === "SPAN_COUNT_DROP"     || a.anomaly_type === "SPAN_COUNT_SPIKE");
     if (hasStrong) anoms = anoms.filter(a => a.anomaly_type !== "NEW_FINGERPRINT");
 
     const isSuppressed = suppressed.has(svc);
@@ -945,18 +1013,21 @@ function updatePanel() {
     // Build one badge per distinct signal type present on this service.
     // Root cause always gets its own badge first; remaining signal types follow.
     const typeToState = {
-      "NEW_ERROR_SIGNATURE": "error", "MISSING_SERVICE": "missing",
-      "NEW_FINGERPRINT": "drift",     "LATENCY_ANOMALY": "latency",
-      "ERROR_RATE_ANOMALY": "errorrate",
+      "NEW_ERROR_SIGNATURE": "error",    "MISSING_SERVICE": "missing",
+      "NEW_FINGERPRINT": "drift",        "LATENCY_ANOMALY": "latency",
+      "ERROR_RATE_ANOMALY": "errorrate", "SPAN_COUNT_DROP": "spandrop",
+      "SPAN_COUNT_SPIKE": "spanspike",
     };
     const badgeClass = {
       rootcause: "badge-rootcause", error: "badge-error",
       missing:   "badge-missing",   drift: "badge-drift",
       latency:   "badge-latency",   errorrate: "badge-errorrate",
+      spandrop:  "badge-spandrop",  spanspike: "badge-spanspike",
     };
     const badgeLabel = {
-      rootcause: "ROOT CAUSE ★", error: "ERROR", missing: "MISSING", drift: "DRIFT",
+      rootcause: "ROOT CAUSE ★", error: "ERROR",   missing: "MISSING", drift: "DRIFT",
       latency: "LATENCY SPIKE",  errorrate: "ERROR RATE",
+      spandrop: "SPAN DROP",     spanspike: "SPAN SPIKE",
     };
     const sigStates = [...new Set(anoms.map(a => typeToState[a.anomaly_type]).filter(Boolean))];
     let badgesHtml = "";
@@ -1074,11 +1145,15 @@ function addLogEntry(event) {
               : atype === "MISSING_SERVICE"     ? "log-type-missing"
               : atype === "ERROR_RATE_ANOMALY"  ? "log-type-errorrate"
               : atype === "LATENCY_ANOMALY"     ? "log-type-latency"
+              : atype === "SPAN_COUNT_DROP"     ? "log-type-errorrate"
+              : atype === "SPAN_COUNT_SPIKE"    ? "log-type-latency"
               : "log-type-drift";
   const label = atype === "NEW_ERROR_SIGNATURE" ? "error.signature.drift"
               : atype === "MISSING_SERVICE"     ? "trace.path.drift (MISSING)"
               : atype === "ERROR_RATE_ANOMALY"  ? "service.error.rate.anomaly"
               : atype === "LATENCY_ANOMALY"     ? "service.latency.anomaly"
+              : atype === "SPAN_COUNT_DROP"     ? "trace.span.count.drop"
+              : atype === "SPAN_COUNT_SPIKE"    ? "trace.span.count.spike"
               : "trace.path.drift";
 
   // For MISSING_SERVICE show "caller → missing_svc"; for others just service name
@@ -1094,6 +1169,10 @@ function addLogEntry(event) {
     metricDetail = ` <span style="color:#8B949E">${event.current_mean_ms}ms vs ${event.baseline_mean_ms}ms baseline (z=${event.z_score})</span>`;
   } else if (atype === "ERROR_RATE_ANOMALY" && event.error_pct) {
     metricDetail = ` <span style="color:#8B949E">${event.error_pct} (${event.error_count}/${event.total_count} spans)</span>`;
+  } else if (atype === "SPAN_COUNT_DROP" && event.span_count !== undefined) {
+    metricDetail = ` <span style="color:#8B949E">${event.span_count} spans (baseline min ${event.span_count_baseline_min}, max ${event.span_count_baseline_max})</span>`;
+  } else if (atype === "SPAN_COUNT_SPIKE" && event.span_count !== undefined) {
+    metricDetail = ` <span style="color:#8B949E">${event.span_count} spans (baseline max ${event.span_count_baseline_max})</span>`;
   }
 
   const probTag = event.problem_id
@@ -1223,6 +1302,85 @@ async function clearAnomalies() {
   renderGraph();
   updatePanel();
   document.getElementById("log-entries").innerHTML = "";
+}
+
+// ── Claude RCA ────────────────────────────────────────────────────────────
+async function runRCA() {
+  const btn     = document.getElementById("rca-btn");
+  const content = document.getElementById("rca-content");
+
+  btn.disabled    = true;
+  btn.textContent = "…";
+  content.innerHTML = `<div class="rca-spinner">Reasoning with Claude via AWS Bedrock…</div>`;
+
+  try {
+    const res = await fetch("/api/rca", { method: "POST" });
+    const data = await res.json();
+
+    if (!res.ok || !data.ok) {
+      content.innerHTML = `<div class="rca-spinner" style="color:#F85149">
+        RCA failed: ${data.error || res.statusText}
+        ${data.stderr ? `<pre style="margin-top:6px;font-size:10px;color:#8B949E">${escapeHtml(data.stderr.slice(-400))}</pre>` : ""}
+      </div>`;
+      btn.disabled = false;
+      btn.textContent = "Retry ▶";
+      return;
+    }
+
+    const p   = data.plan;
+    const sev = p.severity || "OK";
+    const actionCls = `rca-action-${p.action || "NO_ACTION"}`;
+    const affectedHtml = (p.affected_services || []).length
+      ? `<span class="rca-label">Affected:</span>${(p.affected_services || []).map(s => `<span class="pe-cm-svc-tag" style="background:#161B22;border:1px solid #30363D;color:#C9D1D9;margin-left:4px">${escapeHtml(s)}</span>`).join("")}`
+      : "";
+
+    content.innerHTML = `
+      <div class="rca-block">
+        <div class="rca-row">
+          <span class="rca-label">Severity:</span>
+          <span class="rca-severity-${sev}">${sev}</span>
+          <span class="rca-label" style="margin-left:12px">Confidence:</span>
+          <span style="color:#C9D1D9">${p.confidence || "—"}</span>
+        </div>
+        <div class="rca-row">
+          <span class="rca-label">Assessment:</span>
+          <span style="color:#C9D1D9">${escapeHtml(p.assessment || "")}</span>
+        </div>
+        ${p.root_cause ? `<div class="rca-row">
+          <span class="rca-label">Root cause:</span>
+          <span style="color:#C9D1D9">${escapeHtml(p.root_cause)}</span>
+        </div>` : ""}
+        ${affectedHtml ? `<div class="rca-row">${affectedHtml}</div>` : ""}
+        <div class="rca-row">
+          <span class="rca-label">Action:</span>
+          <span class="${actionCls}">${p.action || "NO_ACTION"}</span>
+        </div>
+        ${p.narrative ? `<div class="rca-narrative">${escapeHtml(p.narrative)}</div>` : ""}
+      </div>`;
+
+    btn.disabled    = false;
+    btn.textContent = "Re-triage ▶";
+
+    // Log it
+    const logEl = document.getElementById("log-entries");
+    const entry = document.createElement("div");
+    entry.className = "log-entry";
+    const sevColor = sev === "INCIDENT" ? "#F85149" : sev === "DEGRADED" ? "#E07B39" : "#3FB950";
+    entry.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString()}</span> `
+      + `<span style="color:#00BCEB">● CLAUDE RCA</span> `
+      + `<span style="color:${sevColor}">${sev}</span> — `
+      + `<span class="log-svc">${escapeHtml(p.assessment || "").slice(0, 80)}</span>`;
+    logEl.prepend(entry);
+
+  } catch (err) {
+    content.innerHTML = `<div class="rca-spinner" style="color:#F85149">Network error: ${escapeHtml(String(err))}</div>`;
+    btn.disabled    = false;
+    btn.textContent = "Retry ▶";
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
 
 // ── Demo scenarios ────────────────────────────────────────────────────────
