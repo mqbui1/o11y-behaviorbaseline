@@ -6,8 +6,12 @@
 - A known DB caller goes completely silent
 - A request now flows through a new service it never touched before
 - An error type that has never appeared before fires for the first time
+- A service starts handling far fewer internal spans than usual (silent failure, pipeline collapse, short-circuit)
+- A service explodes in span count — retry storm or fan-out cascade
 
 Fully generic — no hardcoded service names. Everything is auto-discovered from the live APM topology.
+
+A live **Topology UI** (`demo/topology_server.py`) visualizes the service graph with real-time anomaly overlays and embeds a one-click **Claude RCA panel** that synthesizes all active signals into a structured root-cause assessment.
 
 ---
 
@@ -124,7 +128,9 @@ o11y-behaviorbaseline/
 ├── watch_otel_events.py      ← fast-path triage: queries OTel edge events from Splunk
 │
 ├── demo/                     ← demo scripts, guides, and presentation assets
-│   ├── DEMO_GUIDE.md               ← step-by-step demo walkthrough
+│   ├── DEMO_GUIDE.md               ← step-by-step demo walkthrough (12 scenarios)
+│   ├── topology_server.py          ← FastAPI server: live topology graph + anomaly overlay + Claude RCA
+│   ├── topology.html               ← single-page topology UI (service graph, event log, RCA panel)
 │   ├── check-ready.sh              ← pre-flight check (6 conditions)
 │   ├── demo-reset.sh               ← full reset before first demo
 │   ├── demo-between.sh             ← between-demo reset (--db / --quick flags)
@@ -252,6 +258,66 @@ Action types: `NO_ACTION`, `SUPPRESS_ANOMALY`, `RELEARN_BASELINE`, `EMIT_EVENT`,
 **Tiers 1b, 3, and 4** are native Splunk APM AutoDetect — no provisioning required; they fire automatically for every APM-enabled environment.
 
 **Tiers 2, 3+, and C** are this framework's behavioral layer — structural drift detection that AutoDetect cannot provide. They run as scheduled scripts on cron.
+
+The **span count distribution** (min/max per fingerprint, tracked during `learn`) extends Tier 2 to catch silent degradation that leaves error rate and latency untouched:
+
+| Signal | Trigger | Example failure |
+|--------|---------|-----------------|
+| `SPAN_COUNT_DROP` | Span count < 50% of baseline min for root op | Connection pool exhaustion silently short-circuits DB calls |
+| `SPAN_COUNT_SPIKE` | Span count > 2× baseline max for root op | Retry storm — a downstream timeout cascades into fan-out |
+
+---
+
+## Topology UI
+
+`demo/topology_server.py` is a FastAPI server that renders the live service topology with real-time anomaly overlays and an embedded Claude RCA panel.
+
+```bash
+# Start the topology server (default port 8080):
+cd demo
+python3 topology_server.py --environment <env> --port 8080
+
+# Different port:
+python3 topology_server.py --environment <env> --port 8081
+```
+
+Open `http://localhost:<port>` in a browser. The topology graph is populated from live APM data; the event log panel streams anomaly events as they arrive.
+
+### Demo scenarios (UI buttons)
+
+The topology UI includes 12 built-in simulation scenarios, each injecting a realistic event sequence at 1-second intervals:
+
+| # | Scenario | Signal types fired |
+|---|----------|--------------------|
+| 1 | DB Incident | `NEW_ERROR_SIGNATURE`, `MISSING_SERVICE` |
+| 2 | Service Down | `MISSING_SERVICE` |
+| 3 | Deploy → Bad Deploy | `NEW_FINGERPRINT`, deployment context |
+| 4 | Cascading Failure | Multi-service `MISSING_SERVICE` |
+| 5 | Slow DB | `LATENCY_ANOMALY` (shared dep) |
+| 6 | Error Spike | `NEW_ERROR_SIGNATURE` |
+| 7 | New Call Path | `NEW_FINGERPRINT` |
+| 8 | Combined Multi-Failure | `NEW_ERROR_SIGNATURE` + `MISSING_SERVICE` |
+| 9 | Recovery | Clears active anomalies |
+| 11 | **Span Count Drop** | `SPAN_COUNT_DROP` — silent failure story |
+| 12 | **Span Count Spike** | `SPAN_COUNT_SPIKE` — retry storm story |
+
+Scenarios can also be injected via CLI for automation:
+
+```bash
+curl -s http://localhost:8081/api/demo/span-count-drop | jq .
+curl -s http://localhost:8081/api/demo/span-count-spike | jq .
+```
+
+### Claude RCA panel
+
+The side panel includes a **Triage ▶** button. Clicking it calls `/api/rca`, which:
+
+1. Collects all currently active anomalies from the topology state
+2. Builds topology context (service map, shared dependencies) and hypothesis context
+3. Calls `agent.reason()` via AWS Bedrock (Claude)
+4. Renders the structured plan: severity badge, confidence, assessment, root cause, affected services, action, and narrative
+
+Requires the `.env` file to contain valid AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`). Refresh credentials with `python3 refresh_aws_creds.py` and restart the server to pick them up.
 
 ---
 
@@ -414,6 +480,8 @@ Tiers 2, 3, and C emit **custom events** queryable via SignalFlow:
 | `DEPLOYMENT_CORRELATION_WINDOW_MINUTES` | `60` | How far back to look for deployment events |
 | `RELEARN_DELAY_MINUTES` | `5` | Minutes after a deploy before background re-learn fires |
 | `MISSING_SERVICE_DOMINANCE_THRESHOLD` | `0.6` | Fraction of baseline patterns a service must appear in to trigger `MISSING_SERVICE` |
+| `SPAN_COUNT_DROP_THRESHOLD` | `0.5` | Fraction of baseline min span count below which `SPAN_COUNT_DROP` fires (auto-tuned by `adaptive_thresholds.py`) |
+| `SPAN_COUNT_DROP_MIN_BASELINE` | `4` | Minimum number of baseline occurrences required before span count drop detection activates for a root op |
 | `WATCH_SAMPLE_LIMIT` | `200` | Max traces fetched per watch run |
 | `AGENT_WINDOW_MINUTES` | `30` | Anomaly lookback window for `agent.py` |
 | `AWS_REGION` | `us-west-2` | AWS region for Bedrock (Claude) calls |
@@ -443,7 +511,8 @@ Anomaly types detected by `core/trace_fingerprint.py`:
 |---------|---------|
 | `NEW_FINGERPRINT` | Hash not in baseline |
 | `NEW_SERVICE` | Service in trace not seen in any baseline pattern for this root op |
-| `SPAN_COUNT_SPIKE` | Span count > 2× baseline max |
+| `SPAN_COUNT_SPIKE` | Span count > 2× baseline max for this root op (retry storms, fan-out explosion) |
+| `SPAN_COUNT_DROP` | Span count < 50% of baseline min for this root op (silent failure, pipeline collapse, short-circuit) |
 | `MISSING_SERVICE` | Dominant service (≥60% of baseline patterns) absent from current trace |
 
 Anomaly types detected by `core/error_fingerprint.py`:
