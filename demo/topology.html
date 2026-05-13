@@ -455,6 +455,21 @@
   .btn:hover { border-color: #58A6FF; color: #58A6FF; }
   #btn-clear { }
 
+  /* App filter buttons */
+  .filter-btn {
+    background: #161B22;
+    border: 1px solid #30363D;
+    color: #8B949E;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+    font-family: inherit;
+    transition: all 0.2s;
+  }
+  .filter-btn:hover  { border-color: #00BCEB; color: #00BCEB; }
+  .filter-btn.filter-active { border-color: #00BCEB; color: #00BCEB; background: #0D2233; }
+
   /* Demo scenario bar */
   #demo-bar {
     display: flex;
@@ -531,7 +546,19 @@
     <h1>Behavioral Baseline — Live Topology</h1>
     <div class="meta" id="env-label">connecting...</div>
   </div>
-  <div style="display:flex;align-items:center;gap:10px;">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <div style="display:flex;align-items:center;gap:6px;">
+      <label for="env-select" style="font-size:11px;color:#484F58;text-transform:uppercase;letter-spacing:0.07em;">Env</label>
+      <select id="env-select" onchange="switchEnvironment(this.value)"
+        style="background:#161B22;border:1px solid #30363D;color:#8B949E;padding:3px 7px;border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer;">
+      </select>
+    </div>
+    <div style="display:flex;align-items:center;gap:4px;" id="app-filter-bar">
+      <span style="font-size:11px;color:#484F58;text-transform:uppercase;letter-spacing:0.07em;">Show</span>
+      <button class="filter-btn filter-active" data-filter="all"       onclick="setAppFilter('all')">All</button>
+      <button class="filter-btn"               data-filter="petclinic" onclick="setAppFilter('petclinic')">PetClinic</button>
+      <button class="filter-btn"               data-filter="otel-demo" onclick="setAppFilter('otel-demo')">Astronomy Shop</button>
+    </div>
     <button id="btn-clear" class="btn" onclick="clearAnomalies()" title="Clear alerts (keyboard: C)">Clear alerts [C]</button>
     <div id="status-badge" class="status-ok">● STEADY STATE</div>
   </div>
@@ -655,6 +682,98 @@ let newEdges   = [];          // [{source, target, label}] — edges seen in dri
 let currentProblem = null;    // open/closed problem record from server
 let _probTimerInterval = null; // interval for live duration counter
 let _discoveredNodeIds = new Set(); // IDs added via live topology discovery (for badge)
+let _appFilter = "all";       // "all" | "petclinic" | "otel-demo"
+
+// ── Environment / app filter helpers ─────────────────────────────────────
+// app_group cache — populated from server-annotated topology.nodes
+const _appGroupCache = {};
+
+function _serviceAppGroup(id) {
+  if (!id) return "unknown";
+  // Use server-provided app_group (set by _classify_service in topology_server.py)
+  if (_appGroupCache[id]) return _appGroupCache[id];
+  const node = (topology.nodes || []).find(n => n.id === id);
+  if (node && node.app_group) {
+    _appGroupCache[id] = node.app_group;
+    return node.app_group;
+  }
+  return "unknown";
+}
+
+function _rebuildAppGroupCache() {
+  for (const k in _appGroupCache) delete _appGroupCache[k];
+  for (const n of (topology.nodes || [])) {
+    if (n.app_group) _appGroupCache[n.id] = n.app_group;
+  }
+}
+
+function _nodeVisible(id) {
+  if (_appFilter === "all") return true;
+  return _serviceAppGroup(id) === _appFilter;
+}
+
+function setAppFilter(filter) {
+  _appFilter = filter;
+  // Update button styles
+  document.querySelectorAll(".filter-btn").forEach(btn => {
+    btn.classList.toggle("filter-active", btn.dataset.filter === filter);
+  });
+  applyFilter();
+}
+
+function applyFilter() {
+  // Show/hide nodes and edges via CSS visibility — simulation keeps running untouched
+  nodesG.selectAll(".node").style("display", d => _nodeVisible(d.id) ? null : "none");
+  linksG.selectAll(".link").style("display", d => {
+    const src = typeof d.source === "object" ? d.source.id : d.source;
+    const dst = typeof d.target === "object" ? d.target.id : d.target;
+    return (_nodeVisible(src) && _nodeVisible(dst)) ? null : "none";
+  });
+  // Update env label count
+  const envLabel = document.getElementById("env-label");
+  const envText  = envLabel.textContent.split("|")[0].trim();
+  const visN = (topology.nodes || []).filter(n => _nodeVisible(n.id)).length;
+  const allE = (topology.edges || []);
+  const visE = allE.filter(e => _nodeVisible(e.source) && _nodeVisible(e.target)).length;
+  envLabel.textContent = `${envText}  |  ${visN} services  |  ${visE} edges`;
+}
+
+async function switchEnvironment(env) {
+  if (!env) return;
+  const res = await fetch("/api/switch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ environment: env }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    console.error("Switch failed:", err);
+    return;
+  }
+  // Reset client state and reload
+  active = {}; causalityChain = []; rootCause = null;
+  newNodes = []; newEdges = []; infraEvents = {};
+  _discoveredNodeIds.clear();
+  applyProblem(null);
+  document.getElementById("log-entries").innerHTML = "";
+  document.getElementById("rca-content").innerHTML = "";
+  // Topology will arrive via env_switched SSE event (handled in connectSSE),
+  // but also reload explicitly in case SSE misses it
+  await loadTopology();
+}
+
+async function _loadEnvironments() {
+  try {
+    const res = await fetch("/api/environments");
+    const data = await res.json();
+    const sel = document.getElementById("env-select");
+    sel.innerHTML = data.environments.map(e =>
+      `<option value="${e}" ${e === data.current ? "selected" : ""}>${e}</option>`
+    ).join("");
+  } catch (e) {
+    console.warn("Could not load environment list:", e);
+  }
+}
 
 // ── D3 Setup ──────────────────────────────────────────────────────────────
 const svg    = d3.select("#graph");
@@ -679,8 +798,15 @@ async function loadTopology() {
   confidence     = data.confidence || {};
   suppressed     = new Set(data.suppressed || []);
   infraEvents    = data.infra_events || {};
+  // Sync env-select to current environment
+  const sel = document.getElementById("env-select");
+  if (sel && data.environment) sel.value = data.environment;
+  _rebuildAppGroupCache();
+  // Count only visible nodes/edges for the label
+  const visNodes = (data.nodes || []).filter(n => _nodeVisible(n.id));
+  const visEdges = (data.edges || []).filter(e => _nodeVisible(e.source) && _nodeVisible(e.target));
   document.getElementById("env-label").textContent =
-    `env: ${data.environment}  |  ${data.nodes.length} services  |  ${data.edges.length} edges`;
+    `env: ${data.environment}  |  ${visNodes.length} services  |  ${visEdges.length} edges`;
   renderGraph();
   updatePanel();
   if (data.problem !== undefined) applyProblem(data.problem);
@@ -848,6 +974,9 @@ function renderGraph() {
   simulation.nodes(allNodes);
   simulation.force("link").links(allEdges);
   simulation.alpha(hasNewThisRender ? 0.8 : 0.3).restart();
+
+  // Re-apply visibility filter after render (CSS show/hide, no simulation impact)
+  applyFilter();
 }
 
 function ticked() {
@@ -951,8 +1080,8 @@ function applyState(newActive, chain, incomingNewNodes, incomingNewEdges, incomi
       return `link link-${edgeState(src, dst)}`;
     });
 
+  applyFilter();
   updateBadge();
-
   updatePanel();
 }
 
@@ -1204,10 +1333,12 @@ function applyTopologyUpdate(msg) {
   topology.nodes = msg.nodes;
   topology.edges = msg.edges;
 
-  // Update env label count
+  // Update env label count (respect active filter)
   const envLabel = document.getElementById("env-label");
   const envText  = envLabel.textContent.split("|")[0].trim();
-  envLabel.textContent = `${envText}  |  ${topology.nodes.length} services  |  ${topology.edges.length} edges`;
+  const visN = topology.nodes.filter(n => _nodeVisible(n.id)).length;
+  const visE = topology.edges.filter(e => _nodeVisible(e.source) && _nodeVisible(e.target)).length;
+  envLabel.textContent = `${envText}  |  ${visN} services  |  ${visE} edges`;
 
   renderGraph();
 
@@ -1252,6 +1383,22 @@ function connectSSE() {
       addInfraLogEntries(msg.infra_events || {}, msg.affected || []);
     } else if (msg.type === "topology_update") {
       applyTopologyUpdate(msg);
+    } else if (msg.type === "env_switched") {
+      // Server reloaded a new environment — update topology and reset UI
+      topology = { nodes: msg.nodes || [], edges: msg.edges || [] };
+      _rebuildAppGroupCache();
+      active = {}; causalityChain = []; rootCause = null;
+      newNodes = []; newEdges = []; infraEvents = {};
+      _discoveredNodeIds.clear();
+      const visNodes = topology.nodes.filter(n => _nodeVisible(n.id));
+      const visEdges = topology.edges.filter(e => _nodeVisible(e.source) && _nodeVisible(e.target));
+      document.getElementById("env-label").textContent =
+        `env: ${msg.environment}  |  ${visNodes.length} services  |  ${visEdges.length} edges`;
+      const sel = document.getElementById("env-select");
+      if (sel) sel.value = msg.environment;
+      simulation = null; // force new simulation for new graph shape
+      renderGraph();
+      updatePanel();
     } else if (msg.type === "recovered") {
       applyState({}, [], [], [], {}, [], {});
       flashRecovery(msg.message);
@@ -1298,8 +1445,17 @@ async function clearAnomalies() {
   rootCause = null;
   newNodes = [];
   newEdges = [];
+  confidence = {};
+  suppressed = new Set();
   applyProblem(null);
-  renderGraph();
+  // Only update visual state — don't restart simulation
+  nodesG.selectAll(".node").attr("class", d => `node node-${nodeState(d.id)}`);
+  linksG.selectAll(".link").attr("class", d => {
+    const src = typeof d.source === "object" ? d.source.id : d.source;
+    const dst = typeof d.target === "object" ? d.target.id : d.target;
+    return `link link-${edgeState(src, dst)}`;
+  });
+  updateBadge();
   updatePanel();
   document.getElementById("log-entries").innerHTML = "";
 }
@@ -1412,7 +1568,7 @@ window.addEventListener("resize", () => {
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────
-loadTopology().then(() => connectSSE());
+_loadEnvironments().then(() => loadTopology()).then(() => connectSSE());
 </script>
 </body>
 </html>
