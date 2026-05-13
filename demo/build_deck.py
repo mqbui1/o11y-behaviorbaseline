@@ -484,9 +484,9 @@ def slide_detection_layers(prs):
         "  \u2022  Custom events from the processor",
         "       (trace.path.drift, error.signature.drift)",
         "",
-        "  The framework does NOT depend on APM\n"
-        "  AutoDetect to fire — it owns its own\n"
-        "  metric and structural detection.",
+        "  All detection is self-contained in the\n"
+        "  OTel processor — no Splunk-side rules\n"
+        "  or detectors required.",
     ]
     add_bullet_box(s, Inches(5.24), Inches(2.02), Inches(4.28), Inches(2.9),
                    splunk_items, font_size=11, color=RGBColor(0xBB, 0xCC, 0xDD))
