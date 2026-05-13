@@ -558,135 +558,9 @@ def _parse_event(line: str) -> dict | None:
         }
 
 
-# ── SSH log tail (background task) ───────────────────────────────────────────
-
-async def _tail_otel_logs(environment: str) -> None:
-    """Background task: tail OTel collector pod logs and broadcast drift events.
-
-    Auto-reconnects when the SSH stream dies (e.g. after pods are cycled by
-    demo-between.sh). Each reconnect refreshes pod names so new pods are picked up.
-    """
-    seen_hashes: dict[str, float] = {}
-    DEDUP_TTL = 90
-    RECONNECT_DELAY = 5  # seconds between reconnect attempts
-
-    while True:
-        ssh_cmd = (
-            "exec bash -c '"
-            f"for p in $(kubectl get pods -l {DAEMONSET_LABEL} -o jsonpath=\"{{.items[*].metadata.name}}\");"
-            f" do kubectl logs -f --since=5s $p -c {OTEL_CONTAINER} 2>/dev/null & done;"
-            " wait'"
-        )
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "sshpass", f"-p{EC2_PASS}",
-                "ssh", "-T", "-p", EC2_PORT,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "RequestTTY=no",
-                "-o", "ServerAliveInterval=10",
-                "-o", "ServerAliveCountMax=3",
-                f"splunk@{EC2_IP}",
-                ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        except Exception as exc:
-            print(f"[topology] SSH connect failed: {exc} — retrying in {RECONNECT_DELAY}s", flush=True)
-            await asyncio.sleep(RECONNECT_DELAY)
-            continue
-
-        print(f"[topology] tailing OTel logs for env={environment}", flush=True)
-        async for raw in proc.stdout:
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            event = _parse_event(line)
-            if event is None:
-                continue
-
-            h = event.get("hash", "")
-            svc = event.get("service", "")
-            atype = event.get("anomaly_type", "")
-            now = time.time()
-
-            # Deduplicate
-            dedup_key = h if h else f"{atype}:{svc}"
-            if now - seen_hashes.get(dedup_key, 0) < DEDUP_TTL:
-                continue
-            seen_hashes[dedup_key] = now
-
-            # Skip infra noise
-            if svc in _INFRA:
-                continue
-            # Skip direct-service NEW_FINGERPRINT (OTel auto-promotion noise)
-            if atype == "NEW_FINGERPRINT":
-                root_svc = event.get("root_op", "").split(":")[0]
-                if root_svc not in {"api-gateway"}:
-                    continue
-
-            # Ignore events during post-recovery lockout (absorbs pod log replay after pod cycling)
-            if _recovery_time and now - _recovery_time < RECOVERY_LOCKOUT:
-                print(f"[topology] suppressed (lockout {RECOVERY_LOCKOUT - (now - _recovery_time):.0f}s remaining): {atype} on {svc}", flush=True)
-                continue
-
-            print(f"[topology] event: {atype} on {svc}", flush=True)
-
-            # Update active anomalies and last-drift timestamp
-            global _last_drift_time
-            _last_drift_time = now
-            _active_anomalies[svc].append(event)
-            # For MISSING_SERVICE, also mark the caller as DRIFT — but only if it
-            # has no own anomaly yet (don't overwrite ERROR with a weaker DRIFT signal).
-            if atype == "MISSING_SERVICE":
-                caller = event.get("root_op", "").split(":")[0]
-                if caller and caller != svc and caller not in _INFRA:
-                    if not _active_anomalies[caller]:
-                        caller_event = dict(event,
-                            service=caller,
-                            anomaly_type="NEW_FINGERPRINT",
-                            message=f"Trace path changed — {svc} no longer reachable from {caller}",
-                        )
-                        _active_anomalies[caller].append(caller_event)
-
-            # Build causality chain
-            chain, confidence = _find_root_cause(_topology_cache, _active_anomalies)
-            root_cause = chain[0] if chain else svc
-            affected_svcs = [s for s, v in _active_anomalies.items() if v]
-
-            # Problem lifecycle
-            if _current_problem_id is None:
-                pid = _open_problem(root_cause, affected_svcs, event)
-            else:
-                pid = _current_problem_id
-                _update_problem(pid, root_cause, affected_svcs, event)
-            event["problem_id"] = pid
-
-            # Build broadcast payload
-            suppressed = [s for s in affected_svcs
-                          if _downstream_suppressed(s, root_cause, _topology_cache, _active_anomalies)]
-            payload = {
-                "type":            "drift",
-                "event":           event,
-                "active":          {k: v for k, v in _active_anomalies.items() if v},
-                "causality_chain": chain,
-                "root_cause":      root_cause,
-                "confidence":      confidence,
-                "suppressed":      suppressed,
-                "timestamp_ms":    int(now * 1000),
-                "problem":         _problems[pid],
-            }
-
-            # Broadcast to all SSE subscribers
-            dead = []
-            for q in _subscribers:
-                try:
-                    q.put_nowait(payload)
-                except asyncio.QueueFull:
-                    dead.append(q)
-            for q in dead:
-                _subscribers.remove(q)
-
-        await proc.wait()
-        print(f"[topology] SSH stream ended — reconnecting in {RECONNECT_DELAY}s", flush=True)
-        await asyncio.sleep(RECONNECT_DELAY)
+# ── SSH log tail / topology polling (background tasks) ───────────────────────
+# Dynamic versions that read environment from a mutable state dict are defined
+# after the helper functions above (_tail_otel_logs_dynamic, _tail_topology_events_dynamic).
 
 
 def _merge_topology_edges(added_nodes: list[dict], added_edges: list[dict]) -> None:
@@ -733,98 +607,6 @@ def _broadcast_topology_update(added_nodes: list[dict], added_edges: list[dict])
             dead.append(q)
     for q in dead:
         _subscribers.remove(q)
-
-
-async def _tail_topology_events(environment: str) -> None:
-    """Background task: poll topology.json from all OTel collector pods via SSH.
-
-    The OTel fingerprintprocessor writes topology.json to /baseline/ on each pod.
-    This coroutine polls all pods every 15s, merges any new edges into the live
-    topology cache, and broadcasts topology_update to connected browser clients.
-    """
-    POLL_INTERVAL = 15  # seconds between polls
-
-    while True:
-        await asyncio.sleep(POLL_INTERVAL)
-        try:
-            # Fetch topology.json from all pods in parallel via a single SSH command
-            ssh_cmd = (
-                "exec bash -c '"
-                f"for p in $(kubectl get pods -l {DAEMONSET_LABEL}"
-                " -o jsonpath=\"{.items[*].metadata.name}\");"
-                " do kubectl exec $p -c otelcol -- cat /baseline/topology.json 2>/dev/null"
-                " && echo \"---EOF---\"; done'"
-            )
-            proc = await asyncio.create_subprocess_exec(
-                "sshpass", f"-p{EC2_PASS}",
-                "ssh", "-T", "-p", EC2_PORT,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "RequestTTY=no",
-                f"splunk@{EC2_IP}",
-                ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
-            output = stdout.decode("utf-8", errors="replace")
-
-            # Split by pod delimiter and parse each topology.json
-            all_edges: dict[str, dict] = {}
-            for chunk in output.split("---EOF---"):
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                try:
-                    data = json.loads(chunk)
-                    for key, edge in data.get("edges", {}).items():
-                        if key not in all_edges:
-                            all_edges[key] = edge
-                        else:
-                            # Merge: take higher count
-                            if edge.get("count", 0) > all_edges[key].get("count", 0):
-                                all_edges[key] = edge
-                except Exception:
-                    continue
-
-            if not all_edges:
-                continue
-
-            # Find edges not yet in the topology cache
-            existing_keys = {
-                f"{e['source']}->{e['target']}"
-                for e in _topology_cache.get("edges", [])
-            }
-            existing_ids = {n["id"] for n in _topology_cache.get("nodes", [])}
-
-            added_nodes: list[dict] = []
-            added_edges: list[dict] = []
-            seen_new_ids: set[str] = set()
-
-            for key, edge in all_edges.items():
-                caller = edge.get("caller", "")
-                callee = edge.get("callee", "")
-                if not caller or not callee:
-                    continue
-                if caller in _INFRA or callee in _INFRA:
-                    continue
-                edge_key = f"{caller}->{callee}"
-                if edge_key not in existing_keys:
-                    added_edges.append({"source": caller, "target": callee,
-                                        "weight": edge.get("count", 1)})
-                    print(f"[topology] discovered edge: {caller} → {callee}", flush=True)
-                for svc in (caller, callee):
-                    if svc not in existing_ids and svc not in seen_new_ids:
-                        added_nodes.append({"id": svc, "traffic": 0})
-                        seen_new_ids.add(svc)
-
-            if added_nodes or added_edges:
-                _merge_topology_edges(added_nodes, added_edges)
-                _broadcast_topology_update(added_nodes, added_edges)
-
-        except asyncio.TimeoutError:
-            print("[topology] SSH poll timed out", flush=True)
-        except Exception as e:
-            print(f"[topology] poll error: {e}", flush=True)
 
 
 async def _poll_infra_events() -> None:
@@ -1012,6 +794,258 @@ async def _expire_anomalies() -> None:
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
+def _list_environments() -> list[str]:
+    """Return sorted list of environment names that have a local baseline file."""
+    envs = []
+    for p in sorted(_DATA_DIR.glob("baseline.*.json")):
+        name = p.stem[len("baseline."):]
+        if name and name != "unknown":
+            envs.append(name)
+    return envs
+
+
+# ── Dynamic wrappers for background tasks that respect env switching ──────────
+
+async def _tail_otel_logs_dynamic(state: dict) -> None:
+    """Wrapper around _tail_otel_logs that reads environment from mutable state dict."""
+    seen_hashes: dict[str, float] = {}
+    DEDUP_TTL = 90
+    RECONNECT_DELAY = 5
+
+    while True:
+        environment = state["environment"]
+        ssh_cmd = (
+            "exec bash -c '"
+            f"for p in $(kubectl get pods -l {DAEMONSET_LABEL} -o jsonpath=\"{{.items[*].metadata.name}}\");"
+            f" do kubectl logs -f --since=5s $p -c {OTEL_CONTAINER} 2>/dev/null & done;"
+            " wait'"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sshpass", f"-p{EC2_PASS}",
+                "ssh", "-T", "-p", EC2_PORT,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "RequestTTY=no",
+                "-o", "ServerAliveInterval=10",
+                "-o", "ServerAliveCountMax=3",
+                f"splunk@{EC2_IP}",
+                ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception as exc:
+            print(f"[topology] SSH connect failed: {exc} — retrying in {RECONNECT_DELAY}s", flush=True)
+            await asyncio.sleep(RECONNECT_DELAY)
+            continue
+
+        print(f"[topology] tailing OTel logs for env={environment}", flush=True)
+        async for raw in proc.stdout:
+            # If environment switched, kill stream and reconnect
+            if state["environment"] != environment:
+                proc.terminate()
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            event = _parse_event(line)
+            if event is None:
+                continue
+
+            h = event.get("hash", "")
+            svc = event.get("service", "")
+            atype = event.get("anomaly_type", "")
+            now = time.time()
+
+            dedup_key = h if h else f"{atype}:{svc}"
+            if now - seen_hashes.get(dedup_key, 0) < DEDUP_TTL:
+                continue
+            seen_hashes[dedup_key] = now
+
+            if svc in _INFRA:
+                continue
+            if atype == "NEW_FINGERPRINT":
+                root_svc = event.get("root_op", "").split(":")[0]
+                if root_svc not in {"api-gateway"}:
+                    continue
+
+            global _last_drift_time, _recovery_time
+            if _recovery_time and now - _recovery_time < RECOVERY_LOCKOUT:
+                continue
+
+            print(f"[topology] event: {atype} on {svc}", flush=True)
+            _last_drift_time = now
+            _active_anomalies[svc].append(event)
+            if atype == "MISSING_SERVICE":
+                caller = event.get("root_op", "").split(":")[0]
+                if caller and caller != svc and caller not in _INFRA:
+                    if not _active_anomalies[caller]:
+                        caller_event = dict(event,
+                            service=caller,
+                            anomaly_type="NEW_FINGERPRINT",
+                            message=f"Trace path changed — {svc} no longer reachable from {caller}",
+                        )
+                        _active_anomalies[caller].append(caller_event)
+
+            chain, confidence = _find_root_cause(_topology_cache, _active_anomalies)
+            root_cause = chain[0] if chain else svc
+            affected_svcs = [s for s, v in _active_anomalies.items() if v]
+
+            if _current_problem_id is None:
+                pid = _open_problem(root_cause, affected_svcs, event)
+            else:
+                pid = _current_problem_id
+                _update_problem(pid, root_cause, affected_svcs, event)
+            event["problem_id"] = pid
+
+            suppressed = [s for s in affected_svcs
+                          if _downstream_suppressed(s, root_cause, _topology_cache, _active_anomalies)]
+            payload = {
+                "type":            "drift",
+                "event":           event,
+                "active":          {k: v for k, v in _active_anomalies.items() if v},
+                "causality_chain": chain,
+                "root_cause":      root_cause,
+                "confidence":      confidence,
+                "suppressed":      suppressed,
+                "timestamp_ms":    int(now * 1000),
+                "problem":         _problems[pid],
+            }
+            dead = []
+            for q in _subscribers:
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    dead.append(q)
+            for q in dead:
+                _subscribers.remove(q)
+
+        await proc.wait()
+        print(f"[topology] SSH stream ended — reconnecting in {RECONNECT_DELAY}s", flush=True)
+        await asyncio.sleep(RECONNECT_DELAY)
+
+
+async def _tail_topology_events_dynamic(state: dict) -> None:
+    """Wrapper around _tail_topology_events that reads environment from mutable state dict."""
+    POLL_INTERVAL = 15
+    while True:
+        await asyncio.sleep(POLL_INTERVAL)
+        environment = state["environment"]
+        try:
+            ssh_cmd = (
+                "exec bash -c '"
+                f"for p in $(kubectl get pods -l {DAEMONSET_LABEL}"
+                " -o jsonpath=\"{.items[*].metadata.name}\");"
+                " do kubectl exec $p -c otelcol -- cat /baseline/topology.json 2>/dev/null"
+                " && echo \"---EOF---\"; done'"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                "sshpass", f"-p{EC2_PASS}",
+                "ssh", "-T", "-p", EC2_PORT,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "RequestTTY=no",
+                f"splunk@{EC2_IP}",
+                ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+            output = stdout.decode("utf-8", errors="replace")
+
+            all_edges: dict[str, dict] = {}
+            for chunk in output.split("---EOF---"):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                try:
+                    data = json.loads(chunk)
+                    for key, edge in data.get("edges", {}).items():
+                        if key not in all_edges:
+                            all_edges[key] = edge
+                        else:
+                            if edge.get("count", 0) > all_edges[key].get("count", 0):
+                                all_edges[key] = edge
+                except Exception:
+                    continue
+
+            if not all_edges:
+                continue
+
+            existing_keys = {
+                f"{e['source']}->{e['target']}"
+                for e in _topology_cache.get("edges", [])
+            }
+            existing_ids = {n["id"] for n in _topology_cache.get("nodes", [])}
+            added_nodes: list[dict] = []
+            added_edges: list[dict] = []
+            seen_new_ids: set[str] = set()
+
+            for key, edge in all_edges.items():
+                caller = edge.get("caller", "")
+                callee = edge.get("callee", "")
+                if not caller or not callee:
+                    continue
+                if caller in _INFRA or callee in _INFRA:
+                    continue
+                edge_key = f"{caller}->{callee}"
+                if edge_key not in existing_keys:
+                    added_edges.append({"source": caller, "target": callee,
+                                        "weight": edge.get("count", 1)})
+                for svc in (caller, callee):
+                    if svc not in existing_ids and svc not in seen_new_ids:
+                        added_nodes.append({"id": svc, "traffic": 0})
+                        seen_new_ids.add(svc)
+
+            if added_nodes or added_edges:
+                _merge_topology_edges(added_nodes, added_edges)
+                _broadcast_topology_update(added_nodes, added_edges)
+
+        except asyncio.TimeoutError:
+            print("[topology] SSH poll timed out", flush=True)
+        except Exception as e:
+            print(f"[topology] poll error: {e}", flush=True)
+
+
+# Known service groups for app filtering within a mixed environment
+_APP_GROUPS: dict[str, set[str]] = {
+    "petclinic": {
+        "api-gateway", "customers-service", "vets-service", "visits-service",
+        "mysql:petclinic", "admin-server",
+    },
+    "otel-demo": {
+        "frontend", "frontendproxy", "cartservice", "checkoutservice",
+        "productcatalogservice", "currencyservice", "paymentservice",
+        "emailservice", "shippingservice", "recommendationservice",
+        "adservice", "loadgenerator", "accountingservice", "flagd",
+        "kafka", "fraud-detection-1.0-all", "quoteservice",
+        "featureflagservice", "Accounting", "fraud-detection",
+    },
+}
+
+# Prefix-based fallback for otel-demo services not in the explicit set
+_OTEL_DEMO_PREFIXES = ("cart", "checkout", "product", "currency", "payment",
+                       "email", "shipping", "recommendation", "ad", "quote",
+                       "feature", "fraud", "accounting", "load", "frontend",
+                       "flagd", "kafka")
+_PETCLINIC_SUFFIXES = ("-service", ":petclinic")
+
+
+def _classify_service(svc: str) -> str:
+    """Return 'petclinic', 'otel-demo', or 'unknown' for a service name."""
+    if not svc or svc.startswith("unknown"):
+        return "unknown"
+    sl = svc.lower()
+    # Explicit sets take priority
+    if svc in _APP_GROUPS["petclinic"]:
+        return "petclinic"
+    if svc in _APP_GROUPS["otel-demo"]:
+        return "otel-demo"
+    # Prefix match for otel-demo before suffix match for petclinic
+    # (avoids misclassifying e.g. "checkoutservice" as petclinic via -service suffix)
+    if sl.startswith(_OTEL_DEMO_PREFIXES):
+        return "otel-demo"
+    if any(sl.endswith(s) for s in _PETCLINIC_SUFFIXES):
+        return "petclinic"
+    return "unknown"
+
+
 def _make_app(environment: str):
     try:
         from fastapi import FastAPI
@@ -1020,31 +1054,43 @@ def _make_app(environment: str):
         print("ERROR: fastapi not installed. Run: pip install fastapi uvicorn")
         sys.exit(1)
 
+    # Mutable state shared with background tasks
+    _state = {"environment": environment}
+
     app = FastAPI()
     html_file = Path(__file__).parent / "topology.html"
 
-    @app.on_event("startup")
-    async def _startup():
-        global _topology_cache, _baseline_cache
-        fps = _load_baseline(environment)
+    def _reload_environment(env: str) -> None:
+        """Reload baseline + topology cache for env. Clears active anomaly state."""
+        global _topology_cache, _baseline_cache, _active_anomalies, _new_nodes, _new_edges
+        global _problems, _current_problem_id, _last_drift_time, _recovery_time
+        _state["environment"] = env
+        fps = _load_baseline(env)
         _baseline_cache = fps
         _topology_cache = _build_topology_from_baseline(fps)
-        print(f"[topology] baseline: {len(fps)} fingerprints, "
-              f"{len(_topology_cache['nodes'])} nodes, "
-              f"{len(_topology_cache['edges'])} edges")
-        # Merge any OTel-discovered topology edges from topology.json on disk
-        topo_edges = _load_topology_json(environment)
+        topo_edges = _load_topology_json(env)
         if topo_edges:
             result = _topology_edges_to_graph(topo_edges, _topology_cache)
             if result["added_nodes"] or result["added_edges"]:
                 _merge_topology_edges(result["added_nodes"], result["added_edges"])
-                print(f"[topology] loaded topology.json: "
-                      f"+{len(result['added_nodes'])} nodes, "
-                      f"+{len(result['added_edges'])} edges from OTel processor", flush=True)
+        _active_anomalies.clear()
+        _new_nodes.clear()
+        _new_edges.clear()
+        _problems.clear()
+        _current_problem_id = None
+        _last_drift_time = 0.0
+        _recovery_time = 0.0
+        print(f"[topology] switched to env={env}: "
+              f"{len(fps)} fingerprints, "
+              f"{len(_topology_cache['nodes'])} nodes, "
+              f"{len(_topology_cache['edges'])} edges", flush=True)
 
-        asyncio.create_task(_tail_otel_logs(environment))
+    @app.on_event("startup")
+    async def _startup():
+        _reload_environment(environment)
+        asyncio.create_task(_tail_otel_logs_dynamic(_state))
         asyncio.create_task(_expire_anomalies())
-        asyncio.create_task(_tail_topology_events(environment))
+        asyncio.create_task(_tail_topology_events_dynamic(_state))
         asyncio.create_task(_poll_infra_events())
 
     @app.get("/", response_class=HTMLResponse)
@@ -1053,15 +1099,20 @@ def _make_app(environment: str):
 
     @app.get("/api/topology")
     async def _get_topology():
+        env = _state["environment"]
         cur = _problems.get(_current_problem_id) if _current_problem_id else None
         chain, confidence = _find_root_cause(_topology_cache, _active_anomalies)
         root_cause = chain[0] if chain else None
         affected_svcs = [s for s, v in _active_anomalies.items() if v]
         suppressed = [s for s in affected_svcs
                       if _downstream_suppressed(s, root_cause, _topology_cache, _active_anomalies)] if root_cause else []
+        # Annotate each node with its app group
+        nodes = _topology_cache.get("nodes", [])
+        for n in nodes:
+            n["app_group"] = _classify_service(n["id"])
         return JSONResponse({
-            "environment":     environment,
-            "nodes":           _topology_cache.get("nodes", []),
+            "environment":     env,
+            "nodes":           nodes,
             "edges":           _topology_cache.get("edges", []),
             "active":          {k: v for k, v in _active_anomalies.items() if v},
             "new_nodes":       list(_new_nodes.values()),
@@ -1074,13 +1125,49 @@ def _make_app(environment: str):
             "infra_events":    dict(_infra_events),
         })
 
+    @app.get("/api/environments")
+    async def _get_environments():
+        envs = _list_environments()
+        return JSONResponse({
+            "environments": envs,
+            "current": _state["environment"],
+        })
+
+    @app.post("/api/switch")
+    async def _switch_environment(body: dict):
+        from fastapi import HTTPException
+        env = body.get("environment", "")
+        if not env:
+            raise HTTPException(400, "environment required")
+        avail = _list_environments()
+        if env not in avail:
+            raise HTTPException(404, f"No baseline found for '{env}'. Available: {avail}")
+        _reload_environment(env)
+        # Notify all connected clients to reload
+        payload = {
+            "type":        "env_switched",
+            "environment": env,
+            "nodes":       _topology_cache.get("nodes", []),
+            "edges":       _topology_cache.get("edges", []),
+        }
+        dead = []
+        for q in _subscribers:
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            _subscribers.remove(q)
+        return JSONResponse({"ok": True, "environment": env,
+                             "nodes": len(_topology_cache.get("nodes", [])),
+                             "edges": len(_topology_cache.get("edges", []))})
+
     @app.get("/api/clear")
     async def _clear():
-        global _new_nodes, _new_edges
+        global _new_nodes, _new_edges, _current_problem_id
         _active_anomalies.clear()
         _new_nodes.clear()
         _new_edges.clear()
-        # Close any open problem
         if _current_problem_id:
             _close_problem(_current_problem_id, int(time.time() * 1000))
         payload = {"type": "state", "active": {}, "new_nodes": [], "new_edges": [], "problem": None}
@@ -1123,7 +1210,7 @@ def _make_app(environment: str):
 
         watch_result = {
             "anomalies":   anomalies,
-            "environment": environment,
+            "environment": _state["environment"],
             "window":      {"minutes": 5},
             "summary":     {"total": len(anomalies), "services": list(affected.keys())},
         }
@@ -1139,7 +1226,7 @@ def _make_app(environment: str):
 
         # Inject topology context (mirrors what agent.main() does)
         try:
-            topo_ctx = agent._build_topology_context(environment)
+            topo_ctx = agent._build_topology_context(_state["environment"])
             if topo_ctx:
                 watch_result["topology_context"] = topo_ctx
         except Exception:
@@ -1147,7 +1234,7 @@ def _make_app(environment: str):
 
         # Inject hypothesis context
         try:
-            hyp_ctx = agent._build_hypothesis_context(anomalies, environment)
+            hyp_ctx = agent._build_hypothesis_context(anomalies, _state["environment"])
             if hyp_ctx:
                 watch_result["hypothesis_context"] = hyp_ctx
         except Exception:
@@ -1157,7 +1244,7 @@ def _make_app(environment: str):
         loop = asyncio.get_event_loop()
         try:
             plan = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: agent.reason(watch_result, env=environment)),
+                loop.run_in_executor(None, lambda: agent.reason(watch_result, env=_state["environment"])),
                 timeout=60,
             )
         except asyncio.TimeoutError:
