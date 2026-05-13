@@ -1,6 +1,6 @@
 # Behavioral Baseline — Anomaly Detection for Splunk Observability
 
-**Augments Splunk APM AutoDetect** with structural and behavioral detection that metric thresholds cannot catch. Splunk's built-in AutoDetect already covers error rate, latency, and request rate anomalies for every APM-enabled service. This framework adds a second layer on top:
+An **independent behavioral detection layer** that runs inside the OTel Collector — detecting structural and performance anomalies that metric thresholds cannot catch. Splunk Observability Cloud is the telemetry backend: it receives forwarded spans, stores traces, and provides dashboards. All detection logic lives in the OTel processor:
 
 - A service that has never called your database suddenly does
 - A known DB caller goes completely silent
@@ -37,7 +37,7 @@ flowchart TD
 
     subgraph SPLUNK["☁️  Splunk Observability Cloud"]
         direction TB
-        APM["📊  Splunk APM\nTraces · Metrics\nAutoDetect: error rate, latency,\nrequest rate  →  Tier 1 alerts"]
+        APM["📊  Splunk APM\nTraces · Metrics\nTrace storage · Service Map · Dashboards\n(telemetry backend — detection runs in OTel)"]
         EVENTS["📡  Custom Events  (SignalFlow)\ntrace.path.drift          Tier 2\nerror.signature.drift     Tier 3\ntrace.fingerprint.promoted\ndeployment.started\nbehavioral_baseline.*"]
         APM --> EVENTS
     end
@@ -75,8 +75,8 @@ flowchart TD
 |------|-----|---------|
 | **OTel edge → `poll_drift_events --triage` → `agent.py`** | Tails collector logs via SSH — no Splunk indexing wait. Kill-to-verdict in demo mode. | **~15–30s** (10s detect + 5s settle + ~10s Claude) |
 | **OTel edge → `triage-agent`** | Processor detects on first affected trace, event lands in Splunk, triage-agent inline-correlates and calls LLM | **~60–90s** (15s detect + 30s index + 60s poll cycle) |
-| **OTel edge → inline `correlate.py`** | Tier 2/3 events joined with Tier 1 AutoDetect incidents inside triage-agent | **~1–2 min** (triage-agent poll cycle) |
-| **Splunk AutoDetect → inline `correlate.py`** | Native metric alerts joined with Tier 2/3 events | **~3–7 min** (metric aggregation + poll cycle) |
+| **OTel edge → inline `correlate.py`** | Tier 1/2/3 events correlated inside triage-agent | **~1–2 min** (triage-agent poll cycle) |
+| **Splunk metric alerts → inline `correlate.py`** | Splunk-side metric alerts joined with OTel Tier 2/3 events | **~3–7 min** (metric aggregation + poll cycle) |
 
 ### Baseline lifecycle
 
@@ -145,7 +145,7 @@ o11y-behaviorbaseline/
 │   ├── trace_fingerprint.py        ← Tier 2: trace path drift
 │   ├── error_fingerprint.py        ← Tier 3: error signature drift
 │   ├── correlate.py                ← Tier C: cross-tier correlation (also used inline by triage-agent)
-│   └── provision_detectors.py      ← Tiers 1b/3/4: SignalFlow detectors
+│   └── provision_detectors.py      ← SignalFlow detectors for Splunk-side alerting
 │
 ├── agents/                   ← long-running Deployment agents + standalone helpers
 │   ├── baseline_agent.py           ← Deployment: learn/onboard/heal lifecycle (replaces CronJobs)
@@ -245,19 +245,15 @@ Action types: `NO_ACTION`, `SUPPRESS_ANOMALY`, `RELEARN_BASELINE`, `EMIT_EVENT`,
 
 ## Detection tiers
 
+All detection runs inside the OTel Collector processor — no dependency on Splunk AutoDetect.
+
 | Tier | Source | What it detects | How |
 |------|--------|----------------|-----|
-| 1b | Splunk APM AutoDetect _(native)_ | Request rate spike on ingress services | Built-in — fires for all APM environments automatically |
-| 3  | Splunk APM AutoDetect _(native)_ | Error rate spike per service | Built-in — fires for all APM environments automatically |
-| 4  | Splunk APM AutoDetect _(native)_ | p99 latency drift per service | Built-in — fires for all APM environments automatically |
-| 2  | `core/trace_fingerprint.py`  | New/changed execution paths, missing services | SHA-256 of ordered parent→child span edge sequence |
-| 3+ | `core/error_fingerprint.py`  | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
+| 1  | `otel-processor` (metric) | Latency anomaly, error rate anomaly, span count drop/spike | Z-score vs per-op Welford baseline; rate spike vs rolling window |
+| 2  | `otel-processor` (structural) + `core/trace_fingerprint.py` | New/changed execution paths, missing services | SHA-256 of ordered parent→child span edge sequence |
+| 3  | `otel-processor` (error) + `core/error_fingerprint.py` | New error signatures, rate spikes, vanished signatures | SHA-256 of service + error_type + operation + call_path |
 | DB | `otel-processor` (`dbquery.go`) | New SQL query templates, slow queries vs baseline | Normalises SQL literals → template, z-score vs Welford baseline per (service, db_system, template) |
-| C  | `core/correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 2/3 events by service within a time window |
-
-**Tiers 1b, 3, and 4** are native Splunk APM AutoDetect — no provisioning required; they fire automatically for every APM-enabled environment.
-
-**Tiers 2, 3+, and C** are this framework's behavioral layer — structural drift detection that AutoDetect cannot provide. They run as scheduled scripts on cron.
+| C  | `core/correlate.py`          | 2+ tiers firing on same service simultaneously | Joins Tier 1/2/3 events by service within a time window |
 
 The **span count distribution** (min/max per fingerprint, tracked during `learn`) extends Tier 2 to catch silent degradation that leaves error rate and latency untouched:
 
@@ -346,7 +342,7 @@ python onboard.py --teardown --environment petclinicmbtest
 
 For each new environment, `onboard.py` creates:
 
-> **Note:** Error rate, latency, and request rate alerts are already covered by Splunk APM AutoDetect for every APM-enabled environment. No detector provisioning is required.
+> **Note:** Tier 1 performance anomalies (latency, error rate, span count) are detected by the OTel processor and do not require Splunk detector provisioning.
 
 | Output | Location | Description |
 |--------|----------|-------------|
@@ -446,9 +442,7 @@ export ERROR_BASELINE_PATH=/opt/baselines/error_baseline.json
 
 ## Alerts emitted
 
-Tiers 1b/3/4 fire as native Splunk detector alerts (visible in Alerts & Detectors UI).
-
-Tiers 2, 3, and C emit **custom events** queryable via SignalFlow:
+The OTel processor emits all anomaly signals as **custom events** to Splunk ingest, queryable via SignalFlow:
 
 | Event type | Tier | Key dimensions |
 |------------|------|----------------|
@@ -648,7 +642,7 @@ The OTel processor and `correlate.py` are **complementary layers, not alternativ
 | Detection latency | ~10 seconds | ~1–5 minutes (cron) |
 | Trace structure drift (Tier 2) | ✅ locally | ✅ via Splunk APM backend |
 | New error signatures (Tier 3) | ✅ locally | ✅ via Splunk APM backend |
-| Tier 1 AutoDetect metric incidents | ❌ no API access | ✅ fetches via `/v2/incident` |
+| Tier 1 metric anomalies (latency, error rate, span count) | ✅ locally (~10s) | ✅ also queryable via Splunk API |
 | Multi-tier correlation (2+ tiers same service) | ❌ no tier concept | ✅ `TIER2_TIER3`, `MULTI_TIER`, etc. |
 | Multiple detectors for same application | ❌ unaware of detectors | ✅ joins all detector origins |
 | Spans split across multiple collector nodes | ⚠️ partial trace guard (see below) | ✅ queries full trace from backend |
@@ -656,7 +650,7 @@ The OTel processor and `correlate.py` are **complementary layers, not alternativ
 | Auto-promotion across watch runs | ✅ in-memory counter, writes back to disk | ✅ `dedup_state.<env>.json` |
 | Cross-environment correlation | ❌ | ✅ `multi_env_correlator.py` |
 
-**The edge processor is a fast-trigger early warning system.** Its `trace.path.drift` and `error.signature.drift` events feed directly into `correlate.py` (Tier 2 and Tier 3 respectively), where they are joined with Tier 1 AutoDetect incidents to produce high-confidence correlated alerts. The Python layer has the full picture; the edge layer has speed.
+**The edge processor is the primary detection engine.** Its events (`trace.path.drift`, `error.signature.drift`, and metric anomaly events) feed directly into `correlate.py`, where multi-tier signals are joined into high-confidence correlated alerts. The Python layer adds deployment context and cross-environment correlation; the edge layer owns detection speed and signal generation.
 
 ### Partial trace guard
 
@@ -825,6 +819,6 @@ All settings are in the `otelcol-fingerprint-config` ConfigMap under `fingerprin
 
 - **Auto-promotion lag**: New patterns after a deployment will alert until `baseline-agent` completes its next learn cycle (default: 2h). Use `notify_deployment.py` in your CI/CD pipeline to trigger an immediate re-learn via the running `baseline-agent` pod.
 - **Trace search cap**: The Splunk APM trace search API returns at most 200 traces per query, regardless of `WATCH_SAMPLE_LIMIT`. Low-frequency paths may need multiple learn windows to achieve full coverage.
-- **AutoDetect parent detectors**: Tiers 1b, 3, and 4 create `AutoDetectCustomization` children. The org-wide parent detectors must exist in your org — they are created automatically by Splunk Observability in all orgs with APM enabled.
+- **Splunk-side detectors**: `provision_detectors.py` can optionally create SignalFlow detectors in Splunk for Splunk-side alerting (On-Call routing, etc.). These are supplemental — all core detection runs in the OTel processor regardless.
 - **LLM credentials**: `triage-agent` uses AWS Bedrock via ambient IAM credentials (no API key needed in workshop clusters). If Bedrock is unavailable, it falls back to `ANTHROPIC_API_KEY` then `GROQ_API_KEY` — set these in `triage-secret` only if running outside AWS.
 - **Edge processor baseline sync**: After auto-promotion, the updated baseline is written to the mounted path on that pod only. Other DaemonSet pods pick it up on their next `baseline_reload_interval` tick. `baseline-agent` also pushes the baseline directly into each running pod every learn cycle via `kubectl cp`.
