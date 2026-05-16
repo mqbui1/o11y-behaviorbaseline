@@ -209,6 +209,31 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
              for (src, dst), w in sorted(edge_weights.items(), key=lambda x: -x[1])
              if _valid(src) and _valid(dst)]
 
+    # Inject synthetic Kafka-mediated edges for astronomy shop.
+    # fraud-detection and accounting are Kafka consumers — they have no upstream
+    # service in their trace because Kafka sits between producer and consumer.
+    # Wire: checkout -> kafka -> fraud-detection, checkout -> kafka -> accounting
+    node_ids = {n["id"] for n in nodes}
+    _KAFKA_EDGES = [
+        ("checkout", "kafka"),
+        ("kafka", "fraud-detection"),
+        ("kafka", "accounting"),
+    ]
+    for src, dst in _KAFKA_EDGES:
+        if src in node_ids or dst in node_ids:
+            if src not in node_ids:
+                nodes.append({"id": src, "traffic": 0})
+                node_ids.add(src)
+            if dst not in node_ids:
+                nodes.append({"id": dst, "traffic": 0})
+                node_ids.add(dst)
+            edge_key = (src, dst)
+            if not any(e["source"] == src and e["target"] == dst for e in edges):
+                edges.append({"source": src, "target": dst, "weight": 1})
+                edge_weights[edge_key] = 1
+                downstream[src].append(dst)
+                upstream[dst].append(src)
+
     return {
         "nodes":      nodes,
         "edges":      edges,
@@ -1046,6 +1071,14 @@ def _classify_service(svc: str) -> str:
     return "unknown"
 
 
+def _classify_service_env(env: str) -> str:
+    """Return 'otel-demo' or 'petclinic' based on environment name heuristic."""
+    el = (env or "").lower()
+    if "astronomy" in el or "otel" in el or "demo" in el:
+        return "otel-demo"
+    return "petclinic"
+
+
 def _make_app(environment: str):
     try:
         from fastapi import FastAPI
@@ -1807,6 +1840,318 @@ def _make_app(environment: str):
             _subscribers.remove(q)
         return JSONResponse({"ok": True, "event": ev})
 
+    # ── Astronomy Shop scenario variants ──────────────────────────────────────
+    _DEMO_SCENARIOS_OTEL: dict[str, list[dict]] = {
+        # 1. checkout killed — disappears from traces
+        "kill-service": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "checkout",
+                "root_op":          "load-generator:user_checkout_single",
+                "missing_services": ["checkout"],
+                "message":          "MISSING_SERVICE: checkout absent from traces",
+                "hash":             "synthetic:missing:checkout",
+            },
+        ],
+        # 2. product-catalog starts calling recommendation (new edge)
+        "new-call-path": [
+            {
+                "anomaly_type": "NEW_FINGERPRINT",
+                "service":      "product-catalog",
+                "root_op":      "load-generator:user_browse_product",
+                "message":      "Trace path drift — product-catalog calling recommendation (new edge)",
+                "hash":         "synthetic:fp:productcatalog-new-edge",
+                "new_edges": [
+                    {"source": "product-catalog", "target": "recommendation", "label": "new call"},
+                ],
+            },
+        ],
+        # 3. New error signature on product-catalog
+        "new-error": [
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "product-catalog",
+                "root_op":      "load-generator:user_browse_product",
+                "error_type":   "DataAccessException",
+                "operation":    "GET /hipstershop.ProductCatalogService/GetProduct",
+                "message":      "New error: DataAccessException on GetProduct",
+                "hash":         "synthetic:err:productcatalog-DataAccessException",
+            },
+        ],
+        # 4. Shared cache down: valkey-cart disappears from cart traces + errors propagate
+        "db-incident": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "valkey-cart",
+                "root_op":          "load-generator:user_add_to_cart",
+                "missing_services": ["valkey-cart"],
+                "message":          "MISSING_SERVICE: valkey-cart absent from cart traces",
+                "hash":             "synthetic:missing:valkey-cart",
+            },
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "cart",
+                "root_op":          "load-generator:user_add_to_cart",
+                "missing_services": ["valkey-cart"],
+                "message":          "MISSING_SERVICE: valkey-cart absent from cart traces",
+                "hash":             "synthetic:missing:valkey-cart-caller",
+            },
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "valkey-cart",
+                "root_op":          "load-generator:user_view_cart",
+                "missing_services": ["valkey-cart"],
+                "message":          "MISSING_SERVICE: valkey-cart absent from checkout traces",
+                "hash":             "synthetic:missing:valkey-cart-checkout",
+            },
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "checkout",
+                "root_op":          "load-generator:user_checkout_single",
+                "missing_services": ["valkey-cart"],
+                "message":          "MISSING_SERVICE: valkey-cart absent from checkout traces",
+                "hash":             "synthetic:missing:valkey-cart-checkout-caller",
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "cart",
+                "root_op":      "load-generator:user_add_to_cart",
+                "error_type":   "RedisConnectionException",
+                "operation":    "AddItem",
+                "message":      "New error: RedisConnectionException on AddItem",
+                "hash":         "synthetic:err:cart-redis",
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "checkout",
+                "root_op":      "load-generator:user_checkout_single",
+                "error_type":   "RedisConnectionException",
+                "operation":    "PlaceOrder",
+                "message":      "New error: RedisConnectionException on PlaceOrder",
+                "hash":         "synthetic:err:checkout-redis",
+            },
+        ],
+        # 5. Cascading failure: checkout killed → frontend errors → cart errors
+        "cascading": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "checkout",
+                "root_op":          "load-generator:user_checkout_single",
+                "missing_services": ["checkout"],
+                "message":          "MISSING_SERVICE: checkout absent from traces",
+                "hash":             "synthetic:missing:checkout-cascade",
+                "_delay_ms":        0,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "frontend",
+                "root_op":      "frontend-proxy:ingress",
+                "error_type":   "ServiceUnavailableException",
+                "operation":    "POST /api/checkout",
+                "message":      "New error: ServiceUnavailableException on POST /api/checkout",
+                "hash":         "synthetic:err:frontend-checkout",
+                "_delay_ms":    2000,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "cart",
+                "root_op":      "load-generator:user_add_to_cart",
+                "error_type":   "TimeoutException",
+                "operation":    "AddItem",
+                "message":      "New error: TimeoutException on AddItem — upstream pressure",
+                "hash":         "synthetic:err:cart-timeout",
+                "_delay_ms":    2000,
+            },
+        ],
+        # 6. Latency spike on product-catalog
+        "latency-spike": [
+            {
+                "anomaly_type":     "LATENCY_ANOMALY",
+                "service":          "product-catalog",
+                "root_op":          "load-generator:user_browse_product",
+                "operation":        "GET /hipstershop.ProductCatalogService/GetProduct",
+                "current_mean_ms":  "892.4",
+                "baseline_mean_ms": "4.2",
+                "z_score":          "7340.0",
+                "spans_per_min":    "52",
+                "message":          "Latency spike: product-catalog 892ms (baseline 4ms, z=7340)",
+                "hash":             "synthetic:latency:product-catalog",
+            },
+        ],
+        # 7. Error rate spike on payment
+        "error-rate-spike": [
+            {
+                "anomaly_type": "ERROR_RATE_ANOMALY",
+                "service":      "payment",
+                "root_op":      "load-generator:user_checkout_single",
+                "operation":    "hipstershop.PaymentService/Charge",
+                "error_pct":    "100.0%",
+                "error_count":  38,
+                "total_count":  38,
+                "spans_per_min": "61",
+                "message":      "Error rate spike: payment 100.0% (38/38 spans)",
+                "hash":         "synthetic:errorrate:payment",
+                "_delay_ms":    0,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "payment",
+                "root_op":      "load-generator:user_checkout_single",
+                "error_type":   "PaymentServiceException",
+                "operation":    "hipstershop.PaymentService/Charge",
+                "message":      "New error: PaymentServiceException on Charge",
+                "hash":         "synthetic:err:payment-exception",
+                "_delay_ms":    800,
+            },
+        ],
+        # 8. Combined: checkout missing + payment error rate
+        "combined-metric": [
+            {
+                "anomaly_type":     "MISSING_SERVICE",
+                "service":          "checkout",
+                "root_op":          "load-generator:user_checkout_single",
+                "missing_services": ["checkout"],
+                "message":          "MISSING_SERVICE: checkout absent from traces",
+                "hash":             "synthetic:missing:checkout-combined",
+                "_delay_ms":        0,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "payment",
+                "root_op":      "load-generator:user_checkout_single",
+                "error_type":   "PaymentServiceException",
+                "operation":    "hipstershop.PaymentService/Charge",
+                "message":      "New error: PaymentServiceException on Charge",
+                "hash":         "synthetic:err:payment-combined",
+                "_delay_ms":    800,
+            },
+            {
+                "anomaly_type": "ERROR_RATE_ANOMALY",
+                "service":      "payment",
+                "root_op":      "load-generator:user_checkout_single",
+                "operation":    "hipstershop.PaymentService/Charge",
+                "error_pct":    "97.4%",
+                "error_count":  37,
+                "total_count":  38,
+                "message":      "Error rate spike: payment 97.4% (37/38 spans)",
+                "hash":         "synthetic:errorrate:payment-combined",
+                "_delay_ms":    2000,
+            },
+        ],
+        # 9. Slow shared cache: valkey-cart overloaded → cart + checkout latency
+        "slow-db": [
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "valkey-cart",
+                "root_op":      "load-generator:user_add_to_cart",
+                "operation":    "GET cart",
+                "current_mean_ms": "3800",
+                "baseline_mean_ms": "8",
+                "z_score":      "22.1",
+                "message":      "Latency spike: valkey-cart 3800ms (baseline 8ms, z=22.1)",
+                "hash":         "synthetic:latency:valkey-slow",
+                "_delay_ms":    0,
+            },
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "cart",
+                "root_op":      "load-generator:user_add_to_cart",
+                "operation":    "AddItem",
+                "current_mean_ms": "3950",
+                "baseline_mean_ms": "32",
+                "z_score":      "15.8",
+                "message":      "Latency spike: cart 3950ms (baseline 32ms, z=15.8)",
+                "hash":         "synthetic:latency:cart-slow",
+                "_delay_ms":    500,
+            },
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "checkout",
+                "root_op":      "load-generator:user_checkout_single",
+                "operation":    "PlaceOrder",
+                "current_mean_ms": "4100",
+                "baseline_mean_ms": "45",
+                "z_score":      "13.4",
+                "message":      "Latency spike: checkout 4100ms (baseline 45ms, z=13.4)",
+                "hash":         "synthetic:latency:checkout-slow",
+                "_delay_ms":    500,
+            },
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "frontend",
+                "root_op":      "frontend-proxy:ingress",
+                "operation":    "POST /api/checkout",
+                "current_mean_ms": "4250",
+                "baseline_mean_ms": "55",
+                "z_score":      "11.9",
+                "message":      "Latency spike: frontend 4250ms (baseline 55ms, z=11.9)",
+                "hash":         "synthetic:latency:frontend-slow",
+                "_delay_ms":    500,
+            },
+        ],
+        # 10. OOM crash: cart latency (GC pressure) → cart disappears
+        "oom-crash": [
+            {
+                "anomaly_type": "LATENCY_ANOMALY",
+                "service":      "cart",
+                "root_op":      "load-generator:user_add_to_cart",
+                "operation":    "AddItem",
+                "current_mean_ms": "3600",
+                "baseline_mean_ms": "32",
+                "z_score":      "11.8",
+                "message":      "Latency spike: cart 3600ms (baseline 32ms, z=11.8) — GC pressure",
+                "hash":         "synthetic:latency:cart-oom",
+                "_delay_ms":    0,
+            },
+            {
+                "anomaly_type": "MISSING_SERVICE",
+                "service":      "cart",
+                "root_op":      "load-generator:user_add_to_cart",
+                "missing_services": ["cart"],
+                "message":      "MISSING_SERVICE: cart absent — OOM crash after latency spike",
+                "hash":         "synthetic:missing:cart-oom",
+                "_delay_ms":    4000,
+            },
+            {
+                "anomaly_type": "NEW_ERROR_SIGNATURE",
+                "service":      "frontend",
+                "root_op":      "frontend-proxy:ingress",
+                "error_type":   "ServiceUnavailableException",
+                "operation":    "POST /api/cart",
+                "message":      "New error: ServiceUnavailableException on POST /api/cart — cart crashed",
+                "hash":         "synthetic:err:frontend-cart-oom",
+                "_delay_ms":    1000,
+            },
+        ],
+        # 11. Span count drop on product-catalog
+        "span-count-drop": [
+            {
+                "anomaly_type": "SPAN_COUNT_DROP",
+                "service":      "product-catalog",
+                "root_op":      "load-generator:user_browse_product",
+                "message":      "Span count drop: product-catalog 2 spans (baseline min 9) — DB calls silently missing",
+                "hash":         "synthetic:spandrop:product-catalog",
+                "span_count":   2,
+                "span_count_baseline_min": 9,
+                "span_count_baseline_max": 14,
+                "_delay_ms":    0,
+            },
+        ],
+        # 12. Span count spike on cart (retry storm)
+        "span-count-spike": [
+            {
+                "anomaly_type": "SPAN_COUNT_SPIKE",
+                "service":      "cart",
+                "root_op":      "load-generator:user_add_to_cart",
+                "message":      "Span count spike: cart 64 spans (baseline max 10, ×6.4) — retry storm",
+                "hash":         "synthetic:spanspike:cart",
+                "span_count":   64,
+                "span_count_baseline_max": 10,
+                "_delay_ms":    0,
+            },
+        ],
+    }
+
     @app.get("/api/demo/{scenario}")
     async def _demo(scenario: str, delay_ms: int = 800):
         """Fire a named demo scenario, broadcasting events with delay_ms between them.
@@ -1816,9 +2161,13 @@ def _make_app(environment: str):
                    slow-db | oom-crash
         """
         from fastapi import HTTPException
-        if scenario not in _DEMO_SCENARIOS:
-            raise HTTPException(400, f"Unknown scenario. Valid: {list(_DEMO_SCENARIOS)}")
-        events = _DEMO_SCENARIOS[scenario]
+        # Pick scenario set based on current environment
+        env = _state.get("environment", "")
+        app_type = _classify_service_env(env)
+        scenarios = _DEMO_SCENARIOS_OTEL if app_type == "otel-demo" else _DEMO_SCENARIOS
+        if scenario not in scenarios:
+            raise HTTPException(400, f"Unknown scenario. Valid: {list(scenarios)}")
+        events = scenarios[scenario]
 
         async def _fire():
             for ev in events:
