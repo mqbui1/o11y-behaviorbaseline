@@ -396,9 +396,14 @@ def _score_candidate(svc: str, active: dict, upstream: dict, downstream: dict,
     else:
         timing_bonus = 0.0
 
+    # MISSING_SERVICE is a strong structural signal — boost it further when it's the
+    # only anomaly type on this node (pure structural root, not just a symptom).
+    has_only_missing = all(a.get("anomaly_type") == "MISSING_SERVICE" for a in anoms)
+    missing_bonus = 0.15 if has_only_missing else 0.0
+
     # Combine: caller_fraction and callee_fraction together capture both "shared dep"
     # and "upstream orchestrator" patterns.
-    score = (type_weight * 0.5) + (max(caller_fraction, callee_fraction) * 0.35) + (timing_bonus * 0.15)
+    score = (type_weight * 0.5) + (max(caller_fraction, callee_fraction) * 0.25) + (timing_bonus * 0.1) + missing_bonus
     return min(score, 1.0)
 
 
