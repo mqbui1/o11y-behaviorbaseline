@@ -458,6 +458,12 @@ def _find_root_cause(topology: dict,
     for svc in affected:
         candidate_svcs.add(_find_deepest(svc, set()))
 
+    # Always include MISSING_SERVICE nodes as direct candidates — _find_deepest may
+    # skip them when they call deeper affected nodes (e.g. checkout→payment cycle).
+    for svc in affected:
+        if any(a.get("anomaly_type") == "MISSING_SERVICE" for a in active.get(svc, [])):
+            candidate_svcs.add(svc)
+
     # mysql:petclinic as candidate if multiple affected callers
     if "mysql:petclinic" in affected:
         callers_hit = sum(1 for svc in affected
