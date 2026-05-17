@@ -898,9 +898,16 @@ function nodeState(id) {
 }
 
 function edgeState(src, dst) {
-  // In causality chain path?
+  // In causality chain path? Only highlight if edge exists in this direction in topology.
   const idx = causalityChain.indexOf(src);
-  if (idx >= 0 && causalityChain[idx + 1] === dst) return "chain";
+  if (idx >= 0 && causalityChain[idx + 1] === dst) {
+    const edgeExists = topology.edges.some(e => {
+      const s = typeof e.source === "object" ? e.source.id : e.source;
+      const t = typeof e.target === "object" ? e.target.id : e.target;
+      return s === src && t === dst;
+    });
+    if (edgeExists) return "chain";
+  }
   // Both endpoints affected → propagation path
   const srcAffected = (active[src] || []).length > 0 || src === rootCause;
   const dstAffected = (active[dst] || []).length > 0 || dst === rootCause;
