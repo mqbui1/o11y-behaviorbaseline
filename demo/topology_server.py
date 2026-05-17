@@ -66,7 +66,7 @@ def _check_env_liveness(env: str) -> bool:
                                  headers={"X-SF-Token": _ACCESS_TOKEN,
                                           "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=5) as r:
             result = json.loads(r.read())
         nodes = (result.get("data") or {}).get("nodes", [])
         return len(nodes) > 0
@@ -75,8 +75,12 @@ def _check_env_liveness(env: str) -> bool:
 
 
 def _refresh_liveness_cache() -> None:
-    for env in _list_environments():
-        _env_liveness[env] = _check_env_liveness(env)
+    from concurrent.futures import ThreadPoolExecutor
+    envs = _list_environments()
+    with ThreadPoolExecutor(max_workers=min(len(envs), 6)) as ex:
+        results = ex.map(_check_env_liveness, envs)
+    for env, live in zip(envs, results):
+        _env_liveness[env] = live
 
 # ── Regex (shared with poll_drift_events.py) ──────────────────────────────────
 drift_re   = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected|latency anomaly detected|error rate anomaly detected)')
@@ -1207,6 +1211,12 @@ def _make_app(environment: str):
                 for e in envs
             ],
             "current": _state["environment"],
+        })
+
+    @app.get("/api/environments/liveness")
+    async def _get_liveness():
+        return JSONResponse({
+            "liveness": {e: _env_liveness.get(e) for e in _list_environments()}
         })
 
     @app.on_event("startup")

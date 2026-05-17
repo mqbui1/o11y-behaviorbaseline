@@ -804,8 +804,8 @@ async function _loadEnvironments() {
       return `<option value="${e.name}" ${e.name === data.current ? "selected" : ""}>${label}</option>`;
     }).join("");
     _updateRecordedBanner(data.current);
-    // Re-poll liveness every 60s and refresh dropdown + badge
-    setTimeout(_pollLiveness, 60000);
+    // First poll quickly (server may still be running initial checks), then every 60s
+    setTimeout(_pollLiveness, 5000);
   } catch (e) {
     console.warn("Could not load environment list:", e);
   }
@@ -813,20 +813,22 @@ async function _loadEnvironments() {
 
 async function _pollLiveness() {
   try {
-    const res = await fetch("/api/environments");
+    const res = await fetch("/api/environments/liveness");
     const data = await res.json();
-    const envs = data.environments || [];
+    const liveness = data.liveness || {};
     let changed = false;
-    envs.forEach(e => {
-      if (_envLiveness[e.name] !== e.live) { _envLiveness[e.name] = e.live; changed = true; }
+    Object.entries(liveness).forEach(([name, live]) => {
+      if (_envLiveness[name] !== live) { _envLiveness[name] = live; changed = true; }
     });
     if (changed) {
       const sel = document.getElementById("env-select");
-      envs.forEach(e => {
-        const opt = sel.querySelector(`option[value="${e.name}"]`);
-        if (opt) opt.textContent = e.live === false ? `${e.name} (recorded)` : e.name;
+      Object.entries(liveness).forEach(([name, live]) => {
+        const opt = sel.querySelector(`option[value="${CSS.escape(name)}"]`);
+        if (opt) opt.textContent = live === false ? `${name} (recorded)` : name;
       });
-      _updateRecordedBanner(data.current);
+      const curOpt = sel.options[sel.selectedIndex];
+      const curEnv = curOpt ? curOpt.value : null;
+      if (curEnv) _updateRecordedBanner(curEnv);
     }
   } catch (_) {}
   setTimeout(_pollLiveness, 60000);
