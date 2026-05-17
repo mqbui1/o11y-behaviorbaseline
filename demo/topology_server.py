@@ -396,16 +396,21 @@ def _score_candidate(svc: str, active: dict, upstream: dict, downstream: dict,
     else:
         timing_bonus = 0.0
 
-    # MISSING_SERVICE on a node with no affected upstream callers is a strong structural
-    # root signal — the service vanished, it wasn't dragged down by something else.
+    # MISSING_SERVICE is a strong structural signal — the service vanished.
     has_only_missing = all(a.get("anomaly_type") == "MISSING_SERVICE" for a in anoms)
-    callers_affected_count = sum(1 for c in upstream.get(svc, []) if c in affected)
-    missing_bonus = 0.25 if (has_only_missing and callers_affected_count == 0) else 0.0
+    missing_bonus = 0.3 if has_only_missing else 0.0
 
-    # Combine: type_weight is primary signal; topology fraction is secondary.
-    # Reduce caller_fraction weight so a downstream error service (payment) doesn't
-    # outscore a structurally absent service (checkout) just because it has callers.
-    score = (type_weight * 0.55) + (max(caller_fraction, callee_fraction) * 0.2) + (timing_bonus * 0.1) + missing_bonus
+    # Suppress topology fraction when there's a cycle between affected nodes
+    # (e.g. checkout ↔ payment orchestrator pattern) — it produces false caller boosts.
+    callers = set(upstream.get(svc, []))
+    callees = set(downstream.get(svc, []))
+    has_cycle_with_affected = any(
+        c in affected and svc in (upstream.get(c, []) or [])
+        for c in callees if c in affected
+    )
+    topo_fraction = 0.0 if has_cycle_with_affected else max(caller_fraction, callee_fraction)
+
+    score = (type_weight * 0.6) + (topo_fraction * 0.25) + (timing_bonus * 0.1) + missing_bonus
     return min(score, 1.0)
 
 
