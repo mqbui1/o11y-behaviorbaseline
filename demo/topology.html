@@ -1032,7 +1032,14 @@ function renderGraph() {
   const hasNewThisRender = newNodes.length > 0;
   simulation.nodes(allNodes);
   simulation.force("link").links(allEdges);
-  simulation.alpha(hasNewThisRender ? 0.8 : 0.3).restart();
+  // Only disturb the layout when new nodes/edges are added — avoids jitter
+  // on pure state updates (anomaly badges, color changes).
+  if (hasNewThisRender) {
+    simulation.alpha(0.8).restart();
+  } else if (!simulation.alpha() || simulation.alpha() < 0.01) {
+    // Simulation is settled — just run one tick to place any size changes
+    simulation.alpha(0.01).restart();
+  }
 
   // Re-apply visibility filter after render (CSS show/hide, no simulation impact)
   applyFilter();
