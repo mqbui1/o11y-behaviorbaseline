@@ -21,10 +21,12 @@ if [ -f "$_REPO/.env" ]; then set -a; source "$_REPO/.env"; set +a; fi
 K="sshpass -p $EC2_PASSWORD ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password splunk@$EC2_IP"
 
 DB_WAIT=false
+CACHE_WAIT=false
 QUICK=false
 for arg in "$@"; do
   case "$arg" in
     --db)    DB_WAIT=true ;;
+    --cache) CACHE_WAIT=true ;;
     --quick) QUICK=true ;;
   esac
 done
@@ -52,18 +54,31 @@ if [ "$QUICK" = "true" ]; then
     exit 0
 fi
 
+# ── Detect app type ───────────────────────────────────────────────────────────
+APP_TYPE=$($K "kubectl get deployment checkout &>/dev/null && echo astronomy-shop || echo petclinic" 2>/dev/null | tr -d ' \n' || echo "petclinic")
+echo "  App type: $APP_TYPE"
+
 # ── Restore all services ──────────────────────────────────────────────────────
 echo "[2] Restoring services to replicas=1..."
-$K "kubectl scale deployment petclinic-db vets-service visits-service customers-service --replicas=1 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
-$K "kubectl rollout status deployment/vets-service visits-service customers-service --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+if [ "$APP_TYPE" = "astronomy-shop" ]; then
+    $K "kubectl scale deployment checkout cart payment product-catalog frontend recommendation valkey-cart --replicas=1 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+    $K "kubectl rollout status deployment/checkout cart payment --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+else
+    $K "kubectl scale deployment petclinic-db vets-service visits-service customers-service --replicas=1 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+    $K "kubectl rollout status deployment/vets-service visits-service customers-service --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+fi
 
-# ── DB wait (only when DB was killed) ─────────────────────────────────────────
+# ── DB/cache wait (only when DB or cache was killed) ──────────────────────────
 if [ "$DB_WAIT" = "true" ]; then
     echo "[3] Waiting 30s for DB reconnect..."
     $K "kubectl rollout status deployment/petclinic-db --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
     sleep 30
     $K "kubectl exec deployment/petclinic-loadgen-deployment -- curl -s http://api-gateway:80/api/vet/vets --max-time 8 | head -c 50" 2>/dev/null | grep -v '▀\|█\|▄' || true
     echo "  (check above for JSON vets data)"
+elif [ "$CACHE_WAIT" = "true" ]; then
+    echo "[3] Waiting 15s for cache reconnect..."
+    $K "kubectl rollout status deployment/valkey-cart --timeout=60s 2>/dev/null; true" 2>/dev/null | grep -v '▀\|█\|▄' || true
+    sleep 15
 fi
 
 # ── Inject clean baselines directly into pods (no restart needed) ─────────────

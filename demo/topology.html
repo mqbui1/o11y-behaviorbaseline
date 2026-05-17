@@ -898,9 +898,10 @@ function nodeState(id) {
 }
 
 function edgeState(src, dst) {
-  // In causality chain path? Only highlight if edge exists in this direction in topology.
-  const idx = causalityChain.indexOf(src);
-  if (idx >= 0 && causalityChain[idx + 1] === dst) {
+  // In causality chain path? Only highlight the first hop: root_cause → direct callers.
+  // Do NOT highlight links between sibling callers (e.g. checkout→frontend are both callers
+  // of cart, but that edge isn't part of the causal chain).
+  if (src === rootCause && causalityChain.includes(dst)) {
     const edgeExists = topology.edges.some(e => {
       const s = typeof e.source === "object" ? e.source.id : e.source;
       const t = typeof e.target === "object" ? e.target.id : e.target;
