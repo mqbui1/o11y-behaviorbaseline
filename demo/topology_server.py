@@ -37,6 +37,46 @@ EC2_PASS = os.environ.get("EC2_PASS", os.environ.get("EC2_PASSWORD", ""))
 DAEMONSET_LABEL = os.environ.get("OTEL_POD_LABEL", "app=otelcol-fingerprint")
 OTEL_CONTAINER  = os.environ.get("OTEL_CONTAINER", "otelcol")
 _DATA_DIR = _REPO / "data"
+_ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
+_REALM        = os.environ.get("SPLUNK_REALM", "us1")
+
+# ── APM liveness cache ────────────────────────────────────────────────────
+# env -> True/False/None (None = not yet checked)
+_env_liveness: dict[str, bool | None] = {}
+_LIVENESS_CHECK_INTERVAL = 60   # seconds between rechecks
+_LIVENESS_WINDOW_SECONDS = 300  # 5-minute window to detect recent traffic
+
+
+def _check_env_liveness(env: str) -> bool:
+    """Return True if APM topology has nodes for env in the last 5 minutes."""
+    if not _ACCESS_TOKEN:
+        return True  # can't check — assume live
+    import urllib.request
+    import urllib.error
+    now = time.gmtime()
+    then = time.gmtime(time.time() - _LIVENESS_WINDOW_SECONDS)
+    fmt = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", t)
+    body = json.dumps({
+        "timeRange": f"{fmt(then)}/{fmt(now)}",
+        "tagFilters": [{"name": "sf_environment", "operator": "equals",
+                        "value": env, "scope": "global"}],
+    }).encode()
+    url = f"https://api.{_REALM}.signalfx.com/v2/apm/topology"
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"X-SF-Token": _ACCESS_TOKEN,
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            result = json.loads(r.read())
+        nodes = (result.get("data") or {}).get("nodes", [])
+        return len(nodes) > 0
+    except Exception:
+        return False  # treat errors as not live
+
+
+def _refresh_liveness_cache() -> None:
+    for env in _list_environments():
+        _env_liveness[env] = _check_env_liveness(env)
 
 # ── Regex (shared with poll_drift_events.py) ──────────────────────────────────
 drift_re   = re.compile(r'(trace drift detected|new trace fingerprint \(unknown root op\)|new error signature detected|missing service detected|latency anomaly detected|error rate anomaly detected)')
@@ -1162,10 +1202,20 @@ def _make_app(environment: str):
     async def _get_environments():
         envs = _list_environments()
         return JSONResponse({
-            "environments": envs,
+            "environments": [
+                {"name": e, "live": _env_liveness.get(e)}
+                for e in envs
+            ],
             "current": _state["environment"],
-            "live_environment": environment,  # the env the server was started with
         })
+
+    @app.on_event("startup")
+    async def _start_liveness_loop():
+        async def _loop():
+            while True:
+                await asyncio.get_event_loop().run_in_executor(None, _refresh_liveness_cache)
+                await asyncio.sleep(_LIVENESS_CHECK_INTERVAL)
+        asyncio.create_task(_loop())
 
     @app.post("/api/switch")
     async def _switch_environment(body: dict):
