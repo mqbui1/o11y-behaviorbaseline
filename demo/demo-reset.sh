@@ -25,14 +25,29 @@ K="sshpass -p $EC2_PASSWORD ssh -p 2222 -o StrictHostKeyChecking=no -o Preferred
 
 echo "=== demo-reset.sh: env=$ENV ==="
 
+# ── Detect app type ───────────────────────────────────────────────────────────
+APP_TYPE=$($K "kubectl get deployment checkout &>/dev/null && echo astronomy-shop || echo petclinic" 2>/dev/null | tr -d ' \n' || echo "petclinic")
+echo "  App type: $APP_TYPE"
+
 # ── Step 1: Restore all services ──────────────────────────────────────────────
 echo "[1/8] Restoring all services..."
-$K "kubectl scale deployment petclinic-db vets-service visits-service customers-service --replicas=1 2>/dev/null; true"
-$K "kubectl rollout status deployment/petclinic-db vets-service visits-service --timeout=90s" 2>/dev/null || true
+if [ "$APP_TYPE" = "astronomy-shop" ]; then
+  $K "kubectl scale deployment checkout cart payment product-catalog frontend recommendation --replicas=1 2>/dev/null; true"
+  $K "kubectl scale deployment valkey-cart --replicas=1 2>/dev/null; true"
+  $K "kubectl rollout status deployment/checkout cart payment --timeout=90s" 2>/dev/null || true
+else
+  $K "kubectl scale deployment petclinic-db vets-service visits-service customers-service --replicas=1 2>/dev/null; true"
+  $K "kubectl rollout status deployment/petclinic-db vets-service visits-service --timeout=90s" 2>/dev/null || true
+fi
 
-# ── Step 2: Wait for DB reconnect ─────────────────────────────────────────────
-echo "[2/8] Waiting 30s for services to reconnect to DB..."
-sleep 30
+# ── Step 2: Wait for reconnect ────────────────────────────────────────────────
+if [ "$APP_TYPE" = "astronomy-shop" ]; then
+  echo "[2/8] Waiting 15s for services to reconnect..."
+  sleep 15
+else
+  echo "[2/8] Waiting 30s for services to reconnect to DB..."
+  sleep 30
+fi
 
 # ── Step 3: Clear alert log ───────────────────────────────────────────────────
 echo "[3/8] Clearing alert log..."
