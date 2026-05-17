@@ -2125,19 +2125,10 @@ def _make_app(environment: str):
             },
         ],
         # 9. Slow shared cache: valkey-cart overloaded → cart + checkout latency
+        # Slow shared cache: cart's Redis (valkey) is overloaded but untraced.
+        # Cart is the first instrumented service to show latency — it's the shared
+        # dependency that checkout and frontend both route through.
         "slow-db": [
-            {
-                "anomaly_type": "LATENCY_ANOMALY",
-                "service":      "valkey-cart",
-                "root_op":      "load-generator:user_add_to_cart",
-                "operation":    "GET cart",
-                "current_mean_ms": "3800",
-                "baseline_mean_ms": "8",
-                "z_score":      "22.1",
-                "message":      "Latency spike: valkey-cart 3800ms (baseline 8ms, z=22.1)",
-                "hash":         "synthetic:latency:valkey-slow",
-                "_delay_ms":    0,
-            },
             {
                 "anomaly_type": "LATENCY_ANOMALY",
                 "service":      "cart",
@@ -2146,9 +2137,9 @@ def _make_app(environment: str):
                 "current_mean_ms": "3950",
                 "baseline_mean_ms": "32",
                 "z_score":      "15.8",
-                "message":      "Latency spike: cart 3950ms (baseline 32ms, z=15.8)",
+                "message":      "Latency spike: cart 3950ms (baseline 32ms, z=15.8) — cache overloaded",
                 "hash":         "synthetic:latency:cart-slow",
-                "_delay_ms":    500,
+                "_delay_ms":    0,
             },
             {
                 "anomaly_type": "LATENCY_ANOMALY",
