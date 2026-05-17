@@ -552,6 +552,7 @@
       <select id="env-select" onchange="switchEnvironment(this.value)"
         style="background:#161B22;border:1px solid #30363D;color:#8B949E;padding:3px 7px;border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer;">
       </select>
+      <span id="env-live-badge" style="display:none;font-size:10px;padding:1px 6px;border-radius:3px;font-weight:600;letter-spacing:0.04em;"></span>
     </div>
 
     <button id="btn-clear" class="btn" onclick="clearAnomalies()" title="Clear alerts (keyboard: C)">Clear alerts [C]</button>
@@ -763,9 +764,24 @@ async function switchEnvironment(env) {
 }
 
 function _updateRecordedBanner(env) {
+  const isRecorded = _liveEnvironment && env !== _liveEnvironment;
   const banner = document.getElementById("recorded-banner");
-  if (!banner) return;
-  banner.style.display = (_liveEnvironment && env !== _liveEnvironment) ? "block" : "none";
+  if (banner) banner.style.display = isRecorded ? "block" : "none";
+  const badge = document.getElementById("env-live-badge");
+  if (badge) {
+    badge.style.display = "inline";
+    if (isRecorded) {
+      badge.textContent = "RECORDED";
+      badge.style.background = "#2A1C0D";
+      badge.style.color = "#B8860B";
+      badge.style.border = "1px solid #4A3B00";
+    } else {
+      badge.textContent = "● LIVE";
+      badge.style.background = "#0D2A1A";
+      badge.style.color = "#3FB950";
+      badge.style.border = "1px solid #1A4A2A";
+    }
+  }
 }
 
 async function _loadEnvironments() {
