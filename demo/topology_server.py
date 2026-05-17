@@ -1164,6 +1164,7 @@ def _make_app(environment: str):
         return JSONResponse({
             "environments": envs,
             "current": _state["environment"],
+            "live_environment": environment,  # the env the server was started with
         })
 
     @app.post("/api/switch")

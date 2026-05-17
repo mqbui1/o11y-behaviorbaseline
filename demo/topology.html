@@ -558,6 +558,9 @@
     <div id="status-badge" class="status-ok">● STEADY STATE</div>
   </div>
 </div>
+<div id="recorded-banner" style="display:none;background:#1C1A0D;border-bottom:1px solid #4A3B00;padding:5px 16px;font-size:11px;color:#B8860B;letter-spacing:0.03em;">
+  ⚠ Recorded baseline — no live data. This environment is not currently running.
+</div>
 
 <!-- Main -->
 <div id="main">
@@ -678,6 +681,7 @@ let currentProblem = null;    // open/closed problem record from server
 let _probTimerInterval = null; // interval for live duration counter
 let _discoveredNodeIds = new Set(); // IDs added via live topology discovery (for badge)
 let _appFilter = "all";       // "all" | "petclinic" | "otel-demo"
+let _liveEnvironment = null;  // env the server was started with (only one that has live data)
 
 // ── Environment / app filter helpers ─────────────────────────────────────
 // app_group cache — populated from server-annotated topology.nodes
@@ -755,16 +759,27 @@ async function switchEnvironment(env) {
   // Topology will arrive via env_switched SSE event (handled in connectSSE),
   // but also reload explicitly in case SSE misses it
   await loadTopology();
+  _updateRecordedBanner(env);
+}
+
+function _updateRecordedBanner(env) {
+  const banner = document.getElementById("recorded-banner");
+  if (!banner) return;
+  banner.style.display = (_liveEnvironment && env !== _liveEnvironment) ? "block" : "none";
 }
 
 async function _loadEnvironments() {
   try {
     const res = await fetch("/api/environments");
     const data = await res.json();
+    _liveEnvironment = data.live_environment || null;
     const sel = document.getElementById("env-select");
-    sel.innerHTML = data.environments.map(e =>
-      `<option value="${e}" ${e === data.current ? "selected" : ""}>${e}</option>`
-    ).join("");
+    sel.innerHTML = data.environments.map(e => {
+      const isLive = !_liveEnvironment || e === _liveEnvironment;
+      const label = isLive ? e : `${e} (recorded)`;
+      return `<option value="${e}" ${e === data.current ? "selected" : ""}>${label}</option>`;
+    }).join("");
+    _updateRecordedBanner(data.current);
   } catch (e) {
     console.warn("Could not load environment list:", e);
   }
