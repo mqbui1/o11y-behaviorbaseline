@@ -207,6 +207,13 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
     edge_weights: dict[tuple, int] = defaultdict(int)
     node_traffic: dict[str, int]   = defaultdict(int)
 
+    # Only inject synthetic mysql:petclinic node for PetClinic environments
+    all_svcs_in_baseline = {
+        p.split(":")[0] for fp in fingerprints.values()
+        for p in fp.get("path", "").split("->") if p.strip()
+    }
+    is_petclinic_env = bool(all_svcs_in_baseline & _APP_GROUPS["petclinic"])
+
     for fp in fingerprints.values():
         path  = fp.get("path", "")
         occ   = fp.get("occurrences", 1)
@@ -216,8 +223,8 @@ def _build_topology_from_baseline(fingerprints: dict) -> dict:
         for p in parts:
             op  = p.split(":", 1)[1].strip() if ":" in p else p
             svc = p.split(":")[0] if ":" in p else p
-            # If this span is a DB operation, inject mysql:petclinic as a synthetic node
-            if any(op.startswith(pat) for pat in _DB_SPAN_PATTERNS):
+            # Only inject mysql:petclinic synthetic node for PetClinic environments
+            if is_petclinic_env and any(op.startswith(pat) for pat in _DB_SPAN_PATTERNS):
                 db_node = "mysql:petclinic"
                 if last_app_svc and last_app_svc != db_node:
                     edge_weights[(last_app_svc, db_node)] += occ
