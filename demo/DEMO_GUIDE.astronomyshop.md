@@ -114,6 +114,15 @@ k "cd /home/splunk/o11y-behaviorbaseline && \
 
 > **Astronomy Shop uses built-in OTel SDK** — no OTel Operator Instrumentation CR needed.
 > `deploy.sh` sets `OTEL_EXPORTER_OTLP_ENDPOINT` directly on each deployment.
+>
+> **Faster alternative for fresh installs:** use `otel-processor/k8s/astro-values.yaml` when
+> installing the helm chart — sets `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_COLLECTOR_HOST`, and
+> `OTEL_SERVICE_NAME` on every component at install time so Step 4 of `deploy.sh` is a no-op:
+> ```bash
+> helm install astronomy-shop open-telemetry/opentelemetry-demo \
+>   --version 0.40.8 \
+>   -f otel-processor/k8s/astro-values.yaml
+> ```
 
 ### Step 5 — Verify (local Mac)
 ```bash

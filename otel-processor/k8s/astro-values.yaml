@@ -1,0 +1,136 @@
+# astro-values.yaml — Helm values for opentelemetry-demo (Astronomy Shop)
+#
+# Routes all app traces through otelcol-fingerprint by setting
+# OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_COLLECTOR_HOST on each component at
+# install time.  Pass this file when installing / upgrading the chart:
+#
+#   helm install astronomy-shop open-telemetry/opentelemetry-demo \
+#     --version 0.40.8 \
+#     -f otel-processor/k8s/astro-values.yaml
+#
+# After install, NO kubectl set env patching is needed.  deploy.sh Step 4
+# will still run but will find all deployments already configured (no-ops).
+#
+# OTEL_SERVICE_NAME is set per-component so nginx/Python services that
+# require it explicitly don't crash on startup.
+#
+# Update FP_GRPC / FP_HOST if you change the DaemonSet service name.
+
+# ── Shared env snippet (anchored for reuse) ──────────────────────────────────
+# NOTE: YAML anchors don't work across helm --set, but work fine in a values
+# file.  Each component section references the anchor.
+_fp_env: &fp_env
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+  - name: OTEL_COLLECTOR_HOST
+    value: "otelcol-fingerprint.default.svc.cluster.local"
+
+# ── Component overrides ───────────────────────────────────────────────────────
+components:
+  accounting:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: accounting
+
+  ad:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: ad
+
+  cart:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: cart
+
+  checkout:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: checkout
+
+  currency:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: currency
+
+  email:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: email
+
+  fraudDetection:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: fraud-detection
+
+  frontend:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: frontend
+
+  frontendProxy:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: frontend-proxy
+
+  imageProvider:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: image-provider
+
+  llm:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: llm
+
+  loadGenerator:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: load-generator
+
+  payment:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: payment
+
+  productCatalog:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: product-catalog
+
+  productReviews:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: product-reviews
+
+  quote:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: quote
+
+  recommendation:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: recommendation
+
+  shipping:
+    env:
+      <<: *fp_env
+      - name: OTEL_SERVICE_NAME
+        value: shipping
