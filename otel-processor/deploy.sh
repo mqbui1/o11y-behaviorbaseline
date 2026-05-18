@@ -204,7 +204,7 @@ FP_HTTP="http://otelcol-fingerprint.default.svc.cluster.local:4318"
 if [ "$APP" = "astronomy-shop" ]; then
   # Astronomy Shop uses its own built-in OTel SDK — no operator injection.
   # Set OTEL_EXPORTER_OTLP_ENDPOINT on each app deployment directly.
-  ASTRO_DEPLOYMENTS="accounting ad cart checkout currency email fraud-detection frontend frontend-proxy llm payment product-catalog product-reviews quote recommendation shipping"
+  ASTRO_DEPLOYMENTS="accounting ad cart checkout currency email fraud-detection frontend frontend-proxy image-provider llm load-generator payment product-catalog product-reviews quote recommendation shipping"
   echo "  Patching ${#ASTRO_DEPLOYMENTS} astronomy shop deployments..."
   for svc in $ASTRO_DEPLOYMENTS; do
     if kubectl get deployment "$svc" &>/dev/null; then
