@@ -116,7 +116,7 @@ func (p *fingerprintProcessor) buildMetricsSnapshot() MetricsSnapshot {
 			services[svc] = sm
 		}
 
-		om := buildOperationMetrics(op, w, p.cfg.LatencyLearnMinSamples, p.cfg.LatencyAnomalyZScore)
+		om := buildOperationMetrics(op, w, p.cfg.LatencyLearnMinSamples, p.cfg.LatencyAnomalyZScore, p.cfg.MinErrorRateSamples)
 		sm.Operations = append(sm.Operations, om)
 	}
 
@@ -192,7 +192,7 @@ func (p *fingerprintProcessor) buildMetricsSnapshot() MetricsSnapshot {
 }
 
 // buildOperationMetrics computes the OperationMetrics for one metricWindow.
-func buildOperationMetrics(op string, w *metricWindow, learnMin int, zThreshold float64) *OperationMetrics {
+func buildOperationMetrics(op string, w *metricWindow, learnMin int, zThreshold float64, minErrSamples int) *OperationMetrics {
 	om := &OperationMetrics{
 		Operation: op,
 	}
@@ -245,10 +245,14 @@ func buildOperationMetrics(op string, w *metricWindow, learnMin int, zThreshold 
 	om.TotalCount = totalSpans
 	if totalSpans > 0 {
 		om.ErrorRatePct = float64(totalErrors) / float64(totalSpans) * 100
-		if om.ErrorRatePct >= 5.0 && om.Status != "anomaly" {
-			om.Status = "anomaly"
-		} else if om.ErrorRatePct >= 1.0 && om.Status == "ok" {
-			om.Status = "warn"
+		// Only upgrade status based on error rate once we have enough samples —
+		// avoids false anomalies from long-lived streaming ops or sparse early data.
+		if totalSpans >= minErrSamples {
+			if om.ErrorRatePct >= 5.0 && om.Status != "anomaly" {
+				om.Status = "anomaly"
+			} else if om.ErrorRatePct >= 1.0 && om.Status == "ok" {
+				om.Status = "warn"
+			}
 		}
 	}
 
