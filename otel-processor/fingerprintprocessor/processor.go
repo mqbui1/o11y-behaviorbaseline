@@ -406,8 +406,10 @@ func (p *fingerprintProcessor) ConsumeTraces(ctx context.Context, td ptrace.Trac
 		p.pruneSeenCounts()
 	}
 
-	// Skip detection if no baseline loaded yet
-	if p.baseline.isEmpty() {
+	// Skip detection if no baseline loaded yet — UNLESS we are in bootstrap
+	// learning mode, where we need to fingerprint traces to build the baseline.
+	inBootstrap := p.cfg.BootstrapDuration > 0 && time.Since(p.startTime) < p.cfg.BootstrapDuration
+	if p.baseline.isEmpty() && !inBootstrap {
 		return nil
 	}
 
