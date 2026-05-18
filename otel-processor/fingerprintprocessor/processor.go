@@ -190,6 +190,9 @@ func (p *fingerprintProcessor) Start(_ context.Context, _ component.Host) error 
 		go p.stalenessCheckLoop()
 	}
 	go p.selfMetrics.Run(p.stopCh, time.Minute)
+	if p.cfg.MetricsAddr != "" {
+		p.startMetricsServer(p.cfg.MetricsAddr)
+	}
 	if p.cfg.BootstrapDuration > 0 && p.baseline.isEmpty() {
 		p.logger.Info("baseline is empty — entering bootstrap learning mode",
 			zap.Duration("bootstrap_duration", p.cfg.BootstrapDuration),
