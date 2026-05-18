@@ -190,6 +190,15 @@ type Config struct {
 	// the same event. Should be longer than the promotion threshold window.
 	// Default: 2m.
 	DeduplicateTTL time.Duration `mapstructure:"deduplicate_ttl"`
+
+	// ── Metrics HTTP server ────────────────────────────────────────────────
+
+	// MetricsAddr is the TCP address the in-process metrics HTTP server listens
+	// on (e.g. ":9090"). When set, GET /metrics returns a JSON snapshot of all
+	// per-(service,operation) latency and error-rate windows so the topology
+	// server can drive live charts without log scraping or Splunk queries.
+	// Set to "" to disable. Default: ":9090".
+	MetricsAddr string `mapstructure:"metrics_addr"`
 }
 
 func createDefaultConfig() component.Config {
@@ -224,5 +233,6 @@ func createDefaultConfig() component.Config {
 		DbQueryLatencyWindow:        5 * time.Minute,
 		DbQueryLearnMinSamples:      10,
 		DbQueryLatencyZScore:        3.0,
+		MetricsAddr:                 ":9090",
 	}
 }
