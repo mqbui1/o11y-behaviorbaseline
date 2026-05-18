@@ -40,6 +40,13 @@ _DATA_DIR = _REPO / "data"
 _ACCESS_TOKEN = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
 _REALM        = os.environ.get("SPLUNK_REALM", "us1")
 
+# ── Metrics cache (populated by _poll_processor_metrics background task) ──────
+# Stores the last successful JSON response from GET /metrics on the aggregator.
+_metrics_cache: dict = {}
+_metrics_cache_ts: float = 0.0
+_METRICS_POLL_INTERVAL = 15   # seconds between polls
+_METRICS_PORT = 9090          # must match MetricsAddr in aggregator config
+
 # ── APM liveness cache ────────────────────────────────────────────────────
 # env -> True/False/None (None = not yet checked)
 _env_liveness: dict[str, bool | None] = {}
@@ -1148,6 +1155,72 @@ def _classify_service_env(env: str) -> str:
     return "petclinic"
 
 
+async def _poll_processor_metrics() -> None:
+    """Background task: poll GET /metrics on the aggregator pod every 15s.
+
+    Uses `kubectl exec` via SSH to curl the in-process metrics server.
+    The aggregator pod exposes MetricsAddr=:9090 by default.
+    Falls back gracefully when the pod is unavailable or the port is not open
+    (e.g. older image without metricsserver.go — just leaves cache empty).
+    """
+    global _metrics_cache, _metrics_cache_ts
+
+    while True:
+        await asyncio.sleep(_METRICS_POLL_INTERVAL)
+        if not EC2_IP or not EC2_PASS:
+            continue
+        try:
+            # Pick the first running aggregator pod
+            get_pod_cmd = (
+                "exec bash -c '"
+                "kubectl get pods -l app=otelcol-aggregator "
+                "--field-selector=status.phase=Running "
+                "-o jsonpath=\"{.items[0].metadata.name}\" 2>/dev/null'"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                "sshpass", f"-p{EC2_PASS}",
+                "ssh", "-T", "-p", EC2_PORT,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "RequestTTY=no",
+                f"splunk@{EC2_IP}",
+                get_pod_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+            pod = stdout.decode("utf-8", errors="replace").strip()
+            if not pod:
+                continue
+
+            # Curl the metrics server inside the pod
+            curl_cmd = (
+                "exec bash -c '"
+                f"kubectl exec {pod} -c otelcol -- "
+                f"wget -qO- http://localhost:{_METRICS_PORT}/metrics 2>/dev/null'"
+            )
+            proc2 = await asyncio.create_subprocess_exec(
+                "sshpass", f"-p{EC2_PASS}",
+                "ssh", "-T", "-p", EC2_PORT,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "RequestTTY=no",
+                f"splunk@{EC2_IP}",
+                curl_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout2, _ = await asyncio.wait_for(proc2.communicate(), timeout=10)
+            raw = stdout2.decode("utf-8", errors="replace").strip()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            _metrics_cache = data
+            _metrics_cache_ts = time.time()
+        except asyncio.TimeoutError:
+            pass
+        except Exception as exc:
+            print(f"[metrics] poll error: {exc}", flush=True)
+
+
 def _make_app(environment: str):
     try:
         from fastapi import FastAPI
@@ -1194,6 +1267,7 @@ def _make_app(environment: str):
         asyncio.create_task(_expire_anomalies())
         asyncio.create_task(_tail_topology_events_dynamic(_state))
         asyncio.create_task(_poll_infra_events())
+        asyncio.create_task(_poll_processor_metrics())
 
     @app.get("/", response_class=HTMLResponse)
     async def _index():
@@ -1225,6 +1299,21 @@ def _make_app(environment: str):
             "confidence":      confidence,
             "suppressed":      suppressed,
             "infra_events":    dict(_infra_events),
+        })
+
+    @app.get("/api/metrics")
+    async def _get_metrics():
+        """Return the latest processor metrics snapshot from the aggregator pod.
+
+        Sourced from the in-process HTTP server (metricsserver.go :9090).
+        Returns the cached payload (refreshed every 15s by _poll_processor_metrics).
+        If the cache is empty (pod unavailable or old image), returns an empty services map.
+        """
+        age = time.time() - _metrics_cache_ts if _metrics_cache_ts else None
+        return JSONResponse({
+            "ok":        bool(_metrics_cache),
+            "age_s":     round(age, 1) if age is not None else None,
+            "data":      _metrics_cache,
         })
 
     @app.get("/api/environments")

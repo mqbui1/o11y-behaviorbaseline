@@ -536,6 +536,141 @@
     text-align: center;
     padding: 20px 0;
   }
+
+  /* ── Metrics bar ── */
+  #metrics-bar {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 5px 20px;
+    background: #0D1117;
+    border-bottom: 1px solid #21262D;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  #metrics-bar .mb-label {
+    font-size: 10px;
+    color: #484F58;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-right: 2px;
+  }
+  .mb-stat {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+  }
+  .mb-val { color: #E6EDF3; font-weight: 600; }
+  .mb-val-warn    { color: #D29922; font-weight: 600; }
+  .mb-val-anomaly { color: #F85149; font-weight: 600; }
+  .mb-val-ok      { color: #3FB950; font-weight: 600; }
+  #metrics-bar .mb-sep {
+    width: 1px; height: 16px;
+    background: #21262D;
+  }
+  #metrics-stale {
+    font-size: 10px;
+    color: #484F58;
+    margin-left: auto;
+  }
+
+  /* ── Service metrics drawer ── */
+  #svc-drawer {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    width: 270px;
+    background: #161B22;
+    border: 1px solid #30363D;
+    border-radius: 8px;
+    padding: 12px 14px;
+    z-index: 100;
+    display: none;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+  #svc-drawer .sd-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  #svc-drawer .sd-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #E6EDF3;
+  }
+  #svc-drawer .sd-close {
+    background: none;
+    border: none;
+    color: #484F58;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+  }
+  #svc-drawer .sd-close:hover { color: #8B949E; }
+  .sd-metric-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    border-bottom: 1px solid #21262D;
+    font-size: 11px;
+  }
+  .sd-metric-row:last-child { border-bottom: none; }
+  .sd-metric-label { color: #8B949E; }
+  .sd-metric-val   { color: #E6EDF3; font-weight: 600; text-align: right; }
+  .sd-status-ok      { color: #3FB950; }
+  .sd-status-warn    { color: #D29922; }
+  .sd-status-anomaly { color: #F85149; }
+  .sd-status-learning{ color: #58A6FF; }
+  .sd-learn-bar-wrap {
+    background: #21262D;
+    border-radius: 3px;
+    height: 4px;
+    width: 80px;
+    overflow: hidden;
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 6px;
+  }
+  .sd-learn-bar {
+    height: 100%;
+    background: #58A6FF;
+    border-radius: 3px;
+    transition: width 0.4s;
+  }
+  .sd-ops-section {
+    margin-top: 8px;
+  }
+  .sd-ops-label {
+    font-size: 10px;
+    color: #484F58;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-bottom: 4px;
+  }
+  .sd-op-row {
+    font-size: 10px;
+    color: #8B949E;
+    padding: 2px 0;
+    display: flex;
+    justify-content: space-between;
+  }
+  .sd-op-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+  }
+  .sd-op-val { color: #E6EDF3; white-space: nowrap; }
+  .sd-no-data {
+    color: #484F58;
+    font-size: 11px;
+    padding: 8px 0;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -563,11 +698,36 @@
   ⚠ Recorded baseline — no live data. This environment is not currently running.
 </div>
 
+<!-- Metrics bar -->
+<div id="metrics-bar">
+  <span class="mb-label">Processor</span>
+  <div class="mb-stat"><span class="mb-label">Services</span><span class="mb-val" id="mb-services">—</span></div>
+  <div class="mb-sep"></div>
+  <div class="mb-stat"><span class="mb-label">Spans/min</span><span class="mb-val" id="mb-spans">—</span></div>
+  <div class="mb-sep"></div>
+  <div class="mb-stat"><span class="mb-label">Avg latency</span><span class="mb-val" id="mb-latency">—</span></div>
+  <div class="mb-sep"></div>
+  <div class="mb-stat"><span class="mb-label">Anomalous</span><span class="mb-val" id="mb-anomaly">—</span></div>
+  <div class="mb-sep"></div>
+  <div class="mb-stat"><span class="mb-label">Warn</span><span class="mb-val" id="mb-warn">—</span></div>
+  <span id="metrics-stale"></span>
+</div>
+
 <!-- Main -->
 <div id="main">
 
   <!-- Graph -->
   <div id="graph-container">
+
+    <!-- Service metrics drawer (node click) -->
+    <div id="svc-drawer">
+      <div class="sd-header">
+        <span class="sd-name" id="sd-name">—</span>
+        <button class="sd-close" onclick="closeSvcDrawer()">✕</button>
+      </div>
+      <div id="sd-body"></div>
+    </div>
+
     <svg id="graph">
       <defs>
         <marker id="arrow-normal" viewBox="0 -4 8 8" refX="8" refY="0"
@@ -1051,6 +1211,8 @@ function renderGraph() {
 
   // Re-apply visibility filter after render (CSS show/hide, no simulation impact)
   applyFilter();
+  // Re-attach node click handlers (D3 re-creates elements on each render)
+  _attachNodeClick();
 }
 
 function ticked() {
@@ -1641,8 +1803,161 @@ window.addEventListener("resize", () => {
   simulation.alpha(0.1).restart();
 });
 
+// ── Processor metrics ─────────────────────────────────────────────────────
+let _metricsData = null;    // last MetricsSnapshot from /api/metrics
+let _metricsAge  = null;    // age in seconds at last poll
+let _selectedSvc = null;    // service name shown in the drawer
+
+async function _pollMetrics() {
+  try {
+    const res  = await fetch("/api/metrics");
+    if (!res.ok) { setTimeout(_pollMetrics, 15000); return; }
+    const json = await res.json();
+    if (json.ok && json.data) {
+      _metricsData = json.data;
+      _metricsAge  = json.age_s;
+      _renderMetricsBar();
+      if (_selectedSvc) _renderSvcDrawer(_selectedSvc);
+    }
+  } catch (_) {}
+  setTimeout(_pollMetrics, 15000);
+}
+
+function _renderMetricsBar() {
+  const d = _metricsData;
+  if (!d) return;
+  const s = d.summary || {};
+
+  const setEl = (id, text, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.className   = cls || "mb-val";
+  };
+
+  setEl("mb-services", s.total_services ?? "—");
+  setEl("mb-spans",    s.total_spans_per_min != null
+    ? Math.round(s.total_spans_per_min).toLocaleString() : "—");
+  setEl("mb-latency",  s.avg_latency_ms != null
+    ? `${s.avg_latency_ms.toFixed(1)} ms` : "—");
+
+  const anom = s.services_anomaly ?? 0;
+  setEl("mb-anomaly", anom > 0 ? anom : "0",
+    anom > 0 ? "mb-val-anomaly" : "mb-val-ok");
+
+  const warn = s.services_warn ?? 0;
+  setEl("mb-warn", warn > 0 ? warn : "0",
+    warn > 0 ? "mb-val-warn" : "mb-val");
+
+  const stale = document.getElementById("metrics-stale");
+  if (stale) {
+    stale.textContent = _metricsAge != null ? `processor age: ${Math.round(_metricsAge)}s` : "";
+  }
+}
+
+function _fmtMs(v) {
+  if (v == null || v === 0) return "—";
+  if (v >= 1000) return `${(v / 1000).toFixed(2)}s`;
+  return `${v.toFixed(1)}ms`;
+}
+
+function _statusClass(s) {
+  const map = { ok: "sd-status-ok", warn: "sd-status-warn",
+                anomaly: "sd-status-anomaly", learning: "sd-status-learning" };
+  return map[s] || "";
+}
+function _statusLabel(s) {
+  const map = { ok: "OK", warn: "WARN", anomaly: "ANOMALY", learning: "LEARNING" };
+  return map[s] || (s || "—").toUpperCase();
+}
+
+function _renderSvcDrawer(svc) {
+  const drawer = document.getElementById("svc-drawer");
+  const nameEl = document.getElementById("sd-name");
+  const body   = document.getElementById("sd-body");
+  if (!drawer || !nameEl || !body) return;
+
+  nameEl.textContent = svc;
+
+  if (!_metricsData || !_metricsData.services) {
+    body.innerHTML = `<div class="sd-no-data">No processor metrics yet</div>`;
+    drawer.style.display = "block";
+    return;
+  }
+
+  const sm = _metricsData.services[svc];
+  if (!sm) {
+    body.innerHTML = `<div class="sd-no-data">No data for <b>${escapeHtml(svc)}</b></div>`;
+    drawer.style.display = "block";
+    return;
+  }
+
+  const statusCls = _statusClass(sm.status);
+  const rows = [
+    ["Status",     `<span class="${statusCls}">${_statusLabel(sm.status)}</span>`],
+    ["Spans/min",  sm.spans_per_min != null ? Math.round(sm.spans_per_min).toLocaleString() : "—"],
+    ["Latency",    _fmtMs(sm.latency_mean_ms)],
+    ["Baseline",   _fmtMs(sm.baseline_mean_ms)],
+    ["Z-score",    sm.z_score != null ? sm.z_score.toFixed(2) : "—"],
+    ["Error rate", sm.error_rate_pct != null ? `${sm.error_rate_pct.toFixed(1)}%` : "—"],
+  ];
+
+  let html = rows.map(([label, val]) => `
+    <div class="sd-metric-row">
+      <span class="sd-metric-label">${label}</span>
+      <span class="sd-metric-val">${val}</span>
+    </div>`).join("");
+
+  // Top operations
+  const ops = (sm.operations || []).slice(0, 5);
+  if (ops.length) {
+    html += `<div class="sd-ops-section"><div class="sd-ops-label">Top operations</div>`;
+    for (const op of ops) {
+      const opCls   = _statusClass(op.status);
+      const learnPct = Math.round((op.learn_progress || 0) * 100);
+      const learnBar = op.status === "learning"
+        ? `<span class="sd-learn-bar-wrap"><span class="sd-learn-bar" style="width:${learnPct}%"></span></span>`
+        : "";
+      html += `<div class="sd-op-row">
+        <span class="sd-op-name" title="${escapeHtml(op.operation)}">${escapeHtml(op.operation)}</span>
+        <span class="sd-op-val">
+          ${op.status === "learning"
+            ? `<span class="${opCls}">${learnPct}%${learnBar}</span>`
+            : `${_fmtMs(op.latency_mean_ms)} <span class="${opCls}">(${_statusLabel(op.status)})</span>`}
+        </span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  body.innerHTML = html;
+  drawer.style.display = "block";
+}
+
+function closeSvcDrawer() {
+  _selectedSvc = null;
+  const drawer = document.getElementById("svc-drawer");
+  if (drawer) drawer.style.display = "none";
+}
+
+// Wire node click to show drawer — called after nodes are rendered
+function _attachNodeClick() {
+  nodesG.selectAll(".node").on("click", (event, d) => {
+    event.stopPropagation();
+    _selectedSvc = d.id;
+    _renderSvcDrawer(d.id);
+  });
+}
+
+// Close drawer when clicking on blank SVG area
+d3.select("#graph").on("click", () => closeSvcDrawer());
+
 // ── Init ──────────────────────────────────────────────────────────────────
-_loadEnvironments().then(() => loadTopology()).then(() => connectSSE());
+_loadEnvironments().then(() => loadTopology()).then(() => {
+  connectSSE();
+  _attachNodeClick();
+  _pollMetrics();
+});
 </script>
 </body>
 </html>
