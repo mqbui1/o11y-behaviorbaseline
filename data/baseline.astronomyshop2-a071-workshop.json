@@ -1,0 +1,1359 @@
+{
+  "fingerprints": {
+    "05ad145caba6135b": {
+      "hash": "05ad145caba6135b",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/AddItem -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "cart",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 11,
+      "edge_count": 6,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "11765ca6d2fcd5a0": {
+      "hash": "11765ca6d2fcd5a0",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> load-generator:GET -> frontend-proxy:ingress -> frontend:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_view_cart",
+      "services": [
+        "cart",
+        "frontend",
+        "frontend-proxy",
+        "load-generator"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:24:05Z",
+      "updated_at": "2026-05-18T05:24:05Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "11dcbccd459c2aad": {
+      "hash": "11dcbccd459c2aad",
+      "path": "unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET",
+      "root_op": "unknown_service:user_get_ads",
+      "services": [
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 11,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:51Z",
+      "updated_at": "2026-05-18T05:01:51Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "12c359b79c8785a3": {
+      "hash": "12c359b79c8785a3",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 15,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:06:25Z",
+      "updated_at": "2026-05-18T05:06:25Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "13590c5a2c2ff914": {
+      "hash": "13590c5a2c2ff914",
+      "path": "frontend:grpc.oteldemo.CartService/AddItem -> cart:HGET -> frontend:grpc.oteldemo.CartService/AddItem -> cart:HMSET -> frontend:grpc.oteldemo.CartService/AddItem -> cart:EXPIRE -> frontend:grpc.oteldemo.CartService/GetCart -> cart:HGET",
+      "root_op": "frontend:POST",
+      "services": [
+        "cart",
+        "frontend"
+      ],
+      "span_count": 13,
+      "edge_count": 4,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:45Z",
+      "updated_at": "2026-05-18T05:12:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "177a7595eb3c45ae": {
+      "hash": "177a7595eb3c45ae",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> unknown_service:checkout:oteldemo.CheckoutService/PlaceOrder -> unknown_service:checkout:oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart -> unknown_service:checkout:oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:checkout:oteldemo.CurrencyService/Convert -> unknown_service:Currency/Convert -> unknown_service:checkout:HTTP POST -> unknown_service:/get-quote -> unknown_service:checkout:oteldemo.PaymentService/Charge -> unknown_service:/nodejs/bin/node:grpc.oteldemo.PaymentService/Charge -> unknown_service:checkout:HTTP POST -> unknown_service:/ship-order -> unknown_service:checkout:oteldemo.CartService/EmptyCart -> cart:POST /oteldemo.CartService/EmptyCart -> unknown_service:checkout:orders publish -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:checkout",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 47,
+      "edge_count": 11,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "1835e4dbe0b54060": {
+      "hash": "1835e4dbe0b54060",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> frontend-proxy:router frontend egress -> frontend:POST -> frontend:grpc.oteldemo.CartService/AddItem -> cart:HGET -> frontend:grpc.oteldemo.CartService/AddItem -> cart:HMSET -> frontend:grpc.oteldemo.CartService/GetCart -> cart:EXPIRE -> frontend:executing api route (pages) /api/cart -> cart:HGET",
+      "root_op": "frontend-proxy:ingress",
+      "services": [
+        "cart",
+        "frontend",
+        "frontend-proxy",
+        "product-catalog"
+      ],
+      "span_count": 19,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:50Z",
+      "updated_at": "2026-05-18T05:12:50Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "193f7caf382ab67d": {
+      "hash": "193f7caf382ab67d",
+      "path": "load-generator:user_index",
+      "root_op": "load-generator:user_index",
+      "services": [
+        "load-generator"
+      ],
+      "span_count": 2,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:45Z",
+      "updated_at": "2026-05-18T05:11:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "239a660d87328dd8": {
+      "hash": "239a660d87328dd8",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:user_browse_product",
+      "services": [
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:00Z",
+      "updated_at": "2026-05-18T05:02:00Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "244e784d53e5f3af": {
+      "hash": "244e784d53e5f3af",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:/nodejs/bin/node:GET",
+      "services": [
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 8,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "28f7c4a81a466fd2": {
+      "hash": "28f7c4a81a466fd2",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> product-reviews:/oteldemo.ProductReviewService/GetProductReviews",
+      "root_op": "load-generator:user_get_product_reviews",
+      "services": [
+        "frontend-proxy",
+        "load-generator",
+        "product-reviews"
+      ],
+      "span_count": 7,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:25Z",
+      "updated_at": "2026-05-18T05:12:25Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "2b752694b910aff0": {
+      "hash": "2b752694b910aff0",
+      "path": "unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:user_browse_product",
+      "services": [
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:05Z",
+      "updated_at": "2026-05-18T05:02:05Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "2e3f75160ddf45ff": {
+      "hash": "2e3f75160ddf45ff",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 4,
+      "edge_count": 1,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:12Z",
+      "updated_at": "2026-05-18T05:01:12Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "31c472ccba10aa44": {
+      "hash": "31c472ccba10aa44",
+      "path": "load-generator:POST -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:POST -> frontend:grpc.oteldemo.ProductReviewService/AskProductAIAssistant -> product-reviews:/oteldemo.ProductReviewService/AskProductAIAssistant",
+      "root_op": "load-generator:user_ask_product_ai_assistant",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-reviews"
+      ],
+      "span_count": 15,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:45Z",
+      "updated_at": "2026-05-18T05:11:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "3574b85837625fef": {
+      "hash": "3574b85837625fef",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> frontend-proxy:router frontend egress -> frontend:POST -> load-generator:POST -> frontend-proxy:ingress -> frontend:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> frontend:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_add_to_cart",
+      "services": [
+        "cart",
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:55Z",
+      "updated_at": "2026-05-18T05:11:55Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "392aeb3d1e63a680": {
+      "hash": "392aeb3d1e63a680",
+      "path": "unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "services": [
+        "cart",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 6,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "4608b57ff765f705": {
+      "hash": "4608b57ff765f705",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:GET -> unknown_service:envoy:ingress",
+      "root_op": "unknown_service:user_get_ads",
+      "services": [
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 11,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:46Z",
+      "updated_at": "2026-05-18T05:01:46Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "4676fe10f9dc7891": {
+      "hash": "4676fe10f9dc7891",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET /api/products/[productId]/index -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:/nodejs/bin/node:POST /api/cart -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "cart",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 15,
+      "edge_count": 5,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "47aaa30eac1d67a0": {
+      "hash": "47aaa30eac1d67a0",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> load-generator:GET -> frontend-proxy:ingress -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_browse_product",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:55Z",
+      "updated_at": "2026-05-18T05:11:55Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "49f881e236679c4f": {
+      "hash": "49f881e236679c4f",
+      "path": "frontend-proxy:router frontend egress -> frontend:POST -> frontend:grpc.oteldemo.ProductReviewService/AskProductAIAssistant -> product-reviews:/oteldemo.ProductReviewService/AskProductAIAssistant",
+      "root_op": "frontend-proxy:ingress",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "product-reviews"
+      ],
+      "span_count": 13,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:10Z",
+      "updated_at": "2026-05-18T05:12:10Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "4ac2ab8b7075af7b": {
+      "hash": "4ac2ab8b7075af7b",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_view_cart",
+      "services": [
+        "cart",
+        "frontend-proxy",
+        "load-generator"
+      ],
+      "span_count": 6,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:35Z",
+      "updated_at": "2026-05-18T05:12:35Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "4b33446e59f8b63a": {
+      "hash": "4b33446e59f8b63a",
+      "path": "unknown_service:/nodejs/bin/node:dns.lookup",
+      "root_op": "unknown_service:/nodejs/bin/node:dns.lookup",
+      "services": [
+        "unknown_service:/nodejs/bin/node"
+      ],
+      "span_count": 3,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:27Z",
+      "updated_at": "2026-05-18T05:02:27Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "4b6b73e7fcd05b5b": {
+      "hash": "4b6b73e7fcd05b5b",
+      "path": "unknown_service:POST -> unknown_service:envoy:ingress",
+      "root_op": "unknown_service:user_ask_product_ai_assistant",
+      "services": [
+        "unknown_service",
+        "unknown_service:envoy"
+      ],
+      "span_count": 4,
+      "edge_count": 1,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:31Z",
+      "updated_at": "2026-05-18T05:02:31Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "4c4c89ab521ec647": {
+      "hash": "4c4c89ab521ec647",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:checkout:oteldemo.CheckoutService/PlaceOrder -> unknown_service:checkout:oteldemo.CartService/GetCart -> cart:HGET -> unknown_service:checkout:oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:checkout:oteldemo.CurrencyService/Convert -> unknown_service:Currency/Convert -> unknown_service:checkout:HTTP POST -> unknown_service:/get-quote -> unknown_service:checkout:HTTP POST -> unknown_service:/ship-order -> unknown_service:checkout:oteldemo.CartService/EmptyCart -> cart:HMSET -> unknown_service:checkout:oteldemo.CartService/EmptyCart -> cart:EXPIRE -> unknown_service:envoy:router frontend egress -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:checkout",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 26,
+      "edge_count": 9,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:03Z",
+      "updated_at": "2026-05-18T05:02:03Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "513e8274a6333f30": {
+      "hash": "513e8274a6333f30",
+      "path": "load-generator:GET -> frontend:GET -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> load-generator:POST -> frontend:POST -> frontend:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> frontend:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_add_to_cart",
+      "services": [
+        "cart",
+        "frontend",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 16,
+      "edge_count": 5,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:46Z",
+      "updated_at": "2026-05-18T05:11:46Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "5221c7e5f2342132": {
+      "hash": "5221c7e5f2342132",
+      "path": "unknown_service:/nodejs/bin/node:tcp.connect",
+      "root_op": "unknown_service:/nodejs/bin/node:tcp.connect",
+      "services": [
+        "unknown_service:/nodejs/bin/node"
+      ],
+      "span_count": 2,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "527da4e4f3276b74": {
+      "hash": "527da4e4f3276b74",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:user_view_cart",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:06:25Z",
+      "updated_at": "2026-05-18T05:06:25Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "539c5be02ff7a899": {
+      "hash": "539c5be02ff7a899",
+      "path": "unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:user_add_to_cart",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:50Z",
+      "updated_at": "2026-05-18T05:01:50Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "597b4d5231566914": {
+      "hash": "597b4d5231566914",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> load-generator:GET -> frontend-proxy:ingress -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> load-generator:POST -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:POST -> frontend:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> frontend:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_add_to_cart",
+      "services": [
+        "cart",
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:00Z",
+      "updated_at": "2026-05-18T05:12:00Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "6153cebd419bb3f6": {
+      "hash": "6153cebd419bb3f6",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:user_add_to_cart",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:46Z",
+      "updated_at": "2026-05-18T05:01:46Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "624241b221f42f94": {
+      "hash": "624241b221f42f94",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> unknown_service:checkout:oteldemo.CheckoutService/PlaceOrder -> unknown_service:checkout:oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart -> unknown_service:checkout:oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:checkout:oteldemo.CurrencyService/Convert -> unknown_service:Currency/Convert -> unknown_service:checkout:HTTP POST -> unknown_service:/get-quote -> unknown_service:checkout:oteldemo.PaymentService/Charge -> unknown_service:/nodejs/bin/node:grpc.oteldemo.PaymentService/Charge -> unknown_service:checkout:HTTP POST -> unknown_service:/ship-order -> unknown_service:checkout:oteldemo.CartService/EmptyCart -> cart:POST /oteldemo.CartService/EmptyCart -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:user_checkout_single",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:checkout",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 39,
+      "edge_count": 11,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:51Z",
+      "updated_at": "2026-05-18T05:01:51Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "63085f9d3cd17ff7": {
+      "hash": "63085f9d3cd17ff7",
+      "path": "load-generator:GET -> frontend:GET",
+      "root_op": "load-generator:user_get_ads",
+      "services": [
+        "frontend",
+        "load-generator"
+      ],
+      "span_count": 7,
+      "edge_count": 1,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:45Z",
+      "updated_at": "2026-05-18T05:11:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "6795c1179b4c8d45": {
+      "hash": "6795c1179b4c8d45",
+      "path": "unknown_service:envoy:ingress",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "unknown_service:envoy"
+      ],
+      "span_count": 4,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:07Z",
+      "updated_at": "2026-05-18T05:02:07Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "67cf273dddaade94": {
+      "hash": "67cf273dddaade94",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.RecommendationService/ListRecommendations",
+      "root_op": "unknown_service:/nodejs/bin/node:GET",
+      "services": [
+        "recommendation",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 13,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:46Z",
+      "updated_at": "2026-05-18T05:01:46Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "6f0974cc47bcd609": {
+      "hash": "6f0974cc47bcd609",
+      "path": "unknown_service:envoy:router frontend egress -> cart:POST /oteldemo.CartService/GetCart -> unknown_service:envoy:router frontend egress -> unknown_service:Currency/Convert -> unknown_service:envoy:router frontend egress -> cart:POST /oteldemo.CartService/EmptyCart",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:envoy"
+      ],
+      "span_count": 14,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:21Z",
+      "updated_at": "2026-05-18T05:02:21Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "72405f0cb85cfb3a": {
+      "hash": "72405f0cb85cfb3a",
+      "path": "frontend-proxy:ingress",
+      "root_op": "frontend-proxy:ingress",
+      "services": [
+        "frontend-proxy"
+      ],
+      "span_count": 2,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:55Z",
+      "updated_at": "2026-05-18T05:11:55Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "734fb4a49cdf8078": {
+      "hash": "734fb4a49cdf8078",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_browse_product",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:45Z",
+      "updated_at": "2026-05-18T05:11:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "77729481d2dbd44a": {
+      "hash": "77729481d2dbd44a",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:POST -> unknown_service:envoy:ingress",
+      "root_op": "unknown_service:user_ask_product_ai_assistant",
+      "services": [
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 8,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:56Z",
+      "updated_at": "2026-05-18T05:02:56Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "7b5957259db610f5": {
+      "hash": "7b5957259db610f5",
+      "path": "unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:user_add_to_cart",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:38Z",
+      "updated_at": "2026-05-18T05:02:38Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "825c5f46f596788e": {
+      "hash": "825c5f46f596788e",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_view_cart",
+      "services": [
+        "cart",
+        "frontend",
+        "frontend-proxy",
+        "load-generator"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:40Z",
+      "updated_at": "2026-05-18T05:12:40Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "877a1b2589649a7e": {
+      "hash": "877a1b2589649a7e",
+      "path": "unknown_service:checkout:oteldemo.CartService/GetCart -> cart:HGET -> unknown_service:checkout:oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:checkout:oteldemo.CurrencyService/Convert -> unknown_service:Currency/Convert -> unknown_service:checkout:HTTP POST -> unknown_service:/get-quote -> unknown_service:checkout:oteldemo.PaymentService/Charge -> unknown_service:/nodejs/bin/node:grpc.oteldemo.PaymentService/Charge -> unknown_service:checkout:HTTP POST -> unknown_service:/ship-order -> unknown_service:checkout:oteldemo.CartService/EmptyCart -> cart:HMSET -> unknown_service:checkout:oteldemo.CartService/EmptyCart -> cart:EXPIRE",
+      "root_op": "unknown_service:checkout:oteldemo.CheckoutService/PlaceOrder",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:checkout",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 33,
+      "edge_count": 8,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "8cd167e4cca7c162": {
+      "hash": "8cd167e4cca7c162",
+      "path": "load-generator:GET -> frontend:GET -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_browse_product",
+      "services": [
+        "frontend",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 8,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:45Z",
+      "updated_at": "2026-05-18T05:11:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "90e27f3280a06c1f": {
+      "hash": "90e27f3280a06c1f",
+      "path": "cart:HGET",
+      "root_op": "cart:HGET",
+      "services": [
+        "cart"
+      ],
+      "span_count": 3,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:45Z",
+      "updated_at": "2026-05-18T05:11:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "933eb9ee0fe2b068": {
+      "hash": "933eb9ee0fe2b068",
+      "path": "cart:flagd.evaluation.v1.Service/ResolveBoolean",
+      "root_op": "cart:flagd.evaluation.v1.Service/ResolveBoolean",
+      "services": [
+        "cart"
+      ],
+      "span_count": 2,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:01:45Z",
+      "updated_at": "2026-05-18T05:01:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "a3734d7efd705ca1": {
+      "hash": "a3734d7efd705ca1",
+      "path": "frontend-proxy:router frontend egress -> frontend:POST -> load-generator:POST -> frontend-proxy:ingress -> frontend:grpc.oteldemo.CheckoutService/PlaceOrder -> checkout:oteldemo.CheckoutService/PlaceOrder -> checkout:oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart -> checkout:oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> checkout:oteldemo.CurrencyService/Convert -> currency:Currency/Convert -> checkout:HTTP POST -> shipping:/get-quote -> checkout:oteldemo.PaymentService/Charge -> payment:grpc.oteldemo.PaymentService/Charge -> checkout:HTTP POST -> shipping:/ship-order -> checkout:oteldemo.CartService/EmptyCart -> cart:POST /oteldemo.CartService/EmptyCart -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_checkout_multi",
+      "services": [
+        "cart",
+        "checkout",
+        "currency",
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "payment",
+        "product-catalog",
+        "shipping"
+      ],
+      "span_count": 55,
+      "edge_count": 11,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:00Z",
+      "updated_at": "2026-05-18T05:12:00Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "a4dac61f47e0fcc8": {
+      "hash": "a4dac61f47e0fcc8",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 8,
+      "edge_count": 1,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "a54f01c708013beb": {
+      "hash": "a54f01c708013beb",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> load-generator:GET -> frontend-proxy:ingress -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> frontend-proxy:router frontend egress -> frontend:POST -> load-generator:POST -> frontend-proxy:ingress -> frontend:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> frontend:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_add_to_cart",
+      "services": [
+        "cart",
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:00Z",
+      "updated_at": "2026-05-18T05:12:00Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "a8f9807efd10e714": {
+      "hash": "a8f9807efd10e714",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.RecommendationService/ListRecommendations -> unknown_service:product-catalog:oteldemo.ProductCatalogService/ListProducts -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:/nodejs/bin/node:GET",
+      "services": [
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 20,
+      "edge_count": 4,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "aa88f8d2366ea7f9": {
+      "hash": "aa88f8d2366ea7f9",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.ProductCatalogService/ListProducts -> product-catalog:oteldemo.ProductCatalogService/ListProducts -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_get_recommendations",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog",
+        "recommendation"
+      ],
+      "span_count": 25,
+      "edge_count": 5,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:05Z",
+      "updated_at": "2026-05-18T05:12:05Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "b71721c335e93db9": {
+      "hash": "b71721c335e93db9",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:user_add_to_cart",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:06:25Z",
+      "updated_at": "2026-05-18T05:06:25Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "cf89cdc2967bb616": {
+      "hash": "cf89cdc2967bb616",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:GET",
+      "root_op": "load-generator:user_index",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator"
+      ],
+      "span_count": 8,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:11:45Z",
+      "updated_at": "2026-05-18T05:11:45Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "d0ee261ee9aada23": {
+      "hash": "d0ee261ee9aada23",
+      "path": "unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST",
+      "root_op": "unknown_service:user_ask_product_ai_assistant",
+      "services": [
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 8,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:06:25Z",
+      "updated_at": "2026-05-18T05:06:25Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "d11625b88c094bf1": {
+      "hash": "d11625b88c094bf1",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:product-catalog:oteldemo.ProductCatalogService/ListProducts -> unknown_service:envoy:router frontend egress -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 12,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:36Z",
+      "updated_at": "2026-05-18T05:02:36Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "dafa49bc4a2bb5b1": {
+      "hash": "dafa49bc4a2bb5b1",
+      "path": "unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> unknown_service:checkout:oteldemo.CheckoutService/PlaceOrder -> unknown_service:checkout:oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart -> unknown_service:checkout:oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:checkout:oteldemo.CurrencyService/Convert -> unknown_service:Currency/Convert -> unknown_service:checkout:HTTP POST -> unknown_service:/get-quote -> unknown_service:checkout:oteldemo.PaymentService/Charge -> unknown_service:/nodejs/bin/node:grpc.oteldemo.PaymentService/Charge -> unknown_service:checkout:HTTP POST -> unknown_service:/ship-order -> unknown_service:checkout:oteldemo.CartService/EmptyCart -> cart:POST /oteldemo.CartService/EmptyCart -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:user_checkout_single",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:checkout",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 39,
+      "edge_count": 11,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "dd4f0fa703980d92": {
+      "hash": "dd4f0fa703980d92",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:POST -> unknown_service:POST -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> cart:POST /oteldemo.CartService/GetCart -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> unknown_service:/get-quote -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> unknown_service:/ship-order -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CheckoutService/PlaceOrder -> cart:POST /oteldemo.CartService/EmptyCart",
+      "root_op": "unknown_service:user_checkout_multi",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 22,
+      "edge_count": 6,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:41Z",
+      "updated_at": "2026-05-18T05:02:41Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "ddd6016ab18977b7": {
+      "hash": "ddd6016ab18977b7",
+      "path": "unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:grpc.oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.ProductCatalogService/ListProducts -> unknown_service:product-catalog:oteldemo.ProductCatalogService/ListProducts -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:user_get_recommendations",
+      "services": [
+        "recommendation",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 25,
+      "edge_count": 5,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:06Z",
+      "updated_at": "2026-05-18T05:02:06Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "de1139337c0c183c": {
+      "hash": "de1139337c0c183c",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.AdService/GetAds",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 5,
+      "edge_count": 1,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:05:52Z",
+      "updated_at": "2026-05-18T05:05:52Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "e02d0fa711effa39": {
+      "hash": "e02d0fa711effa39",
+      "path": "unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:/nodejs/bin/node:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:user_view_cart",
+      "services": [
+        "cart",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy"
+      ],
+      "span_count": 10,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:16Z",
+      "updated_at": "2026-05-18T05:02:16Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "e40280dbefefdb71": {
+      "hash": "e40280dbefefdb71",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> load-generator:GET -> frontend-proxy:ingress",
+      "root_op": "load-generator:user_get_ads",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator"
+      ],
+      "span_count": 11,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:50Z",
+      "updated_at": "2026-05-18T05:12:50Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "e4a8123ba78515ec": {
+      "hash": "e4a8123ba78515ec",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.ProductReviewService/GetProductReviews -> product-reviews:/oteldemo.ProductReviewService/GetProductReviews",
+      "root_op": "load-generator:user_get_product_reviews",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-reviews"
+      ],
+      "span_count": 11,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:13:00Z",
+      "updated_at": "2026-05-18T05:13:00Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "e9bef49cd249a5ed": {
+      "hash": "e9bef49cd249a5ed",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct -> unknown_service:envoy:router frontend egress -> cart:HGET -> unknown_service:envoy:router frontend egress -> cart:HMSET -> unknown_service:envoy:router frontend egress -> cart:EXPIRE",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "cart",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 10,
+      "edge_count": 4,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:02Z",
+      "updated_at": "2026-05-18T05:02:02Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "ea70e313f77d5abc": {
+      "hash": "ea70e313f77d5abc",
+      "path": "unknown_service:GET -> unknown_service:/nodejs/bin/node:GET",
+      "root_op": "unknown_service:user_index",
+      "services": [
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node"
+      ],
+      "span_count": 6,
+      "edge_count": 1,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:06:25Z",
+      "updated_at": "2026-05-18T05:06:25Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "f26431357704fb8e": {
+      "hash": "f26431357704fb8e",
+      "path": "unknown_service:envoy:router frontend egress -> unknown_service:/nodejs/bin/node:GET -> unknown_service:GET -> unknown_service:envoy:ingress -> unknown_service:/nodejs/bin/node:grpc.oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.ProductCatalogService/ListProducts -> unknown_service:product-catalog:oteldemo.ProductCatalogService/ListProducts -> unknown_service:/nodejs/bin/node:grpc.oteldemo.ProductCatalogService/GetProduct -> unknown_service:product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "unknown_service:user_get_recommendations",
+      "services": [
+        "recommendation",
+        "unknown_service",
+        "unknown_service:/nodejs/bin/node",
+        "unknown_service:envoy",
+        "unknown_service:product-catalog"
+      ],
+      "span_count": 25,
+      "edge_count": 5,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:06:25Z",
+      "updated_at": "2026-05-18T05:06:25Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "f64232b126ec78b3": {
+      "hash": "f64232b126ec78b3",
+      "path": "frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "frontend:GET /api/products/[productId]/index",
+      "services": [
+        "frontend",
+        "product-catalog"
+      ],
+      "span_count": 11,
+      "edge_count": 1,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:15Z",
+      "updated_at": "2026-05-18T05:12:15Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "f76a06a0d771b89b": {
+      "hash": "f76a06a0d771b89b",
+      "path": "unknown_service:envoy:router frontend egress -> cart:POST /oteldemo.CartService/AddItem -> unknown_service:envoy:router frontend egress -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "unknown_service:envoy:ingress",
+      "services": [
+        "cart",
+        "unknown_service:envoy"
+      ],
+      "span_count": 10,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:02:21Z",
+      "updated_at": "2026-05-18T05:02:21Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "fbc4837fcf653149": {
+      "hash": "fbc4837fcf653149",
+      "path": "load-generator:GET -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> load-generator:POST -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:POST -> frontend:grpc.oteldemo.CartService/AddItem -> cart:POST /oteldemo.CartService/AddItem -> frontend:grpc.oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart",
+      "root_op": "load-generator:user_add_to_cart",
+      "services": [
+        "cart",
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog"
+      ],
+      "span_count": 24,
+      "edge_count": 7,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:20:55Z",
+      "updated_at": "2026-05-18T05:20:55Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "feff7c5a2b503ee5": {
+      "hash": "feff7c5a2b503ee5",
+      "path": "load-generator:POST -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> checkout:oteldemo.CheckoutService/PlaceOrder -> checkout:oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart -> checkout:oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> checkout:HTTP POST -> shipping:/get-quote -> checkout:oteldemo.PaymentService/Charge -> payment:grpc.oteldemo.PaymentService/Charge -> checkout:HTTP POST -> shipping:/ship-order -> checkout:oteldemo.CartService/EmptyCart -> cart:POST /oteldemo.CartService/EmptyCart -> frontend-proxy:router frontend egress -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_checkout_single",
+      "services": [
+        "cart",
+        "checkout",
+        "frontend-proxy",
+        "load-generator",
+        "payment",
+        "product-catalog",
+        "shipping"
+      ],
+      "span_count": 32,
+      "edge_count": 9,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:20Z",
+      "updated_at": "2026-05-18T05:12:20Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "1d4bf33f2db4dc03": {
+      "hash": "1d4bf33f2db4dc03",
+      "path": "frontend:GET",
+      "root_op": "frontend:GET",
+      "services": [
+        "frontend"
+      ],
+      "span_count": 4,
+      "edge_count": 0,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:47Z",
+      "updated_at": "2026-05-18T05:12:47Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "36951f5a22ad9604": {
+      "hash": "36951f5a22ad9604",
+      "path": "frontend-proxy:router frontend egress -> frontend:POST -> frontend:POST /api/checkout -> frontend-proxy:ingress -> frontend:grpc.oteldemo.CheckoutService/PlaceOrder -> checkout:oteldemo.CheckoutService/PlaceOrder -> checkout:oteldemo.CurrencyService/Convert -> currency:Currency/Convert",
+      "root_op": "frontend:POST",
+      "services": [
+        "checkout",
+        "currency",
+        "frontend",
+        "frontend-proxy"
+      ],
+      "span_count": 29,
+      "edge_count": 4,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:42Z",
+      "updated_at": "2026-05-18T05:12:42Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "3a52ee66bb95e953": {
+      "hash": "3a52ee66bb95e953",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> load-generator:GET -> frontend-proxy:ingress -> frontend:grpc.oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.ProductCatalogService/ListProducts -> product-catalog:oteldemo.ProductCatalogService/ListProducts -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_get_recommendations",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "product-catalog",
+        "recommendation"
+      ],
+      "span_count": 25,
+      "edge_count": 5,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:37Z",
+      "updated_at": "2026-05-18T05:12:37Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "8c05912225046e8e": {
+      "hash": "8c05912225046e8e",
+      "path": "load-generator:POST -> frontend-proxy:ingress -> frontend-proxy:router frontend egress -> frontend:POST -> frontend:grpc.oteldemo.CheckoutService/PlaceOrder -> checkout:oteldemo.CheckoutService/PlaceOrder -> checkout:oteldemo.CartService/GetCart -> cart:POST /oteldemo.CartService/GetCart -> checkout:oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct -> checkout:oteldemo.CurrencyService/Convert -> currency:Currency/Convert -> checkout:HTTP POST -> shipping:/get-quote -> checkout:oteldemo.PaymentService/Charge -> payment:grpc.oteldemo.PaymentService/Charge -> checkout:HTTP POST -> shipping:/ship-order -> checkout:oteldemo.CartService/EmptyCart -> cart:POST /oteldemo.CartService/EmptyCart -> frontend:grpc.oteldemo.ProductCatalogService/GetProduct -> product-catalog:oteldemo.ProductCatalogService/GetProduct",
+      "root_op": "load-generator:user_checkout_single",
+      "services": [
+        "cart",
+        "checkout",
+        "currency",
+        "frontend",
+        "frontend-proxy",
+        "load-generator",
+        "payment",
+        "product-catalog",
+        "shipping"
+      ],
+      "span_count": 39,
+      "edge_count": 11,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:12Z",
+      "updated_at": "2026-05-18T05:12:12Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "b91b7d9a420a3722": {
+      "hash": "b91b7d9a420a3722",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> frontend-proxy:router frontend egress -> frontend:POST -> frontend:POST -> frontend-proxy:ingress",
+      "root_op": "frontend-proxy:ingress",
+      "services": [
+        "frontend",
+        "frontend-proxy"
+      ],
+      "span_count": 13,
+      "edge_count": 3,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:42Z",
+      "updated_at": "2026-05-18T05:12:42Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    },
+    "c25e432468c39766": {
+      "hash": "c25e432468c39766",
+      "path": "frontend-proxy:router frontend egress -> frontend:GET -> frontend:grpc.oteldemo.RecommendationService/ListRecommendations -> recommendation:/oteldemo.RecommendationService/ListRecommendations",
+      "root_op": "frontend-proxy:ingress",
+      "services": [
+        "frontend",
+        "frontend-proxy",
+        "recommendation"
+      ],
+      "span_count": 13,
+      "edge_count": 2,
+      "occurrences": 1,
+      "auto_promoted": true,
+      "no_missing_service": true,
+      "first_seen": "2026-05-18T05:12:42Z",
+      "updated_at": "2026-05-18T05:12:42Z",
+      "promoted_at": "2026-05-18T05:26:58Z"
+    }
+  }
+}
