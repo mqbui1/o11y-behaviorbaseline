@@ -671,6 +671,21 @@
     padding: 8px 0;
     text-align: center;
   }
+  .sd-section-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #484F58;
+    text-transform: uppercase;
+    margin: 6px 0 4px;
+  }
+  .sd-infra-event {
+    font-size: 11px;
+    color: #D29922;
+    padding: 2px 0;
+    border-bottom: 1px solid #21262D;
+  }
+  .sd-infra-event:last-child { border-bottom: none; }
 </style>
 </head>
 <body>
@@ -707,9 +722,9 @@
   <div class="mb-sep"></div>
   <div class="mb-stat"><span class="mb-label">Avg latency</span><span class="mb-val" id="mb-latency">—</span></div>
   <div class="mb-sep"></div>
-  <div class="mb-stat"><span class="mb-label">Anomalous</span><span class="mb-val" id="mb-anomaly">—</span></div>
+  <div class="mb-stat" style="cursor:pointer" title="Click to inspect anomalous services" onclick="_cycleMbStatus('anomaly')"><span class="mb-label">Anomalous</span><span class="mb-val" id="mb-anomaly">—</span></div>
   <div class="mb-sep"></div>
-  <div class="mb-stat"><span class="mb-label">Warn</span><span class="mb-val" id="mb-warn">—</span></div>
+  <div class="mb-stat" style="cursor:pointer" title="Click to inspect warn services" onclick="_cycleMbStatus('warn')"><span class="mb-label">Warn</span><span class="mb-val" id="mb-warn">—</span></div>
   <span id="metrics-stale"></span>
 </div>
 
@@ -1038,6 +1053,12 @@ function nodeState(id) {
     if (_discoveredNodeIds.has(id)) return "discovered";
     // Nodes with infra events but no anomaly show as latency (amber) to indicate infra pressure
     if ((infraEvents[id] || []).length > 0) return "latency";
+    // Fall back to metrics status when no structural drift events are active
+    const mSvc = (_metricsData && _metricsData.services) ? _metricsData.services[id] : null;
+    if (mSvc) {
+      if (mSvc.status === "anomaly") return "errorrate";
+      if (mSvc.status === "warn")    return "drift";
+    }
     return "healthy";
   }
   const types = new Set(anoms.map(a => a.anomaly_type));
@@ -1818,6 +1839,8 @@ async function _pollMetrics() {
       _metricsAge  = json.age_s;
       _renderMetricsBar();
       if (_selectedSvc) _renderSvcDrawer(_selectedSvc);
+      // Re-apply node classes so metrics-driven colors (warn/anomaly) show immediately
+      nodesG.selectAll(".node").attr("class", d => `node node-${nodeState(d.id)}`);
     }
   } catch (_) {}
   setTimeout(_pollMetrics, 15000);
@@ -1855,6 +1878,20 @@ function _renderMetricsBar() {
   }
 }
 
+// Cycle through services matching a metrics status and open their drawer
+let _mbCycleIdx = {};
+function _cycleMbStatus(status) {
+  if (!_metricsData || !_metricsData.services) return;
+  const matches = Object.keys(_metricsData.services)
+    .filter(s => _metricsData.services[s].status === status)
+    .sort();
+  if (!matches.length) return;
+  const idx = ((_mbCycleIdx[status] || 0)) % matches.length;
+  _mbCycleIdx[status] = idx + 1;
+  _selectedSvc = matches[idx];
+  _renderSvcDrawer(_selectedSvc);
+}
+
 function _fmtMs(v) {
   if (v == null || v === 0) return "—";
   if (v >= 1000) return `${(v / 1000).toFixed(2)}s`;
@@ -1887,7 +1924,16 @@ function _renderSvcDrawer(svc) {
 
   const sm = _metricsData.services[svc];
   if (!sm) {
-    body.innerHTML = `<div class="sd-no-data">No data for <b>${escapeHtml(svc)}</b></div>`;
+    // No metrics data — show infra events if any, otherwise generic message
+    const infra = infraEvents[svc] || [];
+    if (infra.length > 0) {
+      const rows = infra.slice(-5).reverse().map(e =>
+        `<div class="sd-infra-event">&#9888; ${escapeHtml(e.reason || e.type || "event")}${e.count > 1 ? ` ×${e.count}` : ""}</div>`
+      ).join("");
+      body.innerHTML = `<div class="sd-no-data" style="margin-bottom:6px">No processor metrics (Kafka/infra service)</div><div class="sd-section-label">INFRA EVENTS</div>${rows}`;
+    } else {
+      body.innerHTML = `<div class="sd-no-data">No processor metrics for <b>${escapeHtml(svc)}</b><br><small style="color:#484F58">Service may not emit traced spans</small></div>`;
+    }
     drawer.style.display = "block";
     return;
   }
