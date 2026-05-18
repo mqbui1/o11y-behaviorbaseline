@@ -3,6 +3,11 @@
 #
 # ── Astronomy Shop (fastest path — full deploy from scratch ~10 min) ──────────
 #
+#   Install the app with OTEL routing pre-configured (no post-patch needed):
+#     helm install astronomy-shop open-telemetry/opentelemetry-demo \
+#       --version 0.40.8 \
+#       -f otel-processor/k8s/astro-values.yaml
+#
 #   On EC2 (after app pods are running and load gen is active):
 #     cd ~/o11y-behaviorbaseline
 #     K3D_CLUSTER=astronomyshop-84f5-cluster \
@@ -65,16 +70,18 @@ ENVIRONMENT=""
 SKIP_LEARN=false
 SKIP_BUILD=false
 OTEL_BOOTSTRAP=false
+PULL_BASELINE=false  # --pull-baseline: just merge+push baseline from running pods, no redeploy
 APP=""  # astronomy-shop | petclinic | "" (auto-detect)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip-learn) SKIP_LEARN=true; shift ;;
-    --skip-build) SKIP_BUILD=true; shift ;;
+    --skip-learn)    SKIP_LEARN=true; shift ;;
+    --skip-build)    SKIP_BUILD=true; shift ;;
     --otel-bootstrap) OTEL_BOOTSTRAP=true; SKIP_LEARN=true; shift ;;
-    --app) APP="$2"; shift 2 ;;
-    --*) echo "Unknown flag: $1"; exit 1 ;;
-    *) ENVIRONMENT="$1"; shift ;;
+    --pull-baseline) PULL_BASELINE=true; shift ;;
+    --app)           APP="$2"; shift 2 ;;
+    --*)             echo "Unknown flag: $1"; exit 1 ;;
+    *)               ENVIRONMENT="$1"; shift ;;
   esac
 done
 
@@ -89,7 +96,7 @@ if [ -z "$APP" ]; then
 fi
 
 if [ -z "$ENVIRONMENT" ]; then
-  echo "Usage: $0 <environment> [--skip-learn] [--skip-build]"
+  echo "Usage: $0 <environment> [--skip-learn] [--skip-build] [--otel-bootstrap] [--pull-baseline]"
   exit 1
 fi
 
@@ -97,6 +104,69 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_DIR/data"
 K8S_DIR="$SCRIPT_DIR/k8s"
+
+# ── Fast path: --pull-baseline — merge baseline from running aggregator pods ──
+# Use this after --otel-bootstrap if the deploy completed but the initial
+# bootstrap window learned 0 fingerprints (e.g. app pods hadn't rolled yet).
+#   K3D_CLUSTER=<name> ./deploy.sh <env> --pull-baseline
+if [ "$PULL_BASELINE" = "true" ]; then
+  BASELINE="$DATA_DIR/baseline.${ENVIRONMENT}.json"
+  echo "=== --pull-baseline: merging baseline from running aggregator pods ==="
+  MERGED_TMP="$DATA_DIR/baseline.${ENVIRONMENT}.merged_tmp.json"
+  echo '{"fingerprints":{}}' > "$MERGED_TMP"
+  for pod in $(kubectl get pods -l app=otelcol-aggregator -o jsonpath='{.items[*].metadata.name}'); do
+    POD_BASELINE=$(kubectl exec "$pod" -c otelcol -- cat /baseline/baseline.json 2>/dev/null || echo "")
+    if [ -n "$POD_BASELINE" ] && echo "$POD_BASELINE" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+      echo "$POD_BASELINE" | python3 - "$MERGED_TMP" "$pod" << 'PYEOF'
+import sys, json
+pod_data = json.load(sys.stdin)
+merged_path, pod_name = sys.argv[1], sys.argv[2]
+with open(merged_path) as f: merged = json.load(f)
+fps = merged.setdefault("fingerprints", {})
+for h, fp in pod_data.get("fingerprints", {}).items():
+    if h not in fps or fp.get("occurrences", 0) > fps[h].get("occurrences", 0):
+        fps[h] = fp
+with open(merged_path, "w") as f: json.dump(merged, f, indent=2)
+print(f"  Merged from {pod_name}: {len(pod_data.get('fingerprints',{}))} fps")
+PYEOF
+    else
+      echo "  Skipped $pod (empty or parse error)"
+    fi
+  done
+  FP_COUNT=$(python3 -c "import json; d=json.load(open('$MERGED_TMP')); print(len(d.get('fingerprints',{})))" 2>/dev/null || echo "0")
+  echo "  Total merged: $FP_COUNT fingerprints"
+  if [ "$FP_COUNT" -gt 0 ]; then
+    python3 - "$MERGED_TMP" "$BASELINE" << 'PYEOF'
+import sys, json, time
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f: d = json.load(f)
+now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+for fp in d.get("fingerprints", {}).values():
+    fp["auto_promoted"] = True
+    fp["no_missing_service"] = True
+    if "promoted_at" not in fp: fp["promoted_at"] = now
+with open(dst, "w") as f: json.dump(d, f, indent=2)
+print(f"  Wrote {len(d['fingerprints'])} fingerprints to {dst}")
+PYEOF
+    rm -f "$MERGED_TMP"
+    kubectl delete configmap behavioral-baseline --ignore-not-found
+    kubectl create configmap behavioral-baseline \
+      --from-file=baseline.json="$BASELINE" \
+      --from-file=error_baseline.json="$DATA_DIR/error_baseline.${ENVIRONMENT}.json" 2>/dev/null || true
+    for pod in $(kubectl get pods -l app=otelcol-aggregator --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
+      kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol && echo "  [agg] $pod: ok"
+    done
+    for pod in $(kubectl get pods -l app=otelcol-fingerprint --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
+      kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol && echo "  [ds] $pod: ok"
+    done
+    echo "=== Done. Baseline saved to $BASELINE ==="
+  else
+    echo "  ⚠ No fingerprints found in aggregator pods — is traffic flowing?"
+    rm -f "$MERGED_TMP"
+    exit 1
+  fi
+  exit 0
+fi
 
 # For k3d clusters there is no local registry — images are imported directly
 # into k3d node containerd via `k3d image import`.  Set REGISTRY=localhost:9999
@@ -203,26 +273,43 @@ FP_HTTP="http://otelcol-fingerprint.default.svc.cluster.local:4318"
 
 if [ "$APP" = "astronomy-shop" ]; then
   # Astronomy Shop uses its own built-in OTel SDK — no operator injection.
-  # Set OTEL_EXPORTER_OTLP_ENDPOINT on each app deployment directly.
+  # If helm was installed with otel-processor/k8s/astro-values.yaml, all
+  # deployments are already configured and this step will be a no-op.
+  # Otherwise, set OTEL_EXPORTER_OTLP_ENDPOINT on each app deployment directly.
   ASTRO_DEPLOYMENTS="accounting ad cart checkout currency email fraud-detection frontend frontend-proxy image-provider llm load-generator payment product-catalog product-reviews quote recommendation shipping"
-  echo "  Patching ${#ASTRO_DEPLOYMENTS} astronomy shop deployments..."
+  FP_HOST="otelcol-fingerprint.default.svc.cluster.local"
+  echo "  Patching astronomy shop deployments (OTLP endpoint + service name)..."
+  PATCHED=0
   for svc in $ASTRO_DEPLOYMENTS; do
-    if kubectl get deployment "$svc" &>/dev/null; then
-      CURRENT_EP=$(kubectl get deployment "$svc" \
-        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_ENDPOINT")].value}' 2>/dev/null || echo "")
-      if [ "$CURRENT_EP" != "$FP_GRPC" ]; then
-        kubectl set env deployment/"$svc" OTEL_EXPORTER_OTLP_ENDPOINT="$FP_GRPC" 2>/dev/null \
-          && echo "    Patched $svc" || echo "    Skipped $svc (error)"
-      else
-        echo "    $svc already points to otelcol-fingerprint"
-      fi
+    kubectl get deployment "$svc" &>/dev/null || continue
+    CURRENT_EP=$(kubectl get deployment "$svc" \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_ENDPOINT")].value}' 2>/dev/null || echo "")
+    CURRENT_SN=$(kubectl get deployment "$svc" \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OTEL_SERVICE_NAME")].value}' 2>/dev/null || echo "")
+    CURRENT_CH=$(kubectl get deployment "$svc" \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OTEL_COLLECTOR_HOST")].value}' 2>/dev/null || echo "")
+    NEEDS_PATCH=false
+    [ "$CURRENT_EP" != "$FP_GRPC" ] && NEEDS_PATCH=true
+    [ -z "$CURRENT_SN" ] && NEEDS_PATCH=true
+    [ -n "$CURRENT_CH" ] && [ "$CURRENT_CH" != "$FP_HOST" ] && NEEDS_PATCH=true
+    if [ "$NEEDS_PATCH" = "true" ]; then
+      kubectl set env deployment/"$svc" \
+        OTEL_EXPORTER_OTLP_ENDPOINT="$FP_GRPC" \
+        OTEL_SERVICE_NAME="$svc" \
+        OTEL_COLLECTOR_HOST="$FP_HOST" 2>/dev/null \
+        && echo "    Patched $svc" || echo "    Skipped $svc (error)"
+      PATCHED=$((PATCHED + 1))
+    else
+      echo "    $svc already configured"
     fi
   done
-  echo "  Waiting for all astronomy shop rollouts..."
-  for svc in $ASTRO_DEPLOYMENTS; do
-    kubectl get deployment "$svc" &>/dev/null && \
-      kubectl rollout status deployment/"$svc" --timeout=120s 2>&1 | tail -1 || true
-  done
+  if [ "$PATCHED" -gt 0 ]; then
+    echo "  Waiting for $PATCHED patched rollout(s)..."
+    for svc in $ASTRO_DEPLOYMENTS; do
+      kubectl get deployment "$svc" &>/dev/null && \
+        kubectl rollout status deployment/"$svc" --timeout=120s 2>&1 | tail -1 || true
+    done
+  fi
 
 elif [ "$APP" = "petclinic" ] || [ -z "$APP" ]; then
   # PetClinic / default: patch Instrumentation CR, remove stale direct env vars
@@ -322,11 +409,35 @@ if [ "$OTEL_BOOTSTRAP" = "true" ]; then
         echo "  Bootstrap window complete after ${ELAPSED}s"
         break
       fi
-      printf "  Waiting... %ds elapsed\r" "$ELAPSED"
+      # Show live auto-promoted count every 30s so we know traffic is flowing
+      if [ $((ELAPSED % 30)) -eq 0 ] && [ "$ELAPSED" -gt 0 ]; then
+        PROMOTED=$(kubectl logs "$AGGREGATOR_POD" -c otelcol 2>/dev/null \
+          | grep -c "auto-promoted\|newly_promoted" || echo "0")
+        SPANS=$(kubectl exec "$AGGREGATOR_POD" -c otelcol -- \
+          wget -qO- http://localhost:8888/metrics 2>/dev/null \
+          | grep "receiver_accepted_spans" | grep -v "^#" | awk '{print $2}' | head -1)
+        printf "  %ds — spans received: %s, fingerprints promoted so far: %s\n" \
+          "$ELAPSED" "${SPANS:-0}" "${PROMOTED:-0}"
+      else
+        printf "  Waiting... %ds elapsed\r" "$ELAPSED"
+      fi
       sleep $POLL
       ELAPSED=$((ELAPSED + POLL))
     done
     echo ""
+    # Verify traffic was actually flowing
+    SPANS_FINAL=$(kubectl exec "$AGGREGATOR_POD" -c otelcol -- \
+      wget -qO- http://localhost:8888/metrics 2>/dev/null \
+      | grep "receiver_accepted_spans" | grep -v "^#" | awk '{print $2}' | head -1)
+    if [ "${SPANS_FINAL:-0}" = "0" ] || [ -z "${SPANS_FINAL:-}" ]; then
+      echo "  ⚠ WARNING: Aggregator received 0 spans during bootstrap window!"
+      echo "  Likely causes:"
+      echo "    1. OTEL_EXPORTER_OTLP_ENDPOINT not set on app pods (check: kubectl get deploy <svc> -o yaml | grep OTLP)"
+      echo "    2. App pods not yet rolled out when bootstrap started"
+      echo "    3. load-generator not running (check: kubectl logs deployment/load-generator)"
+      echo "  Re-run: kubectl rollout restart statefulset/otelcol-aggregator"
+      echo "          then wait 5 min and re-pull baseline from pods manually."
+    fi
 
     # Pull merged baseline from both aggregator pods
     echo "--- Pulling learned baseline from aggregator pods ---"
