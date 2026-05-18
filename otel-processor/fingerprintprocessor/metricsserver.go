@@ -124,10 +124,17 @@ func (p *fingerprintProcessor) buildMetricsSnapshot() MetricsSnapshot {
 	for svc, sm := range services {
 		sm.SpansPerMin = p.metrics.spansPerMin(svc, now)
 
-		// Roll up: use the operation with the highest sample count (most representative)
+		// Roll up: prefer the worst-status operation for the summary fields so the
+		// service card reflects the most urgent signal. Tie-break by highest z-score.
 		var bestOp *OperationMetrics
 		for _, op := range sm.Operations {
-			if bestOp == nil || op.SampleCount > bestOp.SampleCount {
+			if bestOp == nil {
+				bestOp = op
+				continue
+			}
+			rankA := map[string]int{"learning": 0, "ok": 1, "warn": 2, "anomaly": 3}
+			if rankA[op.Status] > rankA[bestOp.Status] ||
+				(op.Status == bestOp.Status && op.ZScore > bestOp.ZScore) {
 				bestOp = op
 			}
 		}

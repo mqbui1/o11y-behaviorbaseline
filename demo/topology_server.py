@@ -1165,8 +1165,12 @@ async def _poll_processor_metrics() -> None:
     """
     global _metrics_cache, _metrics_cache_ts
 
+    first = True
     while True:
-        await asyncio.sleep(_METRICS_POLL_INTERVAL)
+        if first:
+            first = False
+        else:
+            await asyncio.sleep(_METRICS_POLL_INTERVAL)
         if not EC2_IP or not EC2_PASS:
             continue
         try:
