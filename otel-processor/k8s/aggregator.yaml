@@ -68,6 +68,7 @@ spec:
             - containerPort: 4317   # OTLP gRPC (from DaemonSet loadbalancer)
             - containerPort: 4318   # OTLP HTTP
             - containerPort: 13133  # health_check
+            - containerPort: 9090   # in-process metrics HTTP server
           livenessProbe:
             httpGet:
               path: /
@@ -237,6 +238,7 @@ data:
         db_query_latency_window: 5m
         db_query_learn_min_samples: 10
         db_query_latency_z_score: 3.0
+        metrics_addr: ":9090"
 
     exporters:
       otlphttp/splunk:
