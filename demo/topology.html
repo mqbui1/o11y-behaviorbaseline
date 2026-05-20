@@ -810,15 +810,16 @@
 
 <!-- Legend -->
 <div id="legend">
-  <div class="legend-item"><div class="legend-dot ld-healthy"></div> Healthy</div>
-  <div class="legend-item"><div class="legend-dot ld-drift"></div> Trace drift</div>
-  <div class="legend-item"><div class="legend-dot ld-error"></div> Error signature</div>
-  <div class="legend-item"><div class="legend-dot ld-missing" style="border-style:dashed"></div> Missing</div>
-  <div class="legend-item"><div class="legend-dot ld-rootcause"></div> Root cause ★</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#2A1C0D;border-color:#E07B39"></div> Latency spike</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#2A0D0D;border-color:#FF6B35"></div> Error rate</div>
-  <div class="legend-item"><div class="legend-dot ld-drift" style="border-style:dashed"></div> New (unseen)</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#0D2233;border-color:#00BCEB;border-style:dashed"></div> Discovered (live)</div>
+  <div class="legend-item" title="All metrics within baseline range"><div class="legend-dot ld-healthy"></div> Healthy</div>
+  <div class="legend-item" title="Trace call path changed from baseline"><div class="legend-dot ld-drift"></div> Trace drift</div>
+  <div class="legend-item" title="New error type or message not seen in baseline"><div class="legend-dot ld-error"></div> Error signature</div>
+  <div class="legend-item" title="Expected service stopped appearing in traces"><div class="legend-dot ld-missing" style="border-style:dashed"></div> Missing</div>
+  <div class="legend-item" title="Identified as origin of cascading failures"><div class="legend-dot ld-rootcause"></div> Root cause ★</div>
+  <div class="legend-item" title="Warn: latency z-score 2.0–3.0 or error rate 1–5%&#10;Anomaly: latency z-score &gt;3.0 or error rate &gt;5%"><div class="legend-dot" style="background:#2A1C0D;border-color:#E07B39"></div> Latency spike</div>
+  <div class="legend-item" title="Warn: error rate 1–5% (min 10 spans)&#10;Anomaly: error rate &gt;5% (min 10 spans)"><div class="legend-dot" style="background:#2A0D0D;border-color:#FF6B35"></div> Error rate</div>
+  <div class="legend-item" title="Service seen in live traffic but not in baseline"><div class="legend-dot ld-drift" style="border-style:dashed"></div> New (unseen)</div>
+  <div class="legend-item" title="Service discovered via live APM, not in stored baseline"><div class="legend-dot" style="background:#0D2233;border-color:#00BCEB;border-style:dashed"></div> Discovered (live)</div>
+  <div class="legend-item" style="margin-left:auto;color:#484F58;font-size:9px;" title="Latency thresholds&#10;Warn:    z-score 2.0 – 3.0&#10;Anomaly: z-score &gt; 3.0&#10;&#10;Error rate thresholds (min 10 spans)&#10;Warn:    1% – 5%&#10;Anomaly: &gt; 5%">ℹ Thresholds</div>
 </div>
 
 <!-- Demo scenario bar (test-only) -->
@@ -1939,13 +1940,23 @@ function _renderSvcDrawer(svc) {
   }
 
   const statusCls = _statusClass(sm.status);
+  const statusHint = {
+    ok:       "All metrics within baseline range",
+    warn:     "Latency z-score 2.0–3.0  or  error rate 1–5%",
+    anomaly:  "Latency z-score >3.0  or  error rate >5%",
+    learning: "Accumulating baseline samples (min 30 required)",
+  }[sm.status] || "";
+  const statusVal = `<span class="${statusCls}" title="${statusHint}">${_statusLabel(sm.status)}</span>`
+    + (statusHint ? ` <span style="color:#484F58;font-size:10px" title="${statusHint}">ℹ</span>` : "");
+  const zHint  = "Warn: 2.0–3.0 · Anomaly: >3.0 · (standard deviations from baseline mean)";
+  const errHint = "Warn: 1–5% · Anomaly: >5% · (requires min 10 spans)";
   const rows = [
-    ["Status",     `<span class="${statusCls}">${_statusLabel(sm.status)}</span>`],
+    ["Status",     statusVal],
     ["Spans/min",  sm.spans_per_min != null ? Math.round(sm.spans_per_min).toLocaleString() : "—"],
     ["Latency",    _fmtMs(sm.latency_mean_ms)],
     ["Baseline",   _fmtMs(sm.baseline_mean_ms)],
-    ["Z-score",    sm.z_score != null ? sm.z_score.toFixed(2) : "—"],
-    ["Error rate", sm.error_rate_pct != null ? `${sm.error_rate_pct.toFixed(1)}%` : "—"],
+    [`<span title="${zHint}">Z-score ℹ</span>`,    sm.z_score != null ? sm.z_score.toFixed(2) : "—"],
+    [`<span title="${errHint}">Error rate ℹ</span>`, sm.error_rate_pct != null ? `${sm.error_rate_pct.toFixed(1)}%` : "—"],
   ];
 
   let html = rows.map(([label, val]) => `
