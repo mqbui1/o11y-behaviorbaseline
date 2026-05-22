@@ -706,6 +706,7 @@
     </div>
 
     <button id="btn-clear" class="btn" onclick="clearAnomalies()" title="Clear alerts (keyboard: C)">Clear alerts [C]</button>
+    <button id="btn-metrics-toggle" class="btn" onclick="toggleMetrics()" title="Enable/disable metric anomaly detection on node colors (keyboard: M)" style="border-color:#E07B39;color:#E07B39;">Metrics [M]</button>
     <div id="status-badge" class="status-ok">● STEADY STATE</div>
   </div>
 </div>
@@ -859,6 +860,7 @@ let _probTimerInterval = null; // interval for live duration counter
 let _discoveredNodeIds = new Set(); // IDs added via live topology discovery (for badge)
 let _appFilter = "all";       // "all" | "petclinic" | "otel-demo"
 let _envLiveness = {};  // env name -> true/false/null (null = unknown/checking)
+let _metricsEnabled = true;  // toggle: when false, metric anomalies don't color nodes
 
 // ── Environment / app filter helpers ─────────────────────────────────────
 // app_group cache — populated from server-annotated topology.nodes
@@ -1055,10 +1057,12 @@ function nodeState(id) {
     // Nodes with infra events but no anomaly show as latency (amber) to indicate infra pressure
     if ((infraEvents[id] || []).length > 0) return "latency";
     // Fall back to metrics status when no structural drift events are active
-    const mSvc = (_metricsData && _metricsData.services) ? _metricsData.services[id] : null;
-    if (mSvc) {
-      if (mSvc.status === "anomaly") return "errorrate";
-      if (mSvc.status === "warn")    return "drift";
+    if (_metricsEnabled) {
+      const mSvc = (_metricsData && _metricsData.services) ? _metricsData.services[id] : null;
+      if (mSvc) {
+        if (mSvc.status === "anomaly") return "errorrate";
+        if (mSvc.status === "warn")    return "drift";
+      }
     }
     return "healthy";
   }
@@ -1705,6 +1709,14 @@ async function clearAnomalies() {
   newEdges = [];
   confidence = {};
   suppressed = new Set();
+  infraEvents = {};
+  // If metrics are enabled, clear their anomaly/warn state so all nodes go green
+  if (_metricsEnabled && _metricsData && _metricsData.services) {
+    for (const svc of Object.keys(_metricsData.services)) {
+      _metricsData.services[svc] = { ..._metricsData.services[svc], status: "ok" };
+    }
+    _renderMetricsBar();
+  }
   applyProblem(null);
   // Only update visual state — don't restart simulation
   nodesG.selectAll(".node").attr("class", d => `node node-${nodeState(d.id)}`);
@@ -1716,6 +1728,24 @@ async function clearAnomalies() {
   updateBadge();
   updatePanel();
   document.getElementById("log-entries").innerHTML = "";
+}
+
+// ── Metrics toggle ────────────────────────────────────────────────────────
+function toggleMetrics() {
+  _metricsEnabled = !_metricsEnabled;
+  const btn = document.getElementById("btn-metrics-toggle");
+  if (_metricsEnabled) {
+    btn.style.borderColor = "#E07B39";
+    btn.style.color = "#E07B39";
+    btn.title = "Metric anomaly detection ON — click to disable (keyboard: M)";
+  } else {
+    btn.style.borderColor = "#30363D";
+    btn.style.color = "#484F58";
+    btn.title = "Metric anomaly detection OFF — click to enable (keyboard: M)";
+  }
+  // Re-apply node colors immediately
+  nodesG.selectAll(".node").attr("class", d => `node node-${nodeState(d.id)}`);
+  _renderMetricsBar();
 }
 
 // ── Claude RCA ────────────────────────────────────────────────────────────
@@ -1808,13 +1838,10 @@ async function runScenario(name) {
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────
 document.addEventListener("keydown", (e) => {
-  if (e.key === "c" || e.key === "C") {
-    // Only fire if not typing in an input
-    if (document.activeElement.tagName !== "INPUT" &&
-        document.activeElement.tagName !== "TEXTAREA") {
-      clearAnomalies();
-    }
-  }
+  if (document.activeElement.tagName === "INPUT" ||
+      document.activeElement.tagName === "TEXTAREA") return;
+  if (e.key === "c" || e.key === "C") clearAnomalies();
+  if (e.key === "m" || e.key === "M") toggleMetrics();
 });
 
 // ── Resize ────────────────────────────────────────────────────────────────
@@ -1865,11 +1892,11 @@ function _renderMetricsBar() {
   setEl("mb-latency",  s.avg_latency_ms != null
     ? `${s.avg_latency_ms.toFixed(1)} ms` : "—");
 
-  const anom = s.services_anomaly ?? 0;
+  const anom = _metricsEnabled ? (s.services_anomaly ?? 0) : 0;
   setEl("mb-anomaly", anom > 0 ? anom : "0",
     anom > 0 ? "mb-val-anomaly" : "mb-val-ok");
 
-  const warn = s.services_warn ?? 0;
+  const warn = _metricsEnabled ? (s.services_warn ?? 0) : 0;
   setEl("mb-warn", warn > 0 ? warn : "0",
     warn > 0 ? "mb-val-warn" : "mb-val");
 
