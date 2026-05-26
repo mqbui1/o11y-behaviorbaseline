@@ -374,16 +374,24 @@ kubectl rollout restart daemonset/otelcol-fingerprint
 kubectl rollout status daemonset/otelcol-fingerprint --timeout=120s
 echo ""
 
-# ── Step 8: Inject baseline into all running pods (DaemonSet + aggregator) ────
+# ── Step 8: Inject baseline into running pods ─────────────────────────────────
+# IMPORTANT: when --otel-bootstrap is set, do NOT inject into aggregator pods.
+# The aggregator learns fingerprints during the 5-min bootstrap window and keeps
+# them in memory. Injecting the empty baseline here would wipe that learning
+# when Step 9 tries to pull from the pods.
 echo "--- Step 8: Inject baseline into running pods ---"
 for pod in $(kubectl get pods -l app=otelcol-fingerprint --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
   echo -n "  [daemonset] $pod: "
   kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol 2>&1 && echo "ok" || echo "skipped (pod not ready)"
 done
-for pod in $(kubectl get pods -l app=otelcol-aggregator --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
-  echo -n "  [aggregator] $pod: "
-  kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol 2>&1 && echo "ok" || echo "skipped (pod not ready)"
-done
+if [ "$OTEL_BOOTSTRAP" = "false" ]; then
+  for pod in $(kubectl get pods -l app=otelcol-aggregator --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
+    echo -n "  [aggregator] $pod: "
+    kubectl cp "$BASELINE" "$pod:/baseline/baseline.json" -c otelcol 2>&1 && echo "ok" || echo "skipped (pod not ready)"
+  done
+else
+  echo "  [aggregator] skipped — otel-bootstrap mode, aggregator is learning"
+fi
 echo ""
 
 # ── Step 9: OTel bootstrap — wait for aggregator bootstrap window, pull baseline ─
