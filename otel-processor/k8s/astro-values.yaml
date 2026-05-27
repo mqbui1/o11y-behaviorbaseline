@@ -1,6 +1,6 @@
 # astro-values.yaml — Helm values for opentelemetry-demo (Astronomy Shop)
 #
-# Routes all app traces through otelcol-fingerprint by setting
+# Routes all app traces + metrics through otelcol-fingerprint by setting
 # OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_COLLECTOR_HOST on each component at
 # install time.  Pass this file when installing / upgrading the chart:
 #
@@ -13,6 +13,14 @@
 #
 # OTEL_SERVICE_NAME is set per-component so nginx/Python services that
 # require it explicitly don't crash on startup.
+#
+# Runtime metrics (Go, Node.js, .NET, Python) are emitted by the OTel SDKs
+# built into each image. Three env vars lock in the pipeline explicitly:
+#   OTEL_METRICS_EXPORTER=otlp           — prevent SDK default switching to none/prometheus
+#   OTEL_EXPORTER_OTLP_METRICS_ENDPOINT  — explicit metrics destination (same as traces)
+#   OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative — required by Splunk
+# Set on all services with runtime instrumentation. Services without it
+# (currency, email, image-provider, quote, llm) omit these vars.
 #
 # Update FP_GRPC / FP_HOST if you change the DaemonSet service name.
 #
@@ -46,6 +54,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: cart
+      # .NET runtime metrics: dotnet.gc.collections, dotnet.exceptions, dotnet.thread_pool.*
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   checkout:
     envOverrides:
@@ -55,6 +70,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: checkout
+      # Go runtime metrics: go.goroutine.count, go.memory.gc.goal, go.memory.allocated
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   currency:
     envOverrides:
@@ -82,6 +104,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: fraud-detection
+      # JVM runtime metrics: jvm.memory.used, jvm.gc.duration, jvm.thread.count
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   frontend:
     envOverrides:
@@ -91,6 +120,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: frontend
+      # Node.js runtime metrics: nodejs.eventloop.delay.mean, nodejs.eventloop.utilization
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   frontend-proxy:
     envOverrides:
@@ -136,6 +172,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: payment
+      # Node.js runtime metrics: nodejs.eventloop.delay.mean, nodejs.eventloop.utilization
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   product-catalog:
     envOverrides:
@@ -145,6 +188,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: product-catalog
+      # Go runtime metrics: go.goroutine.count, go.memory.gc.goal, go.memory.allocated
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   product-reviews:
     envOverrides:
@@ -154,6 +204,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: product-reviews
+      # Python runtime metrics: process.runtime.cpython.thread_count, gc_count, process.memory.rss
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   quote:
     envOverrides:
@@ -172,6 +229,13 @@ components:
         value: "otelcol-fingerprint.default.svc.cluster.local"
       - name: OTEL_SERVICE_NAME
         value: recommendation
+      # Python runtime metrics: process.runtime.cpython.thread_count, gc_count, process.memory.rss
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: "http://otelcol-fingerprint.default.svc.cluster.local:4317"
+      - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+        value: cumulative
 
   shipping:
     envOverrides:
