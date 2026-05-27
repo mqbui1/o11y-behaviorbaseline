@@ -465,6 +465,29 @@ EOF
 fi
 ok "Local .env updated (ENV=${ENV_NAME})"
 
+# ── Step 11: Clear auto-detector-provisioner baseline cache ──────────────────
+# Stale cached baselines from a previous cluster will have wrong thresholds
+# (different latency profile, different error rates). Always clear them so the
+# next provisioner run re-learns from the new cluster's live traffic.
+log "Step 11: Clearing auto-detector-provisioner baseline cache..."
+
+PROVISIONER_CACHE_DIR="${HOME}/.auto-detector-provisioner/baselines"
+LOCAL_CACHE_DIR="/tmp/auto-detector-provisioner/data/baselines"
+
+cleared=0
+for cache_dir in "$PROVISIONER_CACHE_DIR" "$LOCAL_CACHE_DIR"; do
+  if [[ -d "$cache_dir" ]]; then
+    stale_count=$(ls "$cache_dir"/*.json 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$stale_count" -gt 0 ]]; then
+      rm -f "$cache_dir"/*.json
+      ok "Cleared $stale_count stale baseline(s) from $cache_dir"
+      cleared=$((cleared + stale_count))
+    fi
+  fi
+done
+
+[[ "$cleared" -eq 0 ]] && ok "No cached baselines to clear"
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
