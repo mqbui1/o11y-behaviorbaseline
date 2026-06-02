@@ -66,8 +66,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SSH_OPTS="-p $EC2_PORT -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10"
+SCP_OPTS="-P $EC2_PORT -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10"
 SSH="sshpass -p $EC2_PASS ssh $SSH_OPTS splunk@$EC2_IP"
-SCP="sshpass -p $EC2_PASS scp $SSH_OPTS"
+SCP="sshpass -p $EC2_PASS scp $SCP_OPTS"
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 ok()   { echo "[$(date +%H:%M:%S)] ✓ $*"; }
@@ -185,7 +186,8 @@ log "Step 5: Installing Astronomy Shop via Helm..."
 
 $SSH "
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts 2>/dev/null || true
-helm repo update >/dev/null 2>&1
+# Skip repo update — version is pinned to 0.40.8, avoids potential network hang
+timeout 20 helm repo update >/dev/null 2>&1 || true
 
 if helm list | grep -q '^astronomy-shop'; then
   echo '  astronomy-shop already installed — skipping helm install'
@@ -207,14 +209,14 @@ if [[ -n "$REGISTRY" ]]; then
   $SSH "
 cd ~/o11y-behaviorbaseline/otel-processor
 docker build --no-cache -t ${IMAGE} . 2>&1 | tail -5
-docker push ${IMAGE}
+docker push ${IMAGE} 2>&1 | tail -3
 echo 'image pushed to registry'
 "
 else
   $SSH "
 cd ~/o11y-behaviorbaseline/otel-processor
 docker build --no-cache -t ${IMAGE} . 2>&1 | tail -5
-k3d image import ${IMAGE} -c ${CLUSTER_NAME}
+k3d image import ${IMAGE} -c ${CLUSTER_NAME} 2>&1 | tail -3
 echo 'image imported into k3d'
 "
 fi
@@ -273,9 +275,10 @@ kubectl apply -f otel-processor/k8s/aggregator.yaml
 echo '  Waiting for aggregator...'
 kubectl rollout status statefulset/otelcol-aggregator --timeout=120s
 
-# Deploy DaemonSet
+# Deploy DaemonSet (only restart if it already existed — fresh creates roll out automatically)
+DS_EXISTS=\$(kubectl get daemonset otelcol-fingerprint --no-headers 2>/dev/null | wc -l | tr -d ' ')
 kubectl apply -f otel-processor/k8s/daemonset.yaml
-kubectl rollout restart daemonset/otelcol-fingerprint
+[[ "\$DS_EXISTS" -gt 0 ]] && kubectl rollout restart daemonset/otelcol-fingerprint
 kubectl rollout status daemonset/otelcol-fingerprint --timeout=120s
 
 # Inject empty baseline into DaemonSet pods ONLY (NOT aggregator — it needs to learn)
@@ -429,8 +432,7 @@ rm -f /tmp/ec2_merge_baseline.py
 # Run the bootstrap wait + merge on EC2
 $SSH "BOOTSTRAP_ENV=${ENV_NAME} BOOTSTRAP_REALM=${REALM} python3 /tmp/ec2_merge_baseline.py"
 
-FP_COUNT=$($SSH "python3 -c \"import json; d=json.load(open('/root/o11y-behaviorbaseline/data/baseline.${ENV_NAME}.json')); print(len(d.get('fingerprints',{})))\" 2>/dev/null || \
-  python3 -c \"import json,os; d=json.load(open(os.path.expanduser('~/o11y-behaviorbaseline/data/baseline.${ENV_NAME}.json'))); print(len(d.get('fingerprints',{})))\"")
+FP_COUNT=$($SSH "python3 -c \"import json,os; d=json.load(open(os.path.expanduser('~/o11y-behaviorbaseline/data/baseline.${ENV_NAME}.json'))); print(len(d.get('fingerprints',{})))\"")
 ok "Bootstrap complete: $FP_COUNT fingerprints"
 
 # ── Step 10: Pull baseline locally + update .env ─────────────────────────────
