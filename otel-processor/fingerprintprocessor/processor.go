@@ -30,6 +30,7 @@ type fingerprintProcessor struct {
 	topology    *topologyTracker
 	metrics     *metricsTracker
 	dbQueries   *dbQueryTracker
+	causality   *causalityTracker
 	selfMetrics *selfMetrics
 	dedup       *eventDeduplicator
 
@@ -105,6 +106,9 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 	p.metrics.selfMetrics = p.selfMetrics
 	p.topology.onDriftEmitted = func() { p.selfMetrics.TopologyDrifts.Add(1) }
 	p.dbQueries = newDbQueryTracker(cfg, emit, p.inWarmup).withLogger(logger)
+	p.causality = newCausalityTracker(p.topology, emit, cfg.Environment, cfg.CausalityAnomalyTTL, cfg.CausalityChainEnabled).withLogger(logger)
+	p.metrics.causality = p.causality
+	p.dbQueries.causality = p.causality
 
 	if cfg.PromotionThreshold > 0 {
 		p.logger.Info("auto-promotion enabled",
@@ -589,6 +593,7 @@ func (p *fingerprintProcessor) checkMissingServices() {
 			} else {
 				p.missingEmitted[rootOp] = true
 				p.selfMetrics.MissingEvents.Add(1)
+				p.causality.record(rootService(rootOp), "MISSING_SERVICE", now)
 			}
 		} else {
 			p.missingEmitted[rootOp] = true // another pod claimed it — suppress locally too
@@ -712,6 +717,7 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 				p.logger.Warn("failed to emit trace drift event", zap.Error(err))
 			} else {
 				p.selfMetrics.DriftEvents.Add(1)
+				p.causality.record(rootService(fp.rootOp), "NEW_FINGERPRINT", time.Now())
 			}
 		}
 		p.maybePromoteTrace(fp)
@@ -731,6 +737,7 @@ func (p *fingerprintProcessor) analyzeTraceStructure(buf *traceBuffer) {
 				p.logger.Warn("failed to emit trace drift event", zap.Error(err))
 			} else {
 				p.selfMetrics.DriftEvents.Add(1)
+				p.causality.record(rootService(fp.rootOp), "NEW_FINGERPRINT", time.Now())
 			}
 		}
 		p.maybePromoteTrace(fp)
@@ -816,6 +823,8 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 					if !p.inWarmup() {
 						if err := p.emitter.emitErrorRateSpike(p.cfg.Environment, sig, rate, baseline); err != nil {
 							p.logger.Warn("failed to emit error rate spike event", zap.Error(err))
+						} else {
+							p.causality.record(sig.service, "ERROR_RATE_SPIKE", time.Now())
 						}
 					}
 				}
@@ -837,6 +846,7 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 				p.logger.Warn("failed to emit error drift event", zap.Error(err))
 			} else {
 				p.selfMetrics.ErrorEvents.Add(1)
+				p.causality.record(sig.service, "NEW_ERROR_SIGNATURE", time.Now())
 			}
 		}
 		p.maybePromoteError(sig)
