@@ -248,3 +248,19 @@ func (t *topologyTracker) edgeCount() int {
 	defer t.mu.Unlock()
 	return len(t.edges)
 }
+
+// snapshotAdjacency returns the current caller->callees ("downstream") and
+// callee->callers ("upstream") adjacency lists derived from known topology
+// edges. Used by causalityTracker to walk the dependency graph when
+// computing root-cause chains.
+func (t *topologyTracker) snapshotAdjacency() (downstream, upstream map[string][]string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	downstream = make(map[string][]string)
+	upstream = make(map[string][]string)
+	for _, e := range t.edges {
+		downstream[e.Caller] = append(downstream[e.Caller], e.Callee)
+		upstream[e.Callee] = append(upstream[e.Callee], e.Caller)
+	}
+	return downstream, upstream
+}

@@ -96,6 +96,7 @@ type metricsTracker struct {
 	cfg         *Config
 	logger      *zap.Logger
 	selfMetrics *selfMetrics
+	causality   *causalityTracker
 }
 
 func newMetricsTracker(cfg *Config, emit *emitter) *metricsTracker {
@@ -368,8 +369,13 @@ func (m *metricsTracker) observeRootOp(rootOp, env string, inWarmup bool) {
 				zap.String("environment", env),
 			)
 			tw.dropEmitted = true
-			if err := m.emitter.emitThroughputDrop(env, rootOp, currentRate, tw.baselineRate); err == nil && m.selfMetrics != nil {
-				m.selfMetrics.ThroughputEvents.Add(1)
+			if err := m.emitter.emitThroughputDrop(env, rootOp, currentRate, tw.baselineRate); err == nil {
+				if m.selfMetrics != nil {
+					m.selfMetrics.ThroughputEvents.Add(1)
+				}
+				if m.causality != nil {
+					m.causality.record(rootService(rootOp), "THROUGHPUT_DROP", time.Now())
+				}
 			}
 		} else if ratio >= (1-m.cfg.ThroughputDropThreshold/2) {
 			// Rate recovered to within half the threshold — reset so we can fire again

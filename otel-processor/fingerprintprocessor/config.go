@@ -191,6 +191,18 @@ type Config struct {
 	// Default: 2m.
 	DeduplicateTTL time.Duration `mapstructure:"deduplicate_ttl"`
 
+	// ── Root-cause / causality-chain correlation ───────────────────────────
+
+	// CausalityChainEnabled controls whether the processor correlates active
+	// anomalies across the service topology to identify a likely root cause
+	// and emits service.causality.chain events. Default: true.
+	CausalityChainEnabled bool `mapstructure:"causality_chain_enabled"`
+
+	// CausalityAnomalyTTL is how long an anomaly stays "active" for root-cause
+	// correlation purposes before it is expired and no longer considered when
+	// computing the causality chain. Default: 5m.
+	CausalityAnomalyTTL time.Duration `mapstructure:"causality_anomaly_ttl"`
+
 	// ── Metrics HTTP server ────────────────────────────────────────────────
 
 	// MetricsAddr is the TCP address the in-process metrics HTTP server listens
@@ -233,6 +245,8 @@ func createDefaultConfig() component.Config {
 		DbQueryLatencyWindow:        5 * time.Minute,
 		DbQueryLearnMinSamples:      10,
 		DbQueryLatencyZScore:        3.0,
+		CausalityChainEnabled:       true,
+		CausalityAnomalyTTL:         5 * time.Minute,
 		MetricsAddr:                 ":9090",
 	}
 }

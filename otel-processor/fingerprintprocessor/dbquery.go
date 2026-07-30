@@ -71,12 +71,13 @@ type queryWindow struct {
 //
 // The tracker shares the emitter and Config with the parent processor.
 type dbQueryTracker struct {
-	mu       sync.Mutex
-	windows  map[string]*queryWindow // key: queryHash(svc, dbSystem, template)
-	emitter  *emitter
-	cfg      *Config
-	logger   *zap.Logger
-	inWarmup func() bool
+	mu        sync.Mutex
+	windows   map[string]*queryWindow // key: queryHash(svc, dbSystem, template)
+	emitter   *emitter
+	cfg       *Config
+	logger    *zap.Logger
+	inWarmup  func() bool
+	causality *causalityTracker
 }
 
 func newDbQueryTracker(cfg *Config, emit *emitter, inWarmup func() bool) *dbQueryTracker {
@@ -220,6 +221,8 @@ func (d *dbQueryTracker) observe(spans []spanInfo, env string) {
 			if err := d.emitter.emitSlowQuery(env, k.svc, k.dbSystem, k.template, k.hash,
 				currentMean, w.baselineMean, stddev, zScore); err != nil {
 				d.logger.Warn("failed to emit slow query event", zap.Error(err))
+			} else if d.causality != nil {
+				d.causality.record(k.svc, "SLOW_QUERY", time.Now())
 			}
 		}
 	}

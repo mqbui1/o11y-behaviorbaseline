@@ -411,6 +411,26 @@ func (e *emitter) emitSlowQuery(env, service, dbSystem, template, hash string,
 	})
 }
 
+func (e *emitter) emitCausalityChain(env, rootCause string, chain []string, confidence float64, suppressed []string) error {
+	return e.send(splunkEvent{
+		EventType: "service.causality.chain",
+		Category:  "USER_DEFINED",
+		Dimensions: map[string]string{
+			"sf_environment": env,
+			"root_cause":     rootCause,
+		},
+		Properties: map[string]string{
+			"root_cause":          rootCause,
+			"causality_chain":     joinStrings(chain),
+			"confidence":          fmt.Sprintf("%.2f", confidence),
+			"suppressed_services": joinStrings(suppressed),
+			"environment":         env,
+			"detector":            "otel-causality-chain",
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func rootService(rootOp string) string {
 	if idx := strings.Index(rootOp, ":"); idx >= 0 {
 		return rootOp[:idx]
