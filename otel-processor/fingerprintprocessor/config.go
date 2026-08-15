@@ -178,6 +178,22 @@ type Config struct {
 	// Default: 3.0.
 	DbQueryLatencyZScore float64 `mapstructure:"db_query_latency_z_score"`
 
+	// DbQuerySlowCooldown is the minimum time between repeated db.query.slow
+	// events for the same query template. Without this, a template whose
+	// latency stays above baseline re-fires on every trace flush that
+	// contains it, flooding the event stream for the duration of the
+	// slowdown. Set to 0 to disable (fire on every detection). Default: 5m.
+	DbQuerySlowCooldown time.Duration `mapstructure:"db_query_slow_cooldown"`
+
+	// ErrorSignatureDriftCooldown is the minimum time between repeated
+	// error.signature.drift events for the same error signature hash.
+	// Without this, a new signature that hasn't yet reached
+	// PromotionThreshold re-fires on every trace flush that contains it
+	// (tryClaimEvent only dedups across pods, not within the same pod),
+	// flooding the event stream until the signature is promoted into the
+	// baseline. Set to 0 to disable (fire on every detection). Default: 5m.
+	ErrorSignatureDriftCooldown time.Duration `mapstructure:"error_signature_drift_cooldown"`
+
 	// ── Multi-pod deduplication ────────────────────────────────────────────
 
 	// DeduplicateEvents controls whether the processor uses a claim-file on the
@@ -245,6 +261,8 @@ func createDefaultConfig() component.Config {
 		DbQueryLatencyWindow:        5 * time.Minute,
 		DbQueryLearnMinSamples:      10,
 		DbQueryLatencyZScore:        3.0,
+		DbQuerySlowCooldown:         5 * time.Minute,
+		ErrorSignatureDriftCooldown: 5 * time.Minute,
 		CausalityChainEnabled:       true,
 		CausalityAnomalyTTL:         5 * time.Minute,
 		MetricsAddr:                 ":9090",

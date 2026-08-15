@@ -208,16 +208,16 @@ def sample_live_fingerprints(service: str, environment: str | None,
         if t.get("traceId") or t.get("id")
     ]
 
-    def _fetch_and_fingerprint(trace_id: str) -> dict | None:
+    def _fetch_and_fingerprint(trace_id: str) -> list[dict]:
         full = get_trace_full(trace_id)
         if not full:
-            return None
+            return []
         return build_fingerprint(full, known_root_ops)
 
     live_fps: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=min(len(trace_ids), 10)) as pool:
-        for fp in pool.map(_fetch_and_fingerprint, trace_ids):
-            if fp:
+        for fps in pool.map(_fetch_and_fingerprint, trace_ids):
+            for fp in fps:
                 live_fps[fp["hash"]] = fp
 
     return live_fps
