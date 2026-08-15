@@ -14,9 +14,13 @@ What gets created:
   Tier 3  — Error rate spike per service         [Critical] (AutoDetectCustomization)
   Tier 4  — Latency drift per service            [Critical] (AutoDetectCustomization)
   Tier 1b — Request rate spike per ingress svc   [Critical] (AutoDetectCustomization)
+  Tier 2  — Trace path drift / MISSING_SERVICE   [Major]    (one per environment)
 
-Topology drift (new/missing DB callers) is handled by trace_fingerprint.py
-since it requires trace-level analysis that SignalFlow cannot provide.
+Tier 2 is sourced from trace_fingerprint.py's behavioral_baseline.anomaly.count
+metric (structural baseline-vs-live comparison), not the APM autodetect
+library — it catches a dominant dependency (e.g. a fire-and-forget async call)
+silently disappearing from a trace path even when no error rate or latency
+threshold is crossed anywhere, which native APM AutoDetect cannot see.
 
 Usage:
   # Preview what would be created (dry run)
@@ -236,6 +240,34 @@ def program_request_rate(service: str, environment: str | None = None) -> tuple[
     return program, label
 
 
+def program_trace_path_drift(environment: str | None = None) -> tuple[str, str]:
+    """
+    Tier 2: MISSING_SERVICE detector sourced from trace_fingerprint.py's
+    structural baseline comparison (behavioral_baseline.anomaly.count metric),
+    not the APM autodetect library. Fires when a service that normally
+    appears in a trace path silently stops appearing — even for
+    fire-and-forget dependencies (e.g. async email) that never trip a native
+    error-rate/latency threshold on any service.
+
+    Grouped by sf_service (the actual missing dependency, not the caller) —
+    this is the same tag Splunk APM uses to associate a detector's alarms
+    with a Service Map node, so the alert badges the real node on the native
+    map instead of living only in a custom dashboard/event stream.
+    Returns (programText, detectLabel).
+    """
+    env_label = f" {environment}" if environment else ""
+    label = f"[Behavioral Baseline]{env_label} trace path drift (MISSING_SERVICE)"
+    filt = "filter('anomaly_type', 'MISSING_SERVICE')"
+    if environment:
+        filt += f" and filter('sf_environment', '{environment}')"
+    program = (
+        f"A = data('behavioral_baseline.anomaly.count', filter={filt})"
+        f".sum(over='10m').sum(by=['sf_service'])\n"
+        f"detect(when(A > 0)).publish('{label}')"
+    )
+    return program, label
+
+
 # ── Detector plan builder ──────────────────────────────────────────────────────
 
 def build_detector_plan(topo: dict) -> list[dict]:
@@ -324,6 +356,34 @@ def build_detector_plan(topo: dict) -> list[dict]:
             "tags": [MANAGED_TAG, "request-rate", "tier1b", env_tag,
                      f"svc-{svc}", f"provisioned-{ts}"],
         })
+
+    # ── Tier 2: trace path drift / MISSING_SERVICE (one per environment) ──────
+    program, label = program_trace_path_drift(env)
+    detectors.append({
+        "name": f"[Behavioral Baseline]{env_label} trace path drift (MISSING_SERVICE)",
+        "description": (
+            f"Tier 2 structural anomaly{env_label}. Fires when a service that "
+            f"normally appears in a trace path (e.g. an async/fire-and-forget "
+            f"dependency like email) silently stops appearing, even though no "
+            f"error-rate or latency threshold is crossed elsewhere. Sourced from "
+            f"trace_fingerprint.py's baseline-vs-live structural comparison — "
+            f"fills the gap left by APM's native Service Map, which just stops "
+            f"drawing a node once it has no traffic in the selected window "
+            f"rather than flagging the absence."
+        ),
+        "programText": program,
+        "rules": [{
+            "severity":    "Major",
+            "detectLabel": label,
+            "description": (
+                "A baseline-dominant service is missing from live trace paths. "
+                "Investigate whether the dependency is down or traffic to it "
+                "has stopped."
+            ),
+        }],
+        "tags": [MANAGED_TAG, "trace-path-drift", "tier2", env_tag,
+                 f"provisioned-{ts}"],
+    })
 
     return detectors
 

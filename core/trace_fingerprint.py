@@ -47,6 +47,13 @@ Required env vars:
   SPLUNK_REALM              (default: us1)
   BASELINE_PATH             (default: ./baseline.json)
   TOPOLOGY_LOOKBACK_HOURS   (default: 48)
+
+Optional env vars:
+  NON_ROOT_SERVICES         Comma-separated services that are never a legitimate
+                            trace entry point (known callee-only, per app topology).
+                            Roots inferred for these are dropped, not baselined —
+                            typically needed when a callee's own instrumentation
+                            leaks/loses parent context under async runtimes.
 """
 
 import argparse
@@ -96,6 +103,18 @@ INGEST_URL = f"https://ingest.{REALM}.signalfx.com"
 # Minimum span count for a trace to be fingerprint-worthy.
 MIN_SPANS = 2
 
+# Grace period (microseconds) tolerated when checking whether a cross-service
+# candidate ancestor has "ended" before a child starts. A child's real server-
+# side span commonly starts a small amount after its client-side (parent)
+# span's reported end — client instrumentation stops timing before the
+# server has fully begun its own span (network latency + independent clocks
+# between the two processes) — so without tolerance the parent gets popped
+# off the stack a few dozen/hundred microseconds too early and the child
+# wrongly attaches to an outer ancestor instead. 5ms is comfortably below the
+# gap between genuinely distinct, unrelated calls in the same flow (tens of
+# ms+), so it won't cause unrelated spans to be misattributed.
+CROSS_SERVICE_CLOCK_SKEW_GRACE_US = 5000
+
 # Traces to sample per service per learn run. 200 gives enough repetitions
 # for each fingerprint hash to reach MIN_BASELINE_OCCURRENCES even for
 # infrequent endpoints in a short learn window.
@@ -108,8 +127,11 @@ WATCH_SAMPLE_LIMIT = int(os.environ.get("WATCH_SAMPLE_LIMIT", "50"))
 # Fingerprints seen fewer times than this in baseline are treated as "rare"
 # and excluded. Raising to 3 filters one-off structural variants (e.g. petclinic
 # cache-miss/hit variations) that appear occasionally but not reliably enough to
-# anchor MISSING_SERVICE detection.
-MIN_BASELINE_OCCURRENCES = 3
+# anchor MISSING_SERVICE detection. Overridable per-environment (e.g. lower for
+# flows with legitimate high structural branching, like astroshop-local
+# checkout, where timing-inferred fingerprints rarely repeat exactly even after
+# noise-filtering fixes) via MIN_BASELINE_OCCURRENCES env var.
+MIN_BASELINE_OCCURRENCES = int(os.environ.get("MIN_BASELINE_OCCURRENCES", "3"))
 
 # Span count must exceed this multiple of baseline max to fire SPAN_COUNT_SPIKE
 SPAN_COUNT_SPIKE_MULTIPLIER = 2
@@ -135,6 +157,15 @@ AUTO_PROMOTE_THRESHOLD = int(os.environ.get("AUTO_PROMOTE_THRESHOLD", "5"))
 
 # Number of parallel threads for fetching trace details.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
+
+# Services known to be callee-only per application topology (never a legitimate
+# trace entry point). A span from one of these services with no resolved parent
+# is a parent-inference/context-propagation artifact (e.g. an async-runtime
+# context leak in the callee), not real root traffic — drop it rather than
+# baseline it as a root. Comma-separated, e.g. NON_ROOT_SERVICES=quote,pricing
+NON_ROOT_SERVICES: set[str] = {
+    s.strip() for s in os.environ.get("NON_ROOT_SERVICES", "").split(",") if s.strip()
+}
 
 # ── Per-service threshold overrides (from adaptive_thresholds.py) ─────────────
 
@@ -189,6 +220,26 @@ HEALTHCHECK_PATTERNS: list[str] = [
 ]
 
 NOISE_PATTERNS: list[str] = REGISTRY_PATTERNS + HEALTHCHECK_PATTERNS
+
+# Pure transport-layer wrapper spans: bare HTTP-verb spans with no route
+# captured, and reverse-proxy/service-mesh relay hops (ingress/egress).
+# These add no structural signal — they're 1:1 framing around the real
+# operation — but when several such hops occur close together in time
+# (e.g. back-to-back HTTP calls in one flow), their real proxy-level
+# nesting can vary at the network layer independent of application
+# behavior, fragmenting an otherwise-identical fingerprint into many
+# hashes. Excluded from edge construction (not from span_count, which
+# still reflects true span totals for spike/drop detection).
+FRAMING_OPS: set[str] = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+
+
+def _is_framing_span(span: dict) -> bool:
+    op = span.get("operationName", "")
+    if op in FRAMING_OPS:
+        return True
+    if op == "ingress" or "egress" in op.lower():
+        return True
+    return False
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
@@ -376,39 +427,112 @@ def _infer_parent_id(spans: list[dict]) -> dict[str, str | None]:
     Infer parent-child span relationships from timing containment since
     parentSpanID is not available in the GraphQL API response.
 
-    A span B is considered a child of span A when:
-      - A contains B's startTime (A.start <= B.start < A.start + A.duration)
-      - A != B
-    Among all containing spans, the one with the smallest duration is the
-    most direct parent (tightest enclosing window).
+    Uses a stack-based interval-nesting algorithm: spans are sorted by
+    (startTime, -duration) — so an outer span starting at the same instant
+    as its child is processed first — then walked in order while maintaining
+    a stack of still-open ancestors. A span's parent is the innermost
+    still-open span on the stack when it starts.
+
+    This replaces a previous pairwise "smallest enclosing duration" approach
+    that independently evaluated each span against every other span. That
+    approach was sensitive to near-ties between concurrent/overlapping spans
+    (e.g. an envoy proxy span and the app span it fronts, timestamped by two
+    different processes with independent clocks) and could assign
+    inconsistent parents for the same logical call shape across different
+    trace instances — producing a different fingerprint hash every time even
+    though the underlying flow was identical, which prevented fingerprints
+    from ever reaching MIN_BASELINE_OCCURRENCES. The stack-based approach
+    always produces one coherent tree per trace and is far less sensitive to
+    single-span timing jitter.
+
+    Same-service vs. cross-service containment strictness (2026-07-30 fix):
+    a candidate ancestor is only eligible as parent if it "encloses" the new
+    span, but what counts as enclosing differs by whether the two spans come
+    from the same service (single process, single clock) or different
+    services (independent clocks):
+      - Cross-service: lenient — ancestor just needs to not have ended
+        (by its recorded end, plus CROSS_SERVICE_CLOCK_SKEW_GRACE_US of
+        tolerance) before the child starts. Tolerates the small clock skew
+        you get between e.g. an envoy proxy span and the app span it fronts
+        (the original motivating case for this rewrite), and between a
+        client-side RPC span and the real server-side span it calls, whose
+        reported end/start can be a few dozen-hundred microseconds apart
+        due to network latency and independent per-process clocks.
+      - Same-service: strict — ancestor must fully enclose the child
+        (ancestor.end >= child.end too), not just still be open at the
+        child's start. Same-process spans share one clock, so if a same-
+        service "child" candidate actually outlasts its candidate parent,
+        it isn't really nested inside it — it's a concurrent sibling.
+        Without this, back-to-back pipelined same-service calls with
+        overlapping-but-not-nested timing (e.g. cart's Redis HGET/HMSET/
+        EXPIRE issued in quick succession per checkout request) get
+        arbitrarily nested under each other depending on which one happened
+        to start a hair earlier that particular request — producing a
+        different edge set (and hash) on almost every trace, so the
+        fingerprint never accumulated enough occurrences to be promoted into
+        the baseline. Requiring full containment for same-service pairs
+        makes the stack correctly walk past these siblings to the real
+        (longer-lived, cross-service-reachable) enclosing call, so every
+        instance of the same logical flow now resolves to the same edges.
 
     Returns: {spanID: parentSpanID or None}
 
-    Note: this heuristic breaks for async operations (fire-and-forget, Kafka
-    consumers, async HTTP) where a child span starts after its logical parent
-    ends — those spans get no parent and appear as roots. The resulting
-    fingerprint will differ from the baseline only at the edge level, not the
-    service level, so MISSING_SERVICE and NEW_SERVICE detection still work
-    correctly. False NEW_FINGERPRINT alerts on async-heavy services can be
-    reduced by increasing AUTO_PROMOTE_THRESHOLD or lowering
-    MISSING_SERVICE_DOMINANCE_THRESHOLD for those services.
+    Note: this heuristic still breaks for async operations (fire-and-forget,
+    Kafka consumers, async HTTP) where a child span starts after its logical
+    parent ends — those spans get no parent and appear as roots. The
+    resulting fingerprint will differ from the baseline only at the edge
+    level, not the service level, so MISSING_SERVICE and NEW_SERVICE
+    detection still work correctly. False NEW_FINGERPRINT alerts on
+    async-heavy services can be reduced by increasing AUTO_PROMOTE_THRESHOLD
+    or lowering MISSING_SERVICE_DOMINANCE_THRESHOLD for those services.
     """
+    ordered = sorted(
+        spans, key=lambda s: (s.get("startTime", 0), -s.get("duration", 0))
+    )
     parents: dict[str, str | None] = {}
-    for span in spans:
-        sid   = span["spanID"]
+    stack: list[dict] = []
+    for span in ordered:
         start = span.get("startTime", 0)
-        best_parent_id  = None
-        best_duration   = float("inf")
-        for candidate in spans:
-            if candidate["spanID"] == sid:
+        end = start + span.get("duration", 0)
+        while stack:
+            top = stack[-1]
+            top_end = top.get("startTime", 0) + top.get("duration", 0)
+            if top.get("serviceName") == span.get("serviceName"):
+                if top_end < end:
+                    stack.pop()
+                    continue
+            elif top_end + CROSS_SERVICE_CLOCK_SKEW_GRACE_US <= start:
+                stack.pop()
                 continue
-            c_start = candidate.get("startTime", 0)
-            c_dur   = candidate.get("duration", 0)
-            if c_start <= start < c_start + c_dur:
-                if c_dur < best_duration:
-                    best_duration  = c_dur
-                    best_parent_id = candidate["spanID"]
-        parents[sid] = best_parent_id
+            break
+
+        # Prefer the nearest still-open SAME-service ancestor over the
+        # topmost stack entry, even if a cross-service span happens to sit
+        # above it. A cross-service call (e.g. a client-side RPC span) can
+        # be pushed onto the stack shortly before one of the current span's
+        # real same-process siblings starts (e.g. Redis ops issued by a
+        # cart request that overlap with an unrelated, later GetCart RPC),
+        # and the naive top-of-stack check would wrongly attach the child
+        # to that unrelated cross-service call instead of its real same-
+        # service parent. Same-service children almost always belong to
+        # their own service's call chain; only fall back to the nearest
+        # open cross-service ancestor when no enclosing same-service one
+        # exists on the stack at all.
+        parent = None
+        fallback = None
+        for candidate in reversed(stack):
+            c_end = candidate.get("startTime", 0) + candidate.get("duration", 0)
+            if candidate.get("serviceName") == span.get("serviceName"):
+                if c_end >= end:
+                    parent = candidate
+                    break
+            elif fallback is None and c_end + CROSS_SERVICE_CLOCK_SKEW_GRACE_US > start:
+                fallback = candidate
+        if parent is None:
+            parent = fallback
+
+        parents[span["spanID"]] = parent["spanID"] if parent else None
+        stack.append(span)
     return parents
 
 
@@ -426,13 +550,30 @@ def _log_alert(fields: dict, enabled: bool = True) -> None:
         pass  # log failure is never fatal
 
 
+# Splunk's /v2/event ingest API silently accepts (200 OK) but never indexes
+# an event containing a string property value longer than 256 characters —
+# confirmed via direct bisection (256 chars lands, 257 does not). Leave room
+# for the "...(truncated)" suffix so the final value never exceeds the limit.
+EVENT_PROPERTY_MAX_LEN = 256
+_TRUNCATION_SUFFIX = "...(truncated)"
+
+
 def send_custom_event(event_type: str, dimensions: dict, properties: dict) -> None:
-    """Emit a custom event to Splunk Observability Cloud."""
+    """Emit a custom event to Splunk Observability Cloud.
+
+    Truncate long string properties defensively so events actually land
+    (see EVENT_PROPERTY_MAX_LEN comment above).
+    """
+    safe_properties = {
+        k: (v[:EVENT_PROPERTY_MAX_LEN - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
+            if isinstance(v, str) and len(v) > EVENT_PROPERTY_MAX_LEN else v)
+        for k, v in properties.items()
+    }
     _request("POST", "/v2/event", [{
         "eventType": event_type,
         "category":  "USER_DEFINED",
         "dimensions": dimensions,
-        "properties": properties,
+        "properties": safe_properties,
         "timestamp":  int(time.time() * 1000),
     }], base_url=INGEST_URL)
 
@@ -462,77 +603,126 @@ def _is_noise_trace(root_operation: str) -> bool:
 
 # ── Fingerprinting ─────────────────────────────────────────────────────────────
 
-def build_fingerprint(trace: dict, known_root_ops: set[str] | None = None) -> dict | None:
+def build_fingerprint(trace: dict, known_root_ops: set[str] | None = None) -> list[dict]:
     """
-    Build a stable structural fingerprint from a trace's span tree.
+    Build stable structural fingerprints from a trace's span tree.
 
-    Returns None if the trace has fewer than MIN_SPANS spans or is noise.
-    The fingerprint is the ordered parent->child edge sequence hashed to
+    Returns a (possibly empty) list of fingerprint dicts. Each fingerprint is
+    the ordered parent->child edge sequence of one root's subtree, hashed to
     a stable 16-char ID, immune to timing and span ID variation.
 
-    known_root_ops: if provided, single-span traces whose root op is in this
-    set are fingerprinted anyway (enables MISSING_SERVICE detection when a
-    downstream service is completely gone and the trace collapses to 1 span).
+    Multi-root decomposition (2026-07-30 fix):
+    A single trace can contain multiple independent logical operations that
+    happen to share one trace ID — e.g. an entire user session (browse pages,
+    add-to-cart, checkout, order-confirmation email) correlated under one
+    trace by the frontend. The previous implementation rooted a single
+    fingerprint at the absolute earliest span in the trace, which conflated
+    all of these into one fingerprint whose shape depended on how many pages
+    were visited before checkout — so the checkout fingerprint never
+    stabilized even though the checkout flow itself was identical every time
+    (traces never reached MIN_BASELINE_OCCURRENCES for the same hash).
+
+    Fixed generically (no hardcoded service/operation names): every span
+    whose inferred parent is None is treated as an independent fingerprint
+    root, and a separate fingerprint is built from just its own descendant
+    subtree (via parent_map, not wall-clock proximity). For a normal
+    single-operation trace this yields exactly one fingerprint — unchanged
+    behavior. For a multi-operation session trace it yields one fingerprint
+    per logical operation, each stable regardless of what else happened
+    earlier/later in the shared session trace.
+
+    known_root_ops: if provided, subtrees smaller than MIN_SPANS whose root
+    op is in this set are fingerprinted anyway (enables MISSING_SERVICE
+    detection when a downstream service is completely gone and that
+    operation's subtree collapses to 1 span).
     """
     spans = trace.get("spans", [])
-    if len(spans) < MIN_SPANS:
-        if not known_root_ops:
-            return None
-        # Allow through if root op is known — may be a collapsed trace
-        sorted_tmp = sorted(spans, key=lambda s: s.get("startTime", 0))
-        root_tmp = sorted_tmp[0] if sorted_tmp else None
-        if not root_tmp:
-            return None
-        candidate_root_op = f"{root_tmp['serviceName']}:{root_tmp['operationName']}"
-        if candidate_root_op not in known_root_ops:
-            return None
+    if not spans:
+        return []
 
-    by_id        = {s["spanID"]: s for s in spans}
-    sorted_spans = sorted(spans, key=lambda s: s.get("startTime", 0))
-
-    # Infer parent relationships from timing containment
+    by_id      = {s["spanID"]: s for s in spans}
     parent_map = _infer_parent_id(spans)
 
-    root_span = next(
-        (s for s in sorted_spans if parent_map.get(s["spanID"]) is None),
-        sorted_spans[0] if sorted_spans else None,
-    )
-    if not root_span:
-        return None
-    if _is_noise_trace(root_span["operationName"]):
-        return None
+    children: dict[str | None, list[dict]] = defaultdict(list)
+    for s in spans:
+        children[parent_map.get(s["spanID"])].append(s)
 
-    root_op = f"{root_span['serviceName']}:{root_span['operationName']}"
+    root_spans = children.get(None) or [min(spans, key=lambda s: s.get("startTime", 0))]
 
-    # Filter out health/registry probes that are merely initiated by a non-noisy root
-    # (e.g. admin-server polling /actuator/health on other services)
-    if len(spans) <= 3:
-        all_ops = " ".join(s["operationName"] for s in spans).lower()
-        if any(p in all_ops for p in NOISE_PATTERNS):
-            return None
+    fingerprints: list[dict] = []
+    for root_span in root_spans:
+        # Walk parent_map (not timestamps) to collect this root's own subtree.
+        subtree_ids: set[str] = set()
+        stack = [root_span["spanID"]]
+        while stack:
+            sid = stack.pop()
+            if sid in subtree_ids:
+                continue
+            subtree_ids.add(sid)
+            stack.extend(c["spanID"] for c in children.get(sid, []))
+        subtree_spans = [by_id[sid] for sid in subtree_ids]
 
-    edges = []
-    for span in sorted_spans:
-        parent_id = parent_map.get(span["spanID"])
-        if parent_id and parent_id in by_id:
-            parent = by_id[parent_id]
-            edges.append((
-                f"{parent['serviceName']}:{parent['operationName']}",
-                f"{span['serviceName']}:{span['operationName']}",
-            ))
+        if _is_noise_trace(root_span["operationName"]):
+            continue
 
-    services = sorted({s["serviceName"] for s in spans})
-    path     = " -> ".join(f"{a} -> {b}" for a, b in edges) if edges else root_op
-    fp_hash  = hashlib.sha256(path.encode()).hexdigest()[:16]
+        if root_span["serviceName"] in NON_ROOT_SERVICES:
+            continue
 
-    return {
-        "hash":       fp_hash,
-        "path":       path,
-        "root_op":    root_op,
-        "services":   services,
-        "span_count": len(spans),
-        "edge_count": len(edges),
-    }
+        root_op = f"{root_span['serviceName']}:{root_span['operationName']}"
+
+        # Allow collapsed subtrees through only if root op is a known operation —
+        # otherwise they're likely fragments of async/fire-and-forget spans.
+        if len(subtree_spans) < MIN_SPANS and root_op not in (known_root_ops or set()):
+            continue
+
+        # Filter out health/registry probes that are merely initiated by a non-noisy root
+        # (e.g. admin-server polling /actuator/health on other services)
+        if len(subtree_spans) <= 3:
+            all_ops = " ".join(s["operationName"] for s in subtree_spans).lower()
+            if any(p in all_ops for p in NOISE_PATTERNS):
+                continue
+
+        sorted_subtree = sorted(subtree_spans, key=lambda s: s.get("startTime", 0))
+        edges = []
+        for span in sorted_subtree:
+            if _is_framing_span(span):
+                continue
+            # Walk up past any framing ancestors to find the nearest real
+            # (non-framing) parent, so a business-logic span's edge attaches
+            # to a stable ancestor rather than to a noisy transport wrapper.
+            parent_id = parent_map.get(span["spanID"])
+            while (parent_id and parent_id in subtree_ids
+                   and _is_framing_span(by_id[parent_id])):
+                parent_id = parent_map.get(parent_id)
+            if parent_id and parent_id in subtree_ids:
+                parent = by_id[parent_id]
+                edges.append((
+                    f"{parent['serviceName']}:{parent['operationName']}",
+                    f"{span['serviceName']}:{span['operationName']}",
+                ))
+
+        services = sorted({s["serviceName"] for s in subtree_spans})
+        # Canonicalize edge order before hashing. Multiple spans commonly share
+        # near-identical microsecond start timestamps (fast local calls, coarse
+        # instrumentation clocks), so the raw traversal order is not stable
+        # across otherwise-identical traces — the same tree shape would hash
+        # differently just because of tie-order. Sorting the edge list itself
+        # makes the hash depend only on the (parent, child) edge multiset, not
+        # on visitation order.
+        canonical_edges = sorted(edges)
+        path    = " -> ".join(f"{a} -> {b}" for a, b in canonical_edges) if canonical_edges else root_op
+        fp_hash = hashlib.sha256(path.encode()).hexdigest()[:16]
+
+        fingerprints.append({
+            "hash":       fp_hash,
+            "path":       path,
+            "root_op":    root_op,
+            "services":   services,
+            "span_count": len(subtree_spans),
+            "edge_count": len(edges),
+        })
+
+    return fingerprints
 
 
 # ── Anomaly classification ─────────────────────────────────────────────────────
@@ -540,19 +730,43 @@ def build_fingerprint(trace: dict, known_root_ops: set[str] | None = None) -> di
 def _auto_learn_no_missing(root_op: str, missing: set[str],
                            environment: str | None = None) -> None:
     """
-    Persist a no_missing_service override for root_op when watch-window evidence
+    Persist a per-service exemption for root_op when watch-window evidence
     shows the "missing" services were present in other traces this window.
-    Called at most once per root_op per watch run (idempotent — won't overwrite
-    an existing override entry).
+    Stored as exempt_services (a list of specific service names), not a blanket
+    no_missing_service flag — so an exemption for one service (e.g. a peer
+    service that's optionally absent) never masks detection of a genuinely
+    different, unrelated service going missing under the same root_op.
+    Idempotent — won't re-add services already covered.
     """
     overrides = load_overrides(environment)
     root_op_flags = overrides.setdefault("root_op_flags", {})
-    if root_op_flags.get(root_op, {}).get("no_missing_service"):
-        return  # already set
-    reason = (f"auto: {sorted(missing)} seen in other traces this window — "
-              f"optional-path variant, not an outage")
-    root_op_flags[root_op] = {"no_missing_service": True, "reason": reason}
+    entry = root_op_flags.setdefault(root_op, {})
+    exempt = set(entry.get("exempt_services", []))
+    if missing.issubset(exempt):
+        return  # already covered
+    exempt |= missing
+    entry["exempt_services"] = sorted(exempt)
+    entry["reason"] = (f"auto: {sorted(missing)} seen in other traces this window — "
+                        f"optional-path variant, not an outage")
     save_overrides(overrides, environment)
+
+
+def _exempt_services_for_root(entries) -> set[str] | str:
+    """
+    Collect the set of services exempted from MISSING_SERVICE detection for a
+    root_op, from an iterable of baseline entries.
+
+    Returns:
+      - "ALL": a legacy blanket no_missing_service=True entry exists — every
+        service is exempt (full backward compat with pre-per-service overrides).
+      - set[str]: the union of exempt_services across entries (possibly empty).
+    """
+    exempt: set[str] = set()
+    for info in entries:
+        if info.get("no_missing_service"):
+            return "ALL"
+        exempt |= set(info.get("exempt_services", []))
+    return exempt
 
 
 def classify_anomaly(fp: dict, baseline: dict,
@@ -578,11 +792,9 @@ def classify_anomaly(fp: dict, baseline: dict,
         and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES
     }
 
-    # If any baseline entry for this root_op has no_missing_service=True,
-    # MISSING_SERVICE checks are suppressed for all traces under this root_op.
-    _no_missing = any(
-        info.get("no_missing_service") for info in baseline_for_root.values()
-    )
+    # Services exempted from MISSING_SERVICE checks for this root_op — either
+    # "ALL" (legacy blanket flag) or a specific set of service names.
+    _exempt = _exempt_services_for_root(baseline_for_root.values())
 
     # NEW_FINGERPRINT — but skip if already auto-promoted.
     # A fingerprint must be seen >= MIN_BASELINE_OCCURRENCES times to be
@@ -612,7 +824,9 @@ def classify_anomaly(fp: dict, baseline: dict,
                 if c / total_patterns >= dom_threshold
             }
             missing = dominant_services - set(fp["services"])
-            if missing and not _no_missing:
+            if _exempt != "ALL":
+                missing -= _exempt
+            if missing and _exempt != "ALL":
                 # Watch-window suppression: if ALL missing services were seen in
                 # other traces this window, this is an optional-path variant —
                 # the services aren't down, just absent on this code path.
@@ -747,7 +961,9 @@ def classify_anomaly(fp: dict, baseline: dict,
             if c / total_patterns >= dom_threshold2
         }
         missing = dominant_services - set(fp["services"])
-        if missing and not _no_missing:
+        if _exempt != "ALL":
+            missing -= _exempt
+        if missing and _exempt != "ALL":
             if watch_services and missing.issubset(watch_services):
                 _auto_learn_no_missing(root_op, missing, environment)
                 return None
@@ -839,10 +1055,13 @@ def save_overrides(overrides: dict, environment: str | None = None) -> None:
     print(f"  Overrides saved -> {path}")
 
 
-def _auto_detect_no_missing_service(fingerprints: dict) -> dict[str, str]:
+def _auto_detect_no_missing_service(fingerprints: dict) -> dict[str, dict[str, str]]:
     """
-    Automatically determine which root_ops should have no_missing_service=True.
-    Returns a dict of {root_op: reason} for root_ops that qualify.
+    Automatically determine which services should be exempted from
+    MISSING_SERVICE detection for each root_op.
+    Returns {root_op: {service: reason}} — per-service, not a blanket flag, so
+    exempting one service (e.g. a peer service) never masks a different,
+    genuinely-missing service under the same root_op.
 
     Two patterns are detected — both are generic, no hardcoded service names:
 
@@ -884,7 +1103,7 @@ def _auto_detect_no_missing_service(fingerprints: dict) -> dict[str, str]:
         if root_op and info.get("occurrences", 0) >= MIN_BASELINE_OCCURRENCES:
             by_root[root_op].append(info)
 
-    auto_suppress: dict[str, str] = {}
+    auto_suppress: dict[str, dict[str, str]] = defaultdict(dict)
 
     for root_op, entries in by_root.items():
         if len(entries) < 2:
@@ -914,22 +1133,21 @@ def _auto_detect_no_missing_service(fingerprints: dict) -> dict[str, str]:
 
             # Pattern 1: infra peer — the "dominant" service is itself a root service
             if svc in root_services:
-                auto_suppress[root_op] = (
+                auto_suppress[root_op][svc] = (
                     f"auto: '{svc}' is a peer service (has own root traces), "
                     f"not a downstream dependency"
                 )
-                break
+                continue
 
             # Pattern 2: optional-path variant — absent in ≥ OPTIONAL_ABSENT_FRACTION
             # of baseline variants, meaning absence is a known-good state
             if total >= 2 and absent_count / total >= OPTIONAL_ABSENT_FRACTION:
-                auto_suppress[root_op] = (
+                auto_suppress[root_op][svc] = (
                     f"auto: '{svc}' absent in {absent_count}/{total} baseline variants "
                     f"({absent_count/total:.0%}) — optional path"
                 )
-                break
 
-    return auto_suppress
+    return dict(auto_suppress)
 
 
 def apply_overrides(fingerprints: dict, environment: str | None = None) -> int:
@@ -949,21 +1167,27 @@ def apply_overrides(fingerprints: dict, environment: str | None = None) -> int:
     overrides = load_overrides(environment)
     root_op_flags = overrides.setdefault("root_op_flags", {})
 
-    # Auto-detect candidates and merge into overrides (won't overwrite explicit entries)
+    # Auto-detect per-service exemption candidates and merge into overrides
+    # (won't overwrite an explicit blanket no_missing_service=True entry).
     auto = _auto_detect_no_missing_service(fingerprints)
     auto_added = 0
-    for root_op, reason in auto.items():
-        if root_op not in root_op_flags:
-            root_op_flags[root_op] = {"no_missing_service": True, "reason": reason}
-            auto_added += 1
-        elif not root_op_flags[root_op].get("no_missing_service"):
-            # Explicit entry exists but flag not set — don't override explicit decision
-            pass
+    for root_op, svc_reasons in auto.items():
+        entry = root_op_flags.setdefault(root_op, {})
+        if entry.get("no_missing_service"):
+            continue  # explicit blanket exemption already covers everything
+        exempt = set(entry.get("exempt_services", []))
+        new_svcs = set(svc_reasons) - exempt
+        if not new_svcs:
+            continue
+        exempt |= new_svcs
+        entry["exempt_services"] = sorted(exempt)
+        entry["reason"] = "; ".join(svc_reasons[s] for s in sorted(new_svcs))
+        auto_added += 1
 
     if auto_added:
         save_overrides(overrides, environment)
 
-    # Apply all flags (explicit + auto-detected) to fingerprint entries
+    # Apply exempt_services / no_missing_service flags to fingerprint entries
     updated = 0
     for h, fp in fingerprints.items():
         root_op = fp.get("root_op", "")
@@ -1175,52 +1399,53 @@ def cmd_learn(window_minutes: int = 120,
             if not trace:
                 skipped += 1
                 continue
-            fp = build_fingerprint(trace)
-            if fp is None:
+            trace_fps = build_fingerprint(trace)
+            if not trace_fps:
                 skipped += 1
                 continue
-            h = fp["hash"]
-            observed_hashes.add(h)
-            if h in fingerprints:
-                # Already established — increment occurrence count and refresh last_seen
-                fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
-                fingerprints[h]["last_seen"] = datetime.now(timezone.utc).isoformat()
-                # Update running min/max span counts across observations
-                sc = fp["span_count"]
-                fingerprints[h]["span_count_min"] = min(fingerprints[h].get("span_count_min", sc), sc)
-                fingerprints[h]["span_count_max"] = max(fingerprints[h].get("span_count_max", sc), sc)
-                updated_count += 1
-            else:
-                # Stage until seen MIN_BASELINE_OCCURRENCES times this window
-                if h not in staged:
-                    now_iso = datetime.now(timezone.utc).isoformat()
+            for fp in trace_fps:
+                h = fp["hash"]
+                observed_hashes.add(h)
+                if h in fingerprints:
+                    # Already established — increment occurrence count and refresh last_seen
+                    fingerprints[h]["occurrences"] = fingerprints[h].get("occurrences", 1) + 1
+                    fingerprints[h]["last_seen"] = datetime.now(timezone.utc).isoformat()
+                    # Update running min/max span counts across observations
                     sc = fp["span_count"]
-                    staged[h] = {
-                        "hash":          h,
-                        "path":          fp["path"],
-                        "root_op":       fp["root_op"],
-                        "services":      fp["services"],
-                        "span_count":    sc,
-                        "span_count_min": sc,
-                        "span_count_max": sc,
-                        "edge_count":    fp["edge_count"],
-                        "occurrences":   0,
-                        "watch_hits":    0,
-                        "auto_promoted": False,
-                        "promoted_at":   None,
-                        "first_seen":    now_iso,
-                        "last_seen":     now_iso,
-                    }
+                    fingerprints[h]["span_count_min"] = min(fingerprints[h].get("span_count_min", sc), sc)
+                    fingerprints[h]["span_count_max"] = max(fingerprints[h].get("span_count_max", sc), sc)
+                    updated_count += 1
                 else:
-                    sc = fp["span_count"]
-                    staged[h]["span_count_min"] = min(staged[h].get("span_count_min", sc), sc)
-                    staged[h]["span_count_max"] = max(staged[h].get("span_count_max", sc), sc)
-                staged[h]["occurrences"] += 1
-                if staged[h]["occurrences"] >= effective_min_occurrences:
-                    fingerprints[h] = staged[h]
-                    new_count += 1
-                    print(f"  [new] {fp['root_op']}  ->  "
-                          f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
+                    # Stage until seen MIN_BASELINE_OCCURRENCES times this window
+                    if h not in staged:
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        sc = fp["span_count"]
+                        staged[h] = {
+                            "hash":          h,
+                            "path":          fp["path"],
+                            "root_op":       fp["root_op"],
+                            "services":      fp["services"],
+                            "span_count":    sc,
+                            "span_count_min": sc,
+                            "span_count_max": sc,
+                            "edge_count":    fp["edge_count"],
+                            "occurrences":   0,
+                            "watch_hits":    0,
+                            "auto_promoted": False,
+                            "promoted_at":   None,
+                            "first_seen":    now_iso,
+                            "last_seen":     now_iso,
+                        }
+                    else:
+                        sc = fp["span_count"]
+                        staged[h]["span_count_min"] = min(staged[h].get("span_count_min", sc), sc)
+                        staged[h]["span_count_max"] = max(staged[h].get("span_count_max", sc), sc)
+                    staged[h]["occurrences"] += 1
+                    if staged[h]["occurrences"] >= effective_min_occurrences:
+                        fingerprints[h] = staged[h]
+                        new_count += 1
+                        print(f"  [new] {fp['root_op']}  ->  "
+                              f"{fp['path'][:80]}{'...' if len(fp['path']) > 80 else ''}")
 
     # Prune fingerprints not seen in this learn window (unless auto-promoted,
     # which means they were deliberately accepted and should persist).
@@ -1424,113 +1649,134 @@ def cmd_watch(window_minutes: int = 10,
     # other traces of the same root_op this window (optional-path variant).
     watch_root_op_services: dict[str, set[str]] = defaultdict(set)
     for _, trace in fetched:
-        fp_pre = build_fingerprint(trace, known_root_ops=known_root_ops)
-        if fp_pre:
+        for fp_pre in build_fingerprint(trace, known_root_ops=known_root_ops):
             for svc in fp_pre.get("services", []):
                 watch_root_op_services[fp_pre["root_op"]].add(svc)
 
     seen_root_ops: set[str] = set()
     for trace_id, trace in fetched:
-        fp = build_fingerprint(trace, known_root_ops=known_root_ops)
-        if fp is None:
+        trace_fps = build_fingerprint(trace, known_root_ops=known_root_ops)
+        if not trace_fps:
             skipped += 1
             continue
 
-        checked += 1
-        root_svc_key = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
-        svc_checked[root_svc_key] += 1
-        all_downstream.update(fp.get("services", []))
-        seen_root_ops.add(fp["root_op"])
-        if fp["hash"] in alerted_hashes:
-            continue
+        for fp in trace_fps:
+            checked += 1
+            root_svc_key = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
+            svc_checked[root_svc_key] += 1
+            all_downstream.update(fp.get("services", []))
+            seen_root_ops.add(fp["root_op"])
+            if fp["hash"] in alerted_hashes:
+                continue
 
-        anomaly = classify_anomaly(fp, baseline,
-                                   watch_services=watch_root_op_services.get(fp["root_op"], set()),
-                                   environment=environment)
-        if anomaly:
-            alerted_hashes.add(fp["hash"])
-            svc_anomalies[root_svc_key] += 1
-            if anomaly["type"] == "NEW_FINGERPRINT":
-                new_hashes_seen.add(fp["hash"])
-                # Upsert a pending-promotion record so watch_hits persists
-                fps = baseline.setdefault("fingerprints", {})
-                if fp["hash"] not in fps:
-                    fps[fp["hash"]] = {
-                        "hash":          fp["hash"],
-                        "path":          fp["path"],
-                        "root_op":       fp["root_op"],
-                        "services":      fp["services"],
-                        "span_count":    fp["span_count"],
-                        "edge_count":    fp["edge_count"],
-                        "occurrences":   1,
-                        "watch_hits":    0,
-                        "auto_promoted": False,
-                        "promoted_at":   None,
-                        "first_seen":    datetime.now(timezone.utc).isoformat(),
-                    }
-            anomalies_found += 1
-            svc = root_svc_key
-            # Extract missing services from the message for MISSING_SERVICE anomalies
-            _missing = []
-            if anomaly["type"] == "MISSING_SERVICE":
-                _m = re.search(r"absent from '[^']+': (\[.*?\])", anomaly["message"])
-                if _m:
-                    try:
-                        _missing = json.loads(_m.group(1).replace("'", '"'))
-                    except Exception:
-                        pass
-            anomaly_list.append({
-                "anomaly_type":      anomaly["type"],
-                "service":           svc,
-                "root_op":           fp["root_op"],
-                "message":           anomaly["message"],
-                "detail":            anomaly["detail"],
-                "trace_id":          trace_id,
-                "services_in_trace": fp["services"],
-                "missing_services":  _missing,
-            })
-            print(f"\n  ANOMALY DETECTED")
-            print(f"    Type:    {anomaly['type']}")
-            print(f"    Message: {anomaly['message']}")
-            print(f"    Detail:  {anomaly['detail']}")
-            print(f"    TraceID: {trace_id}")
-            _log_alert({
-                "anomaly_type": anomaly["type"],
-                "environment":  environment or "all",
-                "service":      svc,
-                "root_op":      fp["root_op"],
-                "message":      anomaly["message"],
-                "detail":       anomaly["detail"],
-                "trace_id":     trace_id,
-                "services_in_trace": ", ".join(fp["services"]),
-            }, enabled=False)
-            try:
-                dims = {
-                    "anomaly_type":   anomaly["type"],
-                    "root_operation": fp["root_op"],
-                    "fp_hash":        fp["hash"],
-                    "sf_environment": environment or "all",
-                    "service":        fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"],
-                }
-                send_custom_event(
-                    event_type="trace.path.drift",
-                    dimensions=dims,
-                    properties={
-                        "message":       anomaly["message"],
-                        "detail":        anomaly["detail"],
-                        "trace_id":      trace_id,
-                        "path":          fp["path"],
-                        "services":      ",".join(fp["services"]),
-                        "span_count":    fp["span_count"],
+            anomaly = classify_anomaly(fp, baseline,
+                                       watch_services=watch_root_op_services.get(fp["root_op"], set()),
+                                       environment=environment)
+            if anomaly:
+                alerted_hashes.add(fp["hash"])
+                svc_anomalies[root_svc_key] += 1
+                if anomaly["type"] == "NEW_FINGERPRINT":
+                    new_hashes_seen.add(fp["hash"])
+                    # Upsert a pending-promotion record so watch_hits persists
+                    fps = baseline.setdefault("fingerprints", {})
+                    if fp["hash"] not in fps:
+                        fps[fp["hash"]] = {
+                            "hash":          fp["hash"],
+                            "path":          fp["path"],
+                            "root_op":       fp["root_op"],
+                            "services":      fp["services"],
+                            "span_count":    fp["span_count"],
+                            "edge_count":    fp["edge_count"],
+                            "occurrences":   1,
+                            "watch_hits":    0,
+                            "auto_promoted": False,
+                            "promoted_at":   None,
+                            "first_seen":    datetime.now(timezone.utc).isoformat(),
+                        }
+                anomalies_found += 1
+                svc = root_svc_key
+                # Extract missing services from the message for MISSING_SERVICE anomalies
+                _missing = []
+                if anomaly["type"] == "MISSING_SERVICE":
+                    _m = re.search(r"absent from '[^']+': (\[.*?\])", anomaly["message"])
+                    if _m:
+                        try:
+                            _missing = json.loads(_m.group(1).replace("'", '"'))
+                        except Exception:
+                            pass
+                anomaly_list.append({
+                    "anomaly_type":      anomaly["type"],
+                    "service":           svc,
+                    "root_op":           fp["root_op"],
+                    "message":           anomaly["message"],
+                    "detail":            anomaly["detail"],
+                    "trace_id":          trace_id,
+                    "services_in_trace": fp["services"],
+                    "missing_services":  _missing,
+                })
+                print(f"\n  ANOMALY DETECTED")
+                print(f"    Type:    {anomaly['type']}")
+                print(f"    Message: {anomaly['message']}")
+                print(f"    Detail:  {anomaly['detail']}")
+                print(f"    TraceID: {trace_id}")
+                _log_alert({
+                    "anomaly_type": anomaly["type"],
+                    "environment":  environment or "all",
+                    "service":      svc,
+                    "root_op":      fp["root_op"],
+                    "message":      anomaly["message"],
+                    "detail":       anomaly["detail"],
+                    "trace_id":     trace_id,
+                    "services_in_trace": ", ".join(fp["services"]),
+                }, enabled=False)
+                try:
+                    root_svc_for_dims = fp["root_op"].split(":")[0] if ":" in fp["root_op"] else fp["root_op"]
+                    dims = {
+                        "anomaly_type":   anomaly["type"],
+                        "root_operation": fp["root_op"],
+                        "fp_hash":        fp["hash"],
                         "sf_environment": environment or "all",
-                        "detector_tier": "tier2",
-                        "detector_name": "trace-path-drift",
-                    },
-                )
-                send_metric("behavioral_baseline.anomaly.count", 1, dims)
-                print(f"    Event sent (trace.path.drift)")
-            except Exception as e:
-                print(f"    Failed to send event: {e}", file=sys.stderr)
+                        "service":        root_svc_for_dims,
+                    }
+                    send_custom_event(
+                        event_type="trace.path.drift",
+                        dimensions=dims,
+                        properties={
+                            "message":       anomaly["message"],
+                            "detail":        anomaly["detail"],
+                            "trace_id":      trace_id,
+                            "path":          fp["path"],
+                            "services":      ",".join(fp["services"]),
+                            "missing_services": ",".join(_missing or [root_svc_for_dims]),
+                            "span_count":    fp["span_count"],
+                            "sf_environment": environment or "all",
+                            "detector_tier": "tier2",
+                            "detector_name": "trace-path-drift",
+                            # Dimensions (including "service") are searchable but never
+                            # returned by /v2/event/find — the olly frontend's
+                            # toBehavioralSignal() only resolves via metadata.service or
+                            # properties.service, so it must be duplicated here too or the
+                            # event gets silently dropped before it ever reaches the map.
+                            # anomaly_type/root_operation need the same duplication:
+                            # without them, signal.anomalyType stays undefined and
+                            # mergeBehavioralSignalsIntoGraph() never takes the
+                            # MISSING_SERVICE branch, so no ghost node is ever created.
+                            "service":       root_svc_for_dims,
+                            "anomaly_type":  anomaly["type"],
+                            "root_operation": fp["root_op"],
+                        },
+                    )
+                    # sf_service ties the alarm to the actual missing dependency's
+                    # APM Service Map node (native detector-alert badge), not the
+                    # caller — same convention provision_detectors.py already uses
+                    # for Tier 3/4 detectors so they show up natively on the map.
+                    for missing_svc in (_missing or [root_svc_for_dims]):
+                        send_metric("behavioral_baseline.anomaly.count", 1, {
+                            **dims, "sf_service": missing_svc,
+                        })
+                    print(f"    Event sent (trace.path.drift)")
+                except Exception as e:
+                    print(f"    Failed to send event: {e}", file=sys.stderr)
 
     # ── Silent root_op detection ───────────────────────────────────────────────
     # If a baseline root_op has zero traces in the watch window it means the
@@ -1563,8 +1809,12 @@ def cmd_watch(window_minutes: int = 10,
             continue
         if _is_noise_trace(root_op.split(":", 1)[-1] if ":" in root_op else root_op):
             continue
-        # Skip if any baseline entry for this root_op suppresses MISSING_SERVICE
-        if any(e.get("no_missing_service") for e in bl_entries):
+        # Services exempted from MISSING_SERVICE for this root_op — a blanket
+        # "ALL" skips the whole root_op (legacy); otherwise dominant_services
+        # is filtered below so an exemption for one service never masks a
+        # genuinely different missing service.
+        _exempt_silent = _exempt_services_for_root(bl_entries)
+        if _exempt_silent == "ALL":
             continue
         # Also skip if any span path in the baseline entries is a noise operation
         # (e.g. Eureka registration PUTs rooted at a service span like customers-service:PUT)
@@ -1594,7 +1844,7 @@ def cmd_watch(window_minutes: int = 10,
         dominant_services = {
             s for s, c in service_counts.items()
             if c / total_patterns >= dom_threshold
-        }
+        } - _exempt_silent
         if not dominant_services:
             continue
         silent_hash = hashlib.sha256(f"SILENT:{root_op}".encode()).hexdigest()[:16]
@@ -1643,13 +1893,29 @@ def cmd_watch(window_minutes: int = 10,
                     "detail":        f"Root op silent (0 traces in {window_minutes}m window)",
                     "path":          root_op,
                     "services":      ",".join(missing_svcs),
+                    "missing_services": ",".join(missing_svcs),
                     "span_count":    0,
                     "sf_environment": environment or "all",
                     "detector_tier": "tier2",
                     "detector_name": "trace-path-drift",
+                    # dimensions["service"] is searchable but never returned by
+                    # /v2/event/find — must duplicate in properties or the
+                    # frontend's toBehavioralSignal() silently drops the event.
+                    # Same applies to anomaly_type/root_operation — without them
+                    # signal.anomalyType stays undefined and
+                    # mergeBehavioralSignalsIntoGraph() never creates the ghost node.
+                    "service":       root_svc,
+                    "anomaly_type":  "MISSING_SERVICE",
+                    "root_operation": root_op,
                 },
             )
-            send_metric("behavioral_baseline.anomaly.count", 1, dims)
+            # sf_service ties the alarm to each actual missing dependency's APM
+            # Service Map node (native detector-alert badge), not the caller —
+            # same convention provision_detectors.py uses for Tier 3/4 detectors.
+            for missing_svc in missing_svcs:
+                send_metric("behavioral_baseline.anomaly.count", 1, {
+                    **dims, "sf_service": missing_svc,
+                })
             print(f"    Event sent (trace.path.drift)")
         except Exception as e:
             print(f"    Failed to send event: {e}", file=sys.stderr)
@@ -1895,12 +2161,31 @@ def cmd_overrides(action: str, root_op: str | None = None,
         if not root_op:
             print("Error: --clear requires root_op", file=sys.stderr)
             sys.exit(1)
-        if root_op in root_op_flags:
+        had_override = root_op in root_op_flags
+        if had_override:
             del root_op_flags[root_op]
             save_overrides(overrides, environment)
             print(f"  Cleared override for {root_op!r}")
         else:
             print(f"  No override found for {root_op!r}")
+
+        # The override-merge step (apply_overrides) bakes no_missing_service/
+        # exempt_services directly onto matching fingerprint entries in the
+        # baseline file, and clearing the override alone doesn't retroactively
+        # strip that — so a cleared override would otherwise keep suppressing
+        # MISSING_SERVICE forever via the stale baked-in flags. Strip them here.
+        baseline = load_baseline(environment)
+        cleared_entries = 0
+        for fp in baseline.get("fingerprints", {}).values():
+            if fp.get("root_op") != root_op:
+                continue
+            for stale_flag in ("no_missing_service", "exempt_services", "reason"):
+                if stale_flag in fp:
+                    del fp[stale_flag]
+                    cleared_entries += 1
+        if cleared_entries:
+            save_baseline(baseline, environment)
+            print(f"  Stripped stale flags from baseline entries for {root_op!r}")
         return
 
 

@@ -147,15 +147,15 @@ def compute_coverage(environment: str | None,
             if tid:
                 trace_ids.append(tid)
 
-    def _fetch_fp(trace_id: str) -> dict | None:
+    def _fetch_fp(trace_id: str) -> list[dict]:
         full = get_trace_full(trace_id)
         if not full:
-            return None
+            return []
         return build_fingerprint(full)
 
     with ThreadPoolExecutor(max_workers=min(len(trace_ids), 10)) as pool:
-        for fp in pool.map(_fetch_fp, trace_ids):
-            if fp:
+        for fps in pool.map(_fetch_fp, trace_ids):
+            for fp in fps:
                 live_by_root[fp["root_op"]].append(fp["hash"])
                 total_traces += 1
 

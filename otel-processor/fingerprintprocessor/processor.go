@@ -56,6 +56,12 @@ type fingerprintProcessor struct {
 	lastSeenRootOp map[string]time.Time // root_op -> last time a trace was seen
 	missingEmitted map[string]bool      // root_op -> true if MISSING_SERVICE already emitted (reset when seen again)
 
+	// errorDriftMu guards lastErrorDriftEmit, used to enforce
+	// ErrorSignatureDriftCooldown per-hash and avoid re-firing
+	// error.signature.drift on every trace flush before promotion.
+	errorDriftMu       sync.Mutex
+	lastErrorDriftEmit map[string]time.Time // sig.hash -> last time error.signature.drift was emitted
+
 	startTime time.Time // used for warm-up window check
 
 	// bootstrapMu guards bootstrapFPs, which buffers the last-seen traceFingerprint
@@ -92,16 +98,17 @@ func newFingerprintProcessor(logger *zap.Logger, cfg *Config, next consumer.Trac
 		metrics:        newMetricsTracker(cfg, emit).withLogger(logger),
 		selfMetrics:    newSelfMetrics(cfg.SplunkIngestURL, cfg.SplunkApiToken, cfg.Environment),
 		// dbQueries tracker is wired in below (needs p.inWarmup reference)
-		dedup:          dedup,
-		buffers:        make(map[string]*traceBuffer),
-		seenCounts:     seenCounts,
-		seenCountsPath: seenCountsPath,
-		activeDrifts:   make(map[string]string),
-		lastSeenRootOp: make(map[string]time.Time),
-		missingEmitted: make(map[string]bool),
-		bootstrapFPs:   make(map[string]*traceFingerprint),
-		startTime:      time.Now(),
-		stopCh:         make(chan struct{}),
+		dedup:              dedup,
+		buffers:            make(map[string]*traceBuffer),
+		seenCounts:         seenCounts,
+		seenCountsPath:     seenCountsPath,
+		activeDrifts:       make(map[string]string),
+		lastSeenRootOp:     make(map[string]time.Time),
+		missingEmitted:     make(map[string]bool),
+		lastErrorDriftEmit: make(map[string]time.Time),
+		bootstrapFPs:       make(map[string]*traceFingerprint),
+		startTime:          time.Now(),
+		stopCh:             make(chan struct{}),
 	}
 	p.metrics.selfMetrics = p.selfMetrics
 	p.topology.onDriftEmitted = func() { p.selfMetrics.TopologyDrifts.Add(1) }
@@ -841,16 +848,46 @@ func (p *fingerprintProcessor) analyzeErrorSignatures(buf *traceBuffer) {
 			zap.String("hash", sig.hash),
 			zap.String("environment", p.cfg.Environment),
 		)
-		if !p.inWarmup() && p.tryClaimEvent("error.signature.drift", sig.hash) {
-			if err := p.emitter.emitErrorDrift(p.cfg.Environment, buf.traceID, sig); err != nil {
-				p.logger.Warn("failed to emit error drift event", zap.Error(err))
-			} else {
-				p.selfMetrics.ErrorEvents.Add(1)
-				p.causality.record(sig.service, "NEW_ERROR_SIGNATURE", time.Now())
+		if !p.inWarmup() {
+			if !p.claimErrorDriftCooldown(sig.hash) {
+				p.logger.Info("error signature drift suppressed by cooldown",
+					zap.String("hash", sig.hash),
+					zap.String("service", sig.service),
+				)
+			} else if p.tryClaimEvent("error.signature.drift", sig.hash) {
+				if err := p.emitter.emitErrorDrift(p.cfg.Environment, buf.traceID, sig); err != nil {
+					p.logger.Warn("failed to emit error drift event", zap.Error(err))
+				} else {
+					p.selfMetrics.ErrorEvents.Add(1)
+					p.causality.record(sig.service, "NEW_ERROR_SIGNATURE", time.Now())
+				}
 			}
 		}
 		p.maybePromoteError(sig)
 	}
+}
+
+// claimErrorDriftCooldown atomically checks whether hash is still within
+// ErrorSignatureDriftCooldown and, if not, claims the cooldown window by
+// recording now as the last-emit time — in the same locked step as the
+// check. This must be a single atomic claim rather than a separate
+// check-then-mark-after-emit: concurrent trace-buffer flushes for the same
+// hash (e.g. from concurrent otlp requests) can each pass a check performed
+// before the slow network emit call completes, letting several emissions
+// slip through the cooldown window. Returns true if the caller should
+// proceed to emit. tryClaimEvent still separately dedups across pods.
+func (p *fingerprintProcessor) claimErrorDriftCooldown(hash string) bool {
+	cooldown := p.cfg.ErrorSignatureDriftCooldown
+	p.errorDriftMu.Lock()
+	defer p.errorDriftMu.Unlock()
+	now := time.Now()
+	if cooldown > 0 {
+		if last, ok := p.lastErrorDriftEmit[hash]; ok && now.Sub(last) < cooldown {
+			return false
+		}
+	}
+	p.lastErrorDriftEmit[hash] = now
+	return true
 }
 
 // maybePromoteError increments the seen counter for sig.hash and promotes the

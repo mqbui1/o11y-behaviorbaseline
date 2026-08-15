@@ -22,6 +22,14 @@ var (
 	_reLitNum = regexp.MustCompile(`\b\d+\b`)
 	// Replace IN (...) lists: IN (1,2,3) → IN (?)
 	_reInList = regexp.MustCompile(`(?i)\bIN\s*\([^)]+\)`)
+	// Replace UUID-style tokens (8-4-4-4-12 hex groups): e4fa2b91-1234-... → ?
+	_reUUID = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+	// Replace long hex/alphanumeric identifiers (session ids, cache keys,
+	// content hashes). Non-SQL stores like Redis embed the key/id directly
+	// in the operation (e.g. "cart:e4fa2b91b3c1") with no quoting, so without
+	// this the template never stabilizes and every new session id looks like
+	// a brand-new query plan, flooding db.query.new_plan indefinitely.
+	_reHexID = regexp.MustCompile(`\b[0-9a-fA-F]{8,}\b`)
 	// Collapse whitespace
 	_reWS = regexp.MustCompile(`\s+`)
 )
@@ -33,9 +41,12 @@ var (
 //	SELECT * FROM owners WHERE id = 42      → SELECT * FROM owners WHERE id = ?
 //	SELECT * FROM owners WHERE name = 'foo' → SELECT * FROM owners WHERE name = ?
 //	INSERT INTO pets (name) VALUES ('Fluffy')→ INSERT INTO pets (name) VALUES (?)
+//	HGET cart:e4fa2b91b3c1 items             → HGET CART:? ITEMS
 func normalizeQuery(q string) string {
 	q = _reInList.ReplaceAllString(q, "IN (?)")
 	q = _reLitStr.ReplaceAllString(q, "?")
+	q = _reUUID.ReplaceAllString(q, "?")
+	q = _reHexID.ReplaceAllString(q, "?")
 	q = _reLitNum.ReplaceAllString(q, "?")
 	q = _reWS.ReplaceAllString(strings.TrimSpace(q), " ")
 	return strings.ToUpper(q)
@@ -57,6 +68,10 @@ type queryWindow struct {
 	baselineCount  int
 	// plan / template tracking: first time seen, fires a new-query-plan event
 	firstSeenAt time.Time
+	// lastSlowEmitAt is when a db.query.slow event was last emitted for this
+	// template, used to enforce DbQuerySlowCooldown and avoid re-firing on
+	// every trace flush while the slowdown persists.
+	lastSlowEmitAt time.Time
 }
 
 // ── dbQueryTracker ────────────────────────────────────────────────────────────
@@ -209,6 +224,10 @@ func (d *dbQueryTracker) observe(spans []spanInfo, env string) {
 
 		zScore := (currentMean - w.baselineMean) / stddev
 		if zScore >= d.cfg.DbQueryLatencyZScore {
+			cooldown := d.cfg.DbQuerySlowCooldown
+			if cooldown > 0 && !w.lastSlowEmitAt.IsZero() && now.Sub(w.lastSlowEmitAt) < cooldown {
+				continue // already alerted for this template recently — suppress repeat
+			}
 			d.logger.Info("slow db query detected",
 				zap.String("service", k.svc),
 				zap.String("db_system", k.dbSystem),
@@ -221,8 +240,11 @@ func (d *dbQueryTracker) observe(spans []spanInfo, env string) {
 			if err := d.emitter.emitSlowQuery(env, k.svc, k.dbSystem, k.template, k.hash,
 				currentMean, w.baselineMean, stddev, zScore); err != nil {
 				d.logger.Warn("failed to emit slow query event", zap.Error(err))
-			} else if d.causality != nil {
-				d.causality.record(k.svc, "SLOW_QUERY", time.Now())
+			} else {
+				w.lastSlowEmitAt = now
+				if d.causality != nil {
+					d.causality.record(k.svc, "SLOW_QUERY", time.Now())
+				}
 			}
 		}
 	}
