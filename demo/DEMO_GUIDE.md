@@ -51,7 +51,7 @@ Use this section when deploying to a brand-new EC2/k3d cluster. Skip to **Prereq
 ### Step 1 — Extract tokens from the cluster (on EC2)
 ```bash
 # SSH into EC2
-ssh -p 2222 splunk@<ec2-ip>  # password: ***REDACTED***
+ssh -p 2222 splunk@<ec2-ip>  # password: <your-ec2-password>
 
 # Decode workshop tokens
 kubectl get secret workshop-secret -o jsonpath='{.data.access_token}' | base64 -d && echo  # INGEST token
@@ -63,7 +63,7 @@ kubectl get secret workshop-secret -o jsonpath='{.data.env}'          | base64 -
 ```bash
 # Edit .env:
 EC2_IP=<new-ec2-ip>
-EC2_PASSWORD=***REDACTED***
+EC2_PASSWORD=<your-ec2-password>
 ENV=<env-name>                      # e.g. mqbtest-f0d4-workshop
 SPLUNK_INGEST_TOKEN=<ingest-token>   # from access_token above
 SPLUNK_ACCESS_TOKEN=<api-token>      # from api_token above
